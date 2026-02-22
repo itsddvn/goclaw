@@ -7,6 +7,7 @@ type CronJob struct {
 	ID             string       `json:"id"`
 	Name           string       `json:"name"`
 	AgentID        string       `json:"agentId,omitempty"`
+	UserID         string       `json:"userId,omitempty"`
 	Enabled        bool         `json:"enabled"`
 	Schedule       CronSchedule `json:"schedule"`
 	Payload        CronPayload  `json:"payload"`
@@ -52,6 +53,14 @@ type CronRunLogEntry struct {
 	Summary string `json:"summary,omitempty"`
 }
 
+// CronJobResult is the output of a cron job handler execution.
+type CronJobResult struct {
+	Content      string `json:"content"`
+	InputTokens  int    `json:"inputTokens,omitempty"`
+	OutputTokens int    `json:"outputTokens,omitempty"`
+	DurationMS   int64  `json:"durationMs,omitempty"`
+}
+
 // CronJobPatch holds optional fields for updating a job.
 type CronJobPatch struct {
 	Name           string        `json:"name,omitempty"`
@@ -67,9 +76,9 @@ type CronJobPatch struct {
 
 // CronStore manages scheduled jobs.
 type CronStore interface {
-	AddJob(name string, schedule CronSchedule, message string, deliver bool, channel, to, agentID string) (*CronJob, error)
+	AddJob(name string, schedule CronSchedule, message string, deliver bool, channel, to, agentID, userID string) (*CronJob, error)
 	GetJob(jobID string) (*CronJob, bool)
-	ListJobs(includeDisabled bool) []CronJob
+	ListJobs(includeDisabled bool, agentID, userID string) []CronJob
 	RemoveJob(jobID string) error
 	UpdateJob(jobID string, patch CronJobPatch) (*CronJob, error)
 	EnableJob(jobID string, enabled bool) error
@@ -81,7 +90,7 @@ type CronStore interface {
 	Stop()
 
 	// Job execution
-	SetOnJob(handler func(job *CronJob) (string, error))
+	SetOnJob(handler func(job *CronJob) (*CronJobResult, error))
 	RunJob(jobID string, force bool) (ran bool, reason string, err error)
 
 	// Due job detection (for scheduler)

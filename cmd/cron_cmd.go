@@ -40,7 +40,7 @@ func cronListCmd() *cobra.Command {
 				return
 			}
 			svc := loadCronStore()
-			jobs := svc.ListJobs(showDisabled)
+			jobs := svc.ListJobs(showDisabled, "", "")
 			printCronJobs(jobs, jsonOutput)
 		},
 	}

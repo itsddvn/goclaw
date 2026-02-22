@@ -330,12 +330,12 @@ func resolveCronAgent(agentID string, agents *agent.Router, cfg *config.Config) 
 }
 
 // makeCronJobHandler creates a cron job handler that sends job messages through the agent.
-func makeCronJobHandler(agents *agent.Router, msgBus *bus.MessageBus, cfg *config.Config) func(job *store.CronJob) (string, error) {
-	return func(job *store.CronJob) (string, error) {
+func makeCronJobHandler(agents *agent.Router, msgBus *bus.MessageBus, cfg *config.Config) func(job *store.CronJob) (*store.CronJobResult, error) {
+	return func(job *store.CronJob) (*store.CronJobResult, error) {
 		agentID := resolveCronAgent(job.AgentID, agents, cfg)
 		loop, err := agents.Get(agentID)
 		if err != nil {
-			return "", fmt.Errorf("agent %s not found: %w", agentID, err)
+			return nil, fmt.Errorf("agent %s not found: %w", agentID, err)
 		}
 
 		sessionKey := sessions.BuildCronSessionKey(agentID, job.ID, fmt.Sprintf("cron-%s", job.ID))
@@ -349,11 +349,12 @@ func makeCronJobHandler(agents *agent.Router, msgBus *bus.MessageBus, cfg *confi
 			Message:    job.Payload.Message,
 			Channel:    channel,
 			ChatID:     job.Payload.To,
+			UserID:     job.UserID,
 			RunID:      fmt.Sprintf("cron-%s", job.ID),
 			Stream:     false,
 		})
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
 		// If job wants delivery to a channel, publish outbound
@@ -365,7 +366,15 @@ func makeCronJobHandler(agents *agent.Router, msgBus *bus.MessageBus, cfg *confi
 			})
 		}
 
-		return result.Content, nil
+		cronResult := &store.CronJobResult{
+			Content: result.Content,
+		}
+		if result.Usage != nil {
+			cronResult.InputTokens = result.Usage.PromptTokens
+			cronResult.OutputTokens = result.Usage.CompletionTokens
+		}
+
+		return cronResult, nil
 	}
 }
 

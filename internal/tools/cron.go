@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -108,21 +109,24 @@ func (t *CronTool) Execute(ctx context.Context, args map[string]interface{}) *Re
 		return ErrorResult("action parameter is required")
 	}
 
+	agentID := resolveAgentIDString(ctx)
+	userID := store.UserIDFromContext(ctx)
+
 	switch action {
 	case "status":
 		return t.handleStatus()
 	case "list":
-		return t.handleList(args)
+		return t.handleList(args, agentID, userID)
 	case "add":
-		return t.handleAdd(args)
+		return t.handleAdd(ctx, args, agentID, userID)
 	case "update":
-		return t.handleUpdate(args)
+		return t.handleUpdate(args, agentID, userID)
 	case "remove":
-		return t.handleRemove(args)
+		return t.handleRemove(args, agentID, userID)
 	case "run":
-		return t.handleRun(args)
+		return t.handleRun(args, agentID, userID)
 	case "runs":
-		return t.handleRuns(args)
+		return t.handleRuns(args, agentID, userID)
 	default:
 		return ErrorResult(fmt.Sprintf("unknown action: %s", action))
 	}
@@ -134,9 +138,9 @@ func (t *CronTool) handleStatus() *Result {
 	return NewResult(string(data))
 }
 
-func (t *CronTool) handleList(args map[string]interface{}) *Result {
+func (t *CronTool) handleList(args map[string]interface{}, agentID, userID string) *Result {
 	includeDisabled, _ := args["includeDisabled"].(bool)
-	jobs := t.cronStore.ListJobs(includeDisabled)
+	jobs := t.cronStore.ListJobs(includeDisabled, agentID, userID)
 
 	result := map[string]interface{}{
 		"jobs":  jobs,
@@ -146,7 +150,7 @@ func (t *CronTool) handleList(args map[string]interface{}) *Result {
 	return NewResult(string(data))
 }
 
-func (t *CronTool) handleAdd(args map[string]interface{}) *Result {
+func (t *CronTool) handleAdd(ctx context.Context, args map[string]interface{}, agentID, userID string) *Result {
 	jobObj, ok := args["job"].(map[string]interface{})
 	if !ok {
 		return ErrorResult("job object is required for add action")
@@ -179,6 +183,9 @@ func (t *CronTool) handleAdd(args map[string]interface{}) *Result {
 	case "at":
 		if v, ok := numberFromMap(scheduleObj, "atMs"); ok {
 			ms := int64(v)
+			if ms <= time.Now().UnixMilli() {
+				return ErrorResult(fmt.Sprintf("job.schedule.atMs is in the past (%d). Use a future Unix timestamp in milliseconds. Current time is %d ms", ms, time.Now().UnixMilli()))
+			}
 			schedule.AtMS = &ms
 		} else {
 			return ErrorResult("job.schedule.atMs is required for 'at' schedule")
@@ -204,9 +211,23 @@ func (t *CronTool) handleAdd(args map[string]interface{}) *Result {
 	deliver, _ := jobObj["deliver"].(bool)
 	channel, _ := jobObj["channel"].(string)
 	to, _ := jobObj["to"].(string)
-	agentID, _ := jobObj["agentId"].(string)
 
-	job, err := t.cronStore.AddJob(name, schedule, message, deliver, channel, to, agentID)
+	// Auto-fill channel and to from context if deliver is requested but not specified
+	if deliver {
+		if channel == "" {
+			channel = ToolChannelFromCtx(ctx)
+		}
+		if to == "" {
+			to = ToolChatIDFromCtx(ctx)
+		}
+	}
+
+	// Use agent ID from job object if explicitly provided, otherwise from context
+	if explicit, _ := jobObj["agentId"].(string); explicit != "" {
+		agentID = explicit
+	}
+
+	job, err := t.cronStore.AddJob(name, schedule, message, deliver, channel, to, agentID, userID)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("failed to create cron job: %v", err))
 	}
@@ -215,10 +236,33 @@ func (t *CronTool) handleAdd(args map[string]interface{}) *Result {
 	return NewResult(string(data))
 }
 
-func (t *CronTool) handleUpdate(args map[string]interface{}) *Result {
+// checkJobOwnership validates that the job belongs to the current agent+user scope.
+// In standalone mode (empty agentID/userID), all jobs are accessible.
+func (t *CronTool) checkJobOwnership(jobID, agentID, userID string) (*store.CronJob, *Result) {
+	job, ok := t.cronStore.GetJob(jobID)
+	if !ok {
+		return nil, ErrorResult(fmt.Sprintf("job %s not found", jobID))
+	}
+
+	// In managed mode, verify ownership
+	if agentID != "" && job.AgentID != agentID {
+		return nil, ErrorResult(fmt.Sprintf("job %s not found", jobID))
+	}
+	if userID != "" && job.UserID != userID {
+		return nil, ErrorResult(fmt.Sprintf("job %s not found", jobID))
+	}
+
+	return job, nil
+}
+
+func (t *CronTool) handleUpdate(args map[string]interface{}, agentID, userID string) *Result {
 	jobID := resolveJobID(args)
 	if jobID == "" {
 		return ErrorResult("jobId is required for update action")
+	}
+
+	if _, errResult := t.checkJobOwnership(jobID, agentID, userID); errResult != nil {
+		return errResult
 	}
 
 	patchObj, ok := args["patch"].(map[string]interface{})
@@ -240,10 +284,14 @@ func (t *CronTool) handleUpdate(args map[string]interface{}) *Result {
 	return NewResult(string(data))
 }
 
-func (t *CronTool) handleRemove(args map[string]interface{}) *Result {
+func (t *CronTool) handleRemove(args map[string]interface{}, agentID, userID string) *Result {
 	jobID := resolveJobID(args)
 	if jobID == "" {
 		return ErrorResult("jobId is required for remove action")
+	}
+
+	if _, errResult := t.checkJobOwnership(jobID, agentID, userID); errResult != nil {
+		return errResult
 	}
 
 	if err := t.cronStore.RemoveJob(jobID); err != nil {
@@ -254,10 +302,14 @@ func (t *CronTool) handleRemove(args map[string]interface{}) *Result {
 	return NewResult(string(data))
 }
 
-func (t *CronTool) handleRun(args map[string]interface{}) *Result {
+func (t *CronTool) handleRun(args map[string]interface{}, agentID, userID string) *Result {
 	jobID := resolveJobID(args)
 	if jobID == "" {
 		return ErrorResult("jobId is required for run action")
+	}
+
+	if _, errResult := t.checkJobOwnership(jobID, agentID, userID); errResult != nil {
+		return errResult
 	}
 
 	runMode, _ := args["runMode"].(string)
@@ -279,8 +331,15 @@ func (t *CronTool) handleRun(args map[string]interface{}) *Result {
 	return NewResult(string(data))
 }
 
-func (t *CronTool) handleRuns(args map[string]interface{}) *Result {
+func (t *CronTool) handleRuns(args map[string]interface{}, agentID, userID string) *Result {
 	jobID := resolveJobID(args)
+
+	// Validate ownership if a specific job is requested
+	if jobID != "" {
+		if _, errResult := t.checkJobOwnership(jobID, agentID, userID); errResult != nil {
+			return errResult
+		}
+	}
 
 	limit := 20
 	if v, ok := numberFromMap(args, "limit"); ok {

@@ -23,7 +23,7 @@ const defaultCronCacheTTL = 2 * time.Minute
 type PGCronStore struct {
 	db      *sql.DB
 	mu      sync.Mutex
-	onJob   func(job *store.CronJob) (string, error)
+	onJob   func(job *store.CronJob) (*store.CronJobResult, error)
 	running bool
 	stop    chan struct{}
 
@@ -47,7 +47,7 @@ func (s *PGCronStore) SetRetryConfig(cfg cron.RetryConfig) {
 	s.retryCfg = cfg
 }
 
-func (s *PGCronStore) AddJob(name string, schedule store.CronSchedule, message string, deliver bool, channel, to, agentID string) (*store.CronJob, error) {
+func (s *PGCronStore) AddJob(name string, schedule store.CronSchedule, message string, deliver bool, channel, to, agentID, userID string) (*store.CronJob, error) {
 	payload := store.CronPayload{
 		Kind: "agent_turn", Message: message, Deliver: deliver, Channel: channel, To: to,
 	}
@@ -79,14 +79,24 @@ func (s *PGCronStore) AddJob(name string, schedule store.CronSchedule, message s
 		}
 	}
 
+	var userIDPtr *string
+	if userID != "" {
+		userIDPtr = &userID
+	}
+
+	var intervalMS *int64
+	if schedule.EveryMS != nil {
+		intervalMS = schedule.EveryMS
+	}
+
 	nextRun := computeNextRun(&schedule, now)
 
 	_, err := s.db.Exec(
-		`INSERT INTO cron_jobs (id, agent_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
-		 payload, delete_after_run, next_run_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, true, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-		id, agentUUID, name, scheduleKind, cronExpr, runAt, tz,
-		payloadJSON, deleteAfterRun, nextRun, now, now,
+		`INSERT INTO cron_jobs (id, agent_id, user_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
+		 interval_ms, payload, delete_after_run, next_run_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		id, agentUUID, userIDPtr, name, scheduleKind, cronExpr, runAt, tz,
+		intervalMS, payloadJSON, deleteAfterRun, nextRun, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create cron job: %w", err)
@@ -110,16 +120,35 @@ func (s *PGCronStore) GetJob(jobID string) (*store.CronJob, bool) {
 	return job, true
 }
 
-func (s *PGCronStore) ListJobs(includeDisabled bool) []store.CronJob {
-	q := `SELECT id, agent_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
-		 payload, delete_after_run, next_run_at, last_run_at, last_status, last_error,
-		 created_at, updated_at FROM cron_jobs`
+func (s *PGCronStore) ListJobs(includeDisabled bool, agentID, userID string) []store.CronJob {
+	q := `SELECT id, agent_id, user_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
+		 interval_ms, payload, delete_after_run, next_run_at, last_run_at, last_status, last_error,
+		 created_at, updated_at FROM cron_jobs WHERE 1=1`
+
+	var args []interface{}
+	argIdx := 1
+
 	if !includeDisabled {
-		q += " WHERE enabled = true"
+		q += fmt.Sprintf(" AND enabled = $%d", argIdx)
+		args = append(args, true)
+		argIdx++
 	}
+	if agentID != "" {
+		if aid, err := uuid.Parse(agentID); err == nil {
+			q += fmt.Sprintf(" AND agent_id = $%d", argIdx)
+			args = append(args, aid)
+			argIdx++
+		}
+	}
+	if userID != "" {
+		q += fmt.Sprintf(" AND user_id = $%d", argIdx)
+		args = append(args, userID)
+		argIdx++
+	}
+
 	q += " ORDER BY created_at DESC"
 
-	rows, err := s.db.Query(q)
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil
 	}
@@ -309,7 +338,7 @@ func (s *PGCronStore) Stop() {
 	s.running = false
 }
 
-func (s *PGCronStore) SetOnJob(handler func(job *store.CronJob) (string, error)) {
+func (s *PGCronStore) SetOnJob(handler func(job *store.CronJob) (*store.CronJobResult, error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onJob = handler
@@ -330,7 +359,11 @@ func (s *PGCronStore) RunJob(jobID string, force bool) (bool, string, error) {
 	}
 
 	result, err := handler(job)
-	return true, result, err
+	content := ""
+	if result != nil {
+		content = result.Content
+	}
+	return true, content, err
 }
 
 func (s *PGCronStore) GetDueJobs(now time.Time) []store.CronJob {
@@ -356,8 +389,8 @@ func (s *PGCronStore) GetDueJobs(now time.Time) []store.CronJob {
 // refreshJobCache reloads all enabled jobs from DB. Must be called with mu held.
 func (s *PGCronStore) refreshJobCache() {
 	rows, err := s.db.Query(
-		`SELECT id, agent_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
-		 payload, delete_after_run, next_run_at, last_run_at, last_status, last_error,
+		`SELECT id, agent_id, user_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
+		 interval_ms, payload, delete_after_run, next_run_at, last_run_at, last_status, last_error,
 		 created_at, updated_at FROM cron_jobs WHERE enabled = true`)
 	if err != nil {
 		return
@@ -387,8 +420,8 @@ func (s *PGCronStore) InvalidateCache() {
 
 func (s *PGCronStore) scanJob(id uuid.UUID) (*store.CronJob, error) {
 	row := s.db.QueryRow(
-		`SELECT id, agent_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
-		 payload, delete_after_run, next_run_at, last_run_at, last_status, last_error,
+		`SELECT id, agent_id, user_id, name, enabled, schedule_kind, cron_expression, run_at, timezone,
+		 interval_ms, payload, delete_after_run, next_run_at, last_run_at, last_status, last_error,
 		 created_at, updated_at FROM cron_jobs WHERE id = $1`, id)
 	return scanCronSingleRow(row)
 }
@@ -427,9 +460,23 @@ func (s *PGCronStore) checkAndRunDueJobs() {
 		}
 
 		jobCopy := job
-		result, attempts, err := cron.ExecuteWithRetry(func() (string, error) {
-			return handler(&jobCopy)
+		startTime := time.Now()
+
+		// Wrap handler to fit ExecuteWithRetry's (string, error) signature
+		var lastResult *store.CronJobResult
+		resultStr, attempts, err := cron.ExecuteWithRetry(func() (string, error) {
+			r, e := handler(&jobCopy)
+			if e != nil {
+				return "", e
+			}
+			lastResult = r
+			if r != nil {
+				return r.Content, nil
+			}
+			return "", nil
 		}, s.retryCfg)
+
+		durationMS := time.Since(startTime).Milliseconds()
 
 		if attempts > 1 {
 			slog.Info("cron job retried", "id", job.ID, "attempts", attempts, "success", err == nil)
@@ -444,18 +491,29 @@ func (s *PGCronStore) checkAndRunDueJobs() {
 			lastError = &errStr
 		}
 
+		// Extract token usage from handler result
+		var inputTokens, outputTokens int
+		if lastResult != nil {
+			inputTokens = lastResult.InputTokens
+			outputTokens = lastResult.OutputTokens
+		}
+
 		// Log run
 		logID := uuid.Must(uuid.NewV7())
 		var summary *string
 		if err == nil {
-			s := cron.TruncateOutput(result)
+			s := cron.TruncateOutput(resultStr)
 			summary = &s
 		}
 		if id, parseErr := uuid.Parse(job.ID); parseErr == nil {
+			var agentUUID *uuid.UUID
+			if aid, aidErr := uuid.Parse(job.AgentID); aidErr == nil {
+				agentUUID = &aid
+			}
 			s.db.Exec(
-				`INSERT INTO cron_run_logs (id, job_id, status, error, summary, ran_at)
-				 VALUES ($1, $2, $3, $4, $5, $6)`,
-				logID, id, status, lastError, summary, now,
+				`INSERT INTO cron_run_logs (id, job_id, agent_id, status, error, summary, duration_ms, input_tokens, output_tokens, ran_at)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+				logID, id, agentUUID, status, lastError, summary, durationMS, inputTokens, outputTokens, now,
 			)
 		}
 
@@ -489,15 +547,17 @@ type cronRowScanner interface {
 func scanCronRow(row cronRowScanner) (*store.CronJob, error) {
 	var id uuid.UUID
 	var agentID *uuid.UUID
+	var userID *string
 	var name, scheduleKind string
 	var enabled, deleteAfterRun bool
 	var cronExpr, tz, lastStatus, lastError *string
 	var runAt, nextRunAt, lastRunAt *time.Time
+	var intervalMS *int64
 	var payloadJSON []byte
 	var createdAt, updatedAt time.Time
 
-	err := row.Scan(&id, &agentID, &name, &enabled, &scheduleKind, &cronExpr, &runAt, &tz,
-		&payloadJSON, &deleteAfterRun, &nextRunAt, &lastRunAt, &lastStatus, &lastError,
+	err := row.Scan(&id, &agentID, &userID, &name, &enabled, &scheduleKind, &cronExpr, &runAt, &tz,
+		&intervalMS, &payloadJSON, &deleteAfterRun, &nextRunAt, &lastRunAt, &lastStatus, &lastError,
 		&createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
@@ -522,12 +582,18 @@ func scanCronRow(row cronRowScanner) (*store.CronJob, error) {
 	if agentID != nil {
 		job.AgentID = agentID.String()
 	}
+	if userID != nil {
+		job.UserID = *userID
+	}
 	if cronExpr != nil {
 		job.Schedule.Expr = *cronExpr
 	}
 	if runAt != nil {
 		ms := runAt.UnixMilli()
 		job.Schedule.AtMS = &ms
+	}
+	if intervalMS != nil {
+		job.Schedule.EveryMS = intervalMS
 	}
 	if tz != nil {
 		job.Schedule.TZ = *tz

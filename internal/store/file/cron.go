@@ -19,7 +19,7 @@ func NewFileCronStore(svc *cron.Service) *FileCronStore {
 // Service returns the underlying cron.Service for direct access during migration.
 func (f *FileCronStore) Service() *cron.Service { return f.svc }
 
-func (f *FileCronStore) AddJob(name string, schedule store.CronSchedule, message string, deliver bool, channel, to, agentID string) (*store.CronJob, error) {
+func (f *FileCronStore) AddJob(name string, schedule store.CronSchedule, message string, deliver bool, channel, to, agentID, userID string) (*store.CronJob, error) {
 	cronSched := toCronSchedule(schedule)
 	job, err := f.svc.AddJob(name, cronSched, message, deliver, channel, to, agentID)
 	if err != nil {
@@ -38,7 +38,7 @@ func (f *FileCronStore) GetJob(jobID string) (*store.CronJob, bool) {
 	return &result, true
 }
 
-func (f *FileCronStore) ListJobs(includeDisabled bool) []store.CronJob {
+func (f *FileCronStore) ListJobs(includeDisabled bool, agentID, userID string) []store.CronJob {
 	jobs := f.svc.ListJobs(includeDisabled)
 	result := make([]store.CronJob, len(jobs))
 	for i, j := range jobs {
@@ -87,10 +87,17 @@ func (f *FileCronStore) Status() map[string]interface{} {
 func (f *FileCronStore) Start() error { return f.svc.Start() }
 func (f *FileCronStore) Stop()        { f.svc.Stop() }
 
-func (f *FileCronStore) SetOnJob(handler func(job *store.CronJob) (string, error)) {
+func (f *FileCronStore) SetOnJob(handler func(job *store.CronJob) (*store.CronJobResult, error)) {
 	f.svc.SetOnJob(func(j *cron.Job) (string, error) {
 		sj := cronJobToStore(j)
-		return handler(&sj)
+		result, err := handler(&sj)
+		if err != nil {
+			return "", err
+		}
+		if result != nil {
+			return result.Content, nil
+		}
+		return "", nil
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -53,7 +54,14 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 	return func(agentKey string) (Agent, error) {
 		ctx := context.Background()
 
-		ag, err := deps.AgentStore.GetByKey(ctx, agentKey)
+		// Support lookup by UUID (e.g. from cron jobs that store agent_id as UUID)
+		var ag *store.AgentData
+		var err error
+		if id, parseErr := uuid.Parse(agentKey); parseErr == nil {
+			ag, err = deps.AgentStore.GetByID(ctx, id)
+		} else {
+			ag, err = deps.AgentStore.GetByKey(ctx, agentKey)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("agent not found: %s", agentKey)
 		}

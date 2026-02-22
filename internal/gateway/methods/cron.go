@@ -40,7 +40,7 @@ func (m *CronMethods) handleList(_ context.Context, client *gateway.Client, req 
 		json.Unmarshal(req.Params, &params)
 	}
 
-	jobs := m.service.ListJobs(params.IncludeDisabled)
+	jobs := m.service.ListJobs(params.IncludeDisabled, "", "")
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
 		"jobs":   jobs,
@@ -75,7 +75,7 @@ func (m *CronMethods) handleCreate(_ context.Context, client *gateway.Client, re
 		return
 	}
 
-	job, err := m.service.AddJob(params.Name, params.Schedule, params.Message, params.Deliver, params.Channel, params.To, params.AgentID)
+	job, err := m.service.AddJob(params.Name, params.Schedule, params.Message, params.Deliver, params.Channel, params.To, params.AgentID, "")
 	if err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, err.Error()))
 		return
