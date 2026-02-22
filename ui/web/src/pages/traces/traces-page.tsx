@@ -1,0 +1,178 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Activity, RefreshCw, Search } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/shared/page-header";
+import { EmptyState } from "@/components/shared/empty-state";
+import { TableSkeleton } from "@/components/shared/loading-skeleton";
+import { useWsEvent } from "@/hooks/use-ws-event";
+import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
+import { Events } from "@/api/protocol";
+import { formatDate, formatDuration, formatTokens, computeDurationMs } from "@/lib/format";
+import { useTraces, type TraceData } from "./hooks/use-traces";
+import { TraceDetailDialog } from "./trace-detail-dialog";
+import { useMinLoading } from "@/hooks/use-min-loading";
+import type { AgentEventPayload } from "@/types/chat";
+
+export function TracesPage() {
+  const { traces, loading, load, getTrace } = useTraces();
+  const spinning = useMinLoading(loading);
+  const [agentFilter, setAgentFilter] = useState("");
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+
+  // Ref to capture current filter for debounced callback
+  const agentFilterRef = useRef(agentFilter);
+  agentFilterRef.current = agentFilter;
+
+  useEffect(() => {
+    load({ limit: 50 });
+  }, [load]);
+
+  const handleRefresh = () => {
+    load({
+      agentId: agentFilter || undefined,
+      limit: 50,
+    });
+  };
+
+  // Auto-refresh when any agent run starts/completes (traces are created synchronously at run start)
+  const debouncedRefresh = useDebouncedCallback(() => {
+    load({
+      agentId: agentFilterRef.current || undefined,
+      limit: 50,
+    });
+  }, 3000);
+
+  const handleAgentEvent = useCallback(
+    (payload: unknown) => {
+      const event = payload as AgentEventPayload;
+      if (!event) return;
+      if (
+        event.type === "run.started" ||
+        event.type === "run.completed" ||
+        event.type === "run.failed"
+      ) {
+        debouncedRefresh();
+      }
+    },
+    [debouncedRefresh],
+  );
+
+  useWsEvent(Events.AGENT, handleAgentEvent);
+
+  const handleFilterSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    handleRefresh();
+  };
+
+  return (
+    <div className="p-6">
+      <PageHeader
+        title="Traces"
+        description="LLM call traces and performance data"
+        actions={
+          <Button variant="outline" size="sm" onClick={handleRefresh} disabled={spinning} className="gap-1">
+            <RefreshCw className={"h-3.5 w-3.5" + (spinning ? " animate-spin" : "")} /> Refresh
+          </Button>
+        }
+      />
+
+      <form onSubmit={handleFilterSubmit} className="mt-4 flex gap-2">
+        <div className="relative max-w-sm flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={agentFilter}
+            onChange={(e) => setAgentFilter(e.target.value)}
+            placeholder="Filter by agent ID..."
+            className="pl-9"
+          />
+        </div>
+        <Button type="submit" variant="outline" size="sm">
+          Filter
+        </Button>
+      </form>
+
+      <div className="mt-4">
+        {loading && traces.length === 0 ? (
+          <TableSkeleton rows={8} />
+        ) : traces.length === 0 ? (
+          <EmptyState
+            icon={Activity}
+            title="No traces"
+            description="No traces found. Traces are recorded when agents process requests."
+          />
+        ) : (
+          <div className="rounded-md border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/50">
+                  <th className="px-4 py-3 text-left font-medium">Name</th>
+                  <th className="px-4 py-3 text-left font-medium">Status</th>
+                  <th className="px-4 py-3 text-left font-medium">Duration</th>
+                  <th className="px-4 py-3 text-left font-medium">Tokens</th>
+                  <th className="px-4 py-3 text-left font-medium">Spans</th>
+                  <th className="px-4 py-3 text-left font-medium">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {traces.map((trace: TraceData) => (
+                  <tr
+                    key={trace.id}
+                    className="cursor-pointer border-b last:border-0 hover:bg-muted/30"
+                    onClick={() => setSelectedTraceId(trace.id)}
+                  >
+                    <td className="max-w-[200px] truncate px-4 py-3 font-medium">
+                      {trace.name || "Unnamed"}
+                      {trace.channel && (
+                        <Badge variant="outline" className="ml-2 text-xs">
+                          {trace.channel}
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={trace.status} />
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {formatDuration(trace.duration_ms || computeDurationMs(trace.start_time, trace.end_time))}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {formatTokens(trace.total_input_tokens)} / {formatTokens(trace.total_output_tokens)}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {trace.span_count}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {formatDate(trace.start_time)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {selectedTraceId && (
+        <TraceDetailDialog
+          traceId={selectedTraceId}
+          onClose={() => setSelectedTraceId(null)}
+          getTrace={getTrace}
+        />
+      )}
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const variant =
+    status === "ok" || status === "success" || status === "completed"
+      ? "success"
+      : status === "error" || status === "failed"
+        ? "destructive"
+        : status === "running" || status === "pending"
+          ? "info"
+          : "secondary";
+
+  return <Badge variant={variant} className="text-xs">{status || "unknown"}</Badge>;
+}

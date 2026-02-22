@@ -1,0 +1,89 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// TraceData represents a top-level trace (one per user request).
+type TraceData struct {
+	ID                uuid.UUID       `json:"id"`
+	AgentID           *uuid.UUID      `json:"agent_id,omitempty"`
+	UserID            string          `json:"user_id,omitempty"`
+	SessionKey        string          `json:"session_key,omitempty"`
+	RunID             string          `json:"run_id,omitempty"`
+	StartTime         time.Time       `json:"start_time"`
+	EndTime           *time.Time      `json:"end_time,omitempty"`
+	DurationMS        int             `json:"duration_ms,omitempty"`
+	Name              string          `json:"name,omitempty"`
+	Channel           string          `json:"channel,omitempty"`
+	InputPreview      string          `json:"input_preview,omitempty"`
+	OutputPreview     string          `json:"output_preview,omitempty"`
+	TotalInputTokens  int             `json:"total_input_tokens"`
+	TotalOutputTokens int             `json:"total_output_tokens"`
+	SpanCount         int             `json:"span_count"`
+	LLMCallCount      int             `json:"llm_call_count"`
+	ToolCallCount     int             `json:"tool_call_count"`
+	Status            string          `json:"status"`
+	Error             string          `json:"error,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
+	Tags              []string        `json:"tags,omitempty"`
+	CreatedAt         time.Time       `json:"created_at"`
+}
+
+// SpanData represents a single operation within a trace.
+type SpanData struct {
+	ID            uuid.UUID       `json:"id"`
+	TraceID       uuid.UUID       `json:"trace_id"`
+	ParentSpanID  *uuid.UUID      `json:"parent_span_id,omitempty"`
+	AgentID       *uuid.UUID      `json:"agent_id,omitempty"`
+	SpanType      string          `json:"span_type"` // "llm_call", "tool_call", "agent", "embedding", "event"
+	Name          string          `json:"name,omitempty"`
+	StartTime     time.Time       `json:"start_time"`
+	EndTime       *time.Time      `json:"end_time,omitempty"`
+	DurationMS    int             `json:"duration_ms,omitempty"`
+	Status        string          `json:"status"`
+	Error         string          `json:"error,omitempty"`
+	Level         string          `json:"level,omitempty"`
+	Model         string          `json:"model,omitempty"`
+	Provider      string          `json:"provider,omitempty"`
+	InputTokens   int             `json:"input_tokens,omitempty"`
+	OutputTokens  int             `json:"output_tokens,omitempty"`
+	FinishReason  string          `json:"finish_reason,omitempty"`
+	ModelParams   json.RawMessage `json:"model_params,omitempty"`
+	ToolName      string          `json:"tool_name,omitempty"`
+	ToolCallID    string          `json:"tool_call_id,omitempty"`
+	InputPreview  string          `json:"input_preview,omitempty"`
+	OutputPreview string          `json:"output_preview,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
+// TraceListOpts configures trace listing.
+type TraceListOpts struct {
+	AgentID       *uuid.UUID
+	UserID        string
+	SessionKey    string
+	Status        string
+	Limit int
+	Offset        int
+}
+
+// TracingStore manages LLM traces and spans (managed mode only).
+type TracingStore interface {
+	CreateTrace(ctx context.Context, trace *TraceData) error
+	UpdateTrace(ctx context.Context, traceID uuid.UUID, updates map[string]any) error
+	GetTrace(ctx context.Context, traceID uuid.UUID) (*TraceData, error)
+	ListTraces(ctx context.Context, opts TraceListOpts) ([]TraceData, error)
+
+	CreateSpan(ctx context.Context, span *SpanData) error
+	UpdateSpan(ctx context.Context, spanID uuid.UUID, updates map[string]any) error
+	GetTraceSpans(ctx context.Context, traceID uuid.UUID) ([]SpanData, error)
+
+	// Batch operations (async flush)
+	BatchCreateSpans(ctx context.Context, spans []SpanData) error
+	BatchUpdateTraceAggregates(ctx context.Context, traceID uuid.UUID) error
+}

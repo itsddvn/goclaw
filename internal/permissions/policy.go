@@ -1,0 +1,203 @@
+// Package permissions provides role-based access control for gateway methods.
+//
+// GoClaw uses a 5-layer permission system:
+//
+//  1. Gateway Auth (token/password, scopes: admin/read/write/approvals/pairing)
+//  2. Global Tool Policy (tools.allow[], tools.deny[], tools.profile)
+//  3. Per-Agent Policy (agents.list[].tools.allow/deny)
+//  4. Per-Channel/Group Policy (channels.*.groups.*.tools.policy)
+//  5. Owner-Only Tools (senderIsOwner check)
+//
+// This package handles layers 1 and 5. Layer 2-4 are handled by internal/tools/policy.go.
+package permissions
+
+import (
+	"strings"
+	"sync"
+)
+
+// Role represents a user's permission level.
+type Role string
+
+const (
+	RoleAdmin    Role = "admin"    // Full access to all methods
+	RoleOperator Role = "operator" // Read + write access (no admin operations)
+	RoleViewer   Role = "viewer"   // Read-only access
+)
+
+// Scope represents a specific permission scope.
+type Scope string
+
+const (
+	ScopeAdmin     Scope = "operator.admin"
+	ScopeRead      Scope = "operator.read"
+	ScopeWrite     Scope = "operator.write"
+	ScopeApprovals Scope = "operator.approvals"
+	ScopePairing   Scope = "operator.pairing"
+)
+
+// PolicyEngine evaluates user permissions for gateway method access.
+type PolicyEngine struct {
+	ownerIDs map[string]bool // sender IDs that are considered "owner"
+	mu       sync.RWMutex
+}
+
+// NewPolicyEngine creates a new permission policy engine.
+func NewPolicyEngine(ownerIDs []string) *PolicyEngine {
+	owners := make(map[string]bool, len(ownerIDs))
+	for _, id := range ownerIDs {
+		owners[id] = true
+	}
+	return &PolicyEngine{
+		ownerIDs: owners,
+	}
+}
+
+// IsOwner checks if a sender ID is an owner.
+func (pe *PolicyEngine) IsOwner(senderID string) bool {
+	pe.mu.RLock()
+	defer pe.mu.RUnlock()
+	return pe.ownerIDs[senderID]
+}
+
+// CanAccess checks if a role has access to a gateway RPC method.
+func (pe *PolicyEngine) CanAccess(role Role, method string) bool {
+	requiredRole := MethodRole(method)
+	return roleLevel(role) >= roleLevel(requiredRole)
+}
+
+// CanAccessWithScopes checks if the given scopes permit access to a method.
+func (pe *PolicyEngine) CanAccessWithScopes(scopes []Scope, method string) bool {
+	required := MethodScopes(method)
+	if len(required) == 0 {
+		return true // no scope restriction
+	}
+
+	scopeSet := make(map[Scope]bool, len(scopes))
+	for _, s := range scopes {
+		scopeSet[s] = true
+	}
+
+	for _, r := range required {
+		if scopeSet[r] {
+			return true
+		}
+	}
+	return false
+}
+
+// RoleFromScopes determines the effective role from a set of scopes.
+func RoleFromScopes(scopes []Scope) Role {
+	for _, s := range scopes {
+		if s == ScopeAdmin {
+			return RoleAdmin
+		}
+	}
+	hasWrite := false
+	for _, s := range scopes {
+		if s == ScopeWrite {
+			hasWrite = true
+			break
+		}
+	}
+	if hasWrite {
+		return RoleOperator
+	}
+	for _, s := range scopes {
+		if s == ScopeRead {
+			return RoleViewer
+		}
+	}
+	return RoleViewer
+}
+
+// MethodRole returns the minimum role required for a given RPC method.
+func MethodRole(method string) Role {
+	// Admin-only methods
+	if isAdminMethod(method) {
+		return RoleAdmin
+	}
+
+	// Write methods (require operator or above)
+	if isWriteMethod(method) {
+		return RoleOperator
+	}
+
+	// Everything else is read-only (viewer can access)
+	return RoleViewer
+}
+
+// MethodScopes returns the scopes required for a method.
+func MethodScopes(method string) []Scope {
+	if isAdminMethod(method) {
+		return []Scope{ScopeAdmin}
+	}
+	if strings.HasPrefix(method, "approvals.") {
+		return []Scope{ScopeApprovals, ScopeAdmin}
+	}
+	if strings.HasPrefix(method, "pairing.") || strings.HasPrefix(method, "device.pair") {
+		return []Scope{ScopePairing, ScopeAdmin}
+	}
+	if isWriteMethod(method) {
+		return []Scope{ScopeWrite, ScopeAdmin}
+	}
+	return []Scope{ScopeRead, ScopeWrite, ScopeAdmin}
+}
+
+func isAdminMethod(method string) bool {
+	adminMethods := []string{
+		"config.apply",
+		"config.patch",
+		"agents.create",
+		"agents.update",
+		"agents.delete",
+		"channels.toggle",
+		"device.pair.approve",
+		"device.pair.revoke",
+	}
+	for _, m := range adminMethods {
+		if method == m {
+			return true
+		}
+	}
+	return false
+}
+
+func isWriteMethod(method string) bool {
+	writePrefixes := []string{
+		"chat.send",
+		"chat.abort",
+		"sessions.delete",
+		"sessions.reset",
+		"sessions.patch",
+		"cron.create",
+		"cron.update",
+		"cron.delete",
+		"cron.toggle",
+		"skills.update",
+		"pairing.",
+		"device.pair.",
+		"approvals.",
+		"exec.approval.",
+		"send",
+	}
+	for _, prefix := range writePrefixes {
+		if strings.HasPrefix(method, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func roleLevel(r Role) int {
+	switch r {
+	case RoleAdmin:
+		return 3
+	case RoleOperator:
+		return 2
+	case RoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}

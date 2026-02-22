@@ -1,0 +1,36 @@
+# Test artifacts
+tests/integration/testdata/
+
+# Binary
+openclaw-go
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Environment
+.env*
+!.env.example
+
+app
+browser-poc
+sandbox
+openclaw-go
+goclaw
+config.json
+prompt.md
+*.bk.*
+
+# UI Web (React SPA)
+ui/web/node_modules/
+ui/web/dist/
+ui/web/.vite/
+ui/web/pnpm-lock.yaml
+
+.mcp.json
+tmp
+
+deploy-*.sh

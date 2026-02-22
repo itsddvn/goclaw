@@ -1,0 +1,108 @@
+package protocol
+
+// RPC method name constants.
+// Organized by priority: CRITICAL (Phase 1) → NEEDED (Phase 2) → NICE TO HAVE (Phase 3+).
+
+// Phase 1 - CRITICAL methods
+const (
+	// Agent
+	MethodAgent            = "agent"
+	MethodAgentWait        = "agent.wait"
+	MethodAgentIdentityGet = "agent.identity.get"
+
+	// Chat
+	MethodChatSend    = "chat.send"
+	MethodChatHistory = "chat.history"
+	MethodChatAbort   = "chat.abort"
+	MethodChatInject  = "chat.inject"
+
+	// Agents management
+	MethodAgentsList     = "agents.list"
+	MethodAgentsCreate   = "agents.create"
+	MethodAgentsUpdate   = "agents.update"
+	MethodAgentsDelete   = "agents.delete"
+	MethodAgentsFileList = "agents.files.list"
+	MethodAgentsFileGet  = "agents.files.get"
+	MethodAgentsFileSet  = "agents.files.set"
+
+	// Config
+	MethodConfigGet    = "config.get"
+	MethodConfigApply  = "config.apply"
+	MethodConfigPatch  = "config.patch"
+	MethodConfigSchema = "config.schema"
+
+	// Sessions
+	MethodSessionsList    = "sessions.list"
+	MethodSessionsPreview = "sessions.preview"
+	MethodSessionsPatch   = "sessions.patch"
+	MethodSessionsDelete  = "sessions.delete"
+	MethodSessionsReset   = "sessions.reset"
+
+	// System
+	MethodConnect = "connect"
+	MethodHealth  = "health"
+	MethodStatus  = "status"
+)
+
+// Phase 2 - NEEDED methods
+const (
+	MethodSkillsList  = "skills.list"
+	MethodSkillsGet   = "skills.get"
+	MethodSkillsUpdate = "skills.update"
+
+	MethodCronList   = "cron.list"
+	MethodCronCreate = "cron.create"
+	MethodCronUpdate = "cron.update"
+	MethodCronDelete = "cron.delete"
+	MethodCronToggle = "cron.toggle"
+	MethodCronStatus = "cron.status"
+	MethodCronRun    = "cron.run"
+	MethodCronRuns   = "cron.runs"
+
+	MethodChannelsList   = "channels.list"
+	MethodChannelsStatus = "channels.status"
+	MethodChannelsToggle = "channels.toggle"
+
+	MethodPairingRequest = "device.pair.request"
+	MethodPairingApprove = "device.pair.approve"
+	MethodPairingList    = "device.pair.list"
+	MethodPairingRevoke  = "device.pair.revoke"
+
+	MethodBrowserPairingStatus = "browser.pairing.status"
+
+	MethodApprovalsList    = "exec.approval.list"
+	MethodApprovalsApprove = "exec.approval.approve"
+	MethodApprovalsDeny    = "exec.approval.deny"
+
+	MethodUsageGet     = "usage.get"
+	MethodUsageSummary = "usage.summary"
+
+	MethodSend = "send"
+)
+
+// Channel instances management (managed mode)
+const (
+	MethodChannelInstancesList   = "channels.instances.list"
+	MethodChannelInstancesGet    = "channels.instances.get"
+	MethodChannelInstancesCreate = "channels.instances.create"
+	MethodChannelInstancesUpdate = "channels.instances.update"
+	MethodChannelInstancesDelete = "channels.instances.delete"
+)
+
+// Phase 3+ - NICE TO HAVE methods
+const (
+	MethodLogsTail = "logs.tail"
+
+	MethodTTSStatus      = "tts.status"
+	MethodTTSEnable      = "tts.enable"
+	MethodTTSDisable     = "tts.disable"
+	MethodTTSConvert     = "tts.convert"
+	MethodTTSSetProvider = "tts.setProvider"
+	MethodTTSProviders   = "tts.providers"
+
+	MethodBrowserAct        = "browser.act"
+	MethodBrowserSnapshot   = "browser.snapshot"
+	MethodBrowserScreenshot = "browser.screenshot"
+
+	MethodHeartbeat = "heartbeat"
+)

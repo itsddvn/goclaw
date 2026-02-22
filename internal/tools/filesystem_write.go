@@ -1,0 +1,130 @@
+package tools
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
+)
+
+// WriteFileTool writes content to a file, optionally through a sandbox container.
+type WriteFileTool struct {
+	workspace       string
+	restrict        bool
+	sandboxMgr      sandbox.Manager
+	contextFileIntc *ContextFileInterceptor // nil = no virtual FS routing (standalone mode)
+	memIntc         *MemoryInterceptor      // nil = no memory routing (standalone mode)
+}
+
+// SetContextFileInterceptor enables virtual FS routing for context files (managed mode).
+func (t *WriteFileTool) SetContextFileInterceptor(intc *ContextFileInterceptor) {
+	t.contextFileIntc = intc
+}
+
+// SetMemoryInterceptor enables virtual FS routing for memory files (managed mode).
+func (t *WriteFileTool) SetMemoryInterceptor(intc *MemoryInterceptor) {
+	t.memIntc = intc
+}
+
+func NewWriteFileTool(workspace string, restrict bool) *WriteFileTool {
+	return &WriteFileTool{workspace: workspace, restrict: restrict}
+}
+
+func NewSandboxedWriteFileTool(workspace string, restrict bool, mgr sandbox.Manager) *WriteFileTool {
+	return &WriteFileTool{workspace: workspace, restrict: restrict, sandboxMgr: mgr}
+}
+
+// SetSandboxKey is a no-op; sandbox key is now read from ctx (thread-safe).
+func (t *WriteFileTool) SetSandboxKey(key string) {}
+
+func (t *WriteFileTool) Name() string        { return "write_file" }
+func (t *WriteFileTool) Description() string { return "Write content to a file, creating directories as needed" }
+func (t *WriteFileTool) Parameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Path to the file to write",
+			},
+			"content": map[string]interface{}{
+				"type":        "string",
+				"description": "Content to write",
+			},
+		},
+		"required": []string{"path", "content"},
+	}
+}
+
+func (t *WriteFileTool) Execute(ctx context.Context, args map[string]interface{}) *Result {
+	path, _ := args["path"].(string)
+	content, _ := args["content"].(string)
+	if path == "" {
+		return ErrorResult("path is required")
+	}
+
+	// Virtual FS: route context files to DB (managed mode)
+	if t.contextFileIntc != nil {
+		if handled, err := t.contextFileIntc.WriteFile(ctx, path, content); handled {
+			if err != nil {
+				return ErrorResult(fmt.Sprintf("failed to write context file: %v", err))
+			}
+			return SilentResult(fmt.Sprintf("Context file written: %s (%d bytes)", path, len(content)))
+		}
+	}
+
+	// Virtual FS: route memory files to DB (managed mode)
+	if t.memIntc != nil {
+		if handled, err := t.memIntc.WriteFile(ctx, path, content); handled {
+			if err != nil {
+				return ErrorResult(fmt.Sprintf("failed to write memory file: %v", err))
+			}
+			return SilentResult(fmt.Sprintf("Memory file written: %s (%d bytes)", path, len(content)))
+		}
+	}
+
+	// Sandbox routing (sandboxKey from ctx — thread-safe)
+	sandboxKey := ToolSandboxKeyFromCtx(ctx)
+	if t.sandboxMgr != nil && sandboxKey != "" {
+		return t.executeInSandbox(ctx, path, content, sandboxKey)
+	}
+
+	// Host execution
+	resolved, err := resolvePath(path, t.workspace, t.restrict)
+	if err != nil {
+		return ErrorResult(err.Error())
+	}
+
+	if err := os.MkdirAll(filepath.Dir(resolved), 0755); err != nil {
+		return ErrorResult(fmt.Sprintf("failed to create directory: %v", err))
+	}
+
+	if err := os.WriteFile(resolved, []byte(content), 0644); err != nil {
+		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
+	}
+
+	return SilentResult(fmt.Sprintf("File written: %s (%d bytes)", path, len(content)))
+}
+
+func (t *WriteFileTool) executeInSandbox(ctx context.Context, path, content, sandboxKey string) *Result {
+	bridge, err := t.getFsBridge(ctx, sandboxKey)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
+	}
+
+	if err := bridge.WriteFile(ctx, path, content); err != nil {
+		return ErrorResult(fmt.Sprintf("failed to write file: %v", err))
+	}
+
+	return SilentResult(fmt.Sprintf("File written: %s (%d bytes)", path, len(content)))
+}
+
+func (t *WriteFileTool) getFsBridge(ctx context.Context, sandboxKey string) (*sandbox.FsBridge, error) {
+	sb, err := t.sandboxMgr.Get(ctx, sandboxKey, t.workspace)
+	if err != nil {
+		return nil, err
+	}
+	return sandbox.NewFsBridge(sb.ID(), "/workspace"), nil
+}

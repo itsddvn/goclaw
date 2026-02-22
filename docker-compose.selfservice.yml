@@ -1,0 +1,18 @@
+# Self-service overlay — adds web dashboard UI (nginx + React SPA).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.managed.yml -f docker-compose.selfservice.yml up
+#   docker compose -f docker-compose.yml -f docker-compose.standalone.yml -f docker-compose.selfservice.yml up
+#
+# Dashboard: http://localhost:3000
+
+services:
+  goclaw-ui:
+    build:
+      context: ./ui/web
+      dockerfile: Dockerfile
+    ports:
+      - "${GOCLAW_UI_PORT:-3000}:80"
+    depends_on:
+      - goclaw
+    restart: unless-stopped

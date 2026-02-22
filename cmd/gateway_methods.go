@@ -1,0 +1,50 @@
+package cmd
+
+import (
+	"log/slog"
+
+	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/gateway"
+	"github.com/nextlevelbuilder/goclaw/internal/gateway/methods"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
+)
+
+func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore store.SessionStore, cronStore store.CronStore, pairingStore store.PairingStore, cfg *config.Config, cfgPath, workspace, dataDir string, msgBus *bus.MessageBus, execApprovalMgr *tools.ExecApprovalManager, agentStore store.AgentStore, isManaged bool, skillStore store.SkillStore, configSecretsStore store.ConfigSecretsStore) *methods.PairingMethods {
+	router := server.Router()
+
+	// Phase 1: Core methods
+	methods.NewChatMethods(agents, sessStore, isManaged, server.RateLimiter()).Register(router)
+	methods.NewAgentsMethods(agents, cfg, cfgPath, workspace, agentStore, isManaged).Register(router)
+	methods.NewSessionsMethods(sessStore).Register(router)
+	methods.NewConfigMethods(cfg, cfgPath, isManaged, configSecretsStore).Register(router)
+
+	// Phase 2: Skills (uses SkillStore interface — PG or File)
+	methods.NewSkillsMethods(skillStore).Register(router)
+
+	// Phase 2: Cron (store created externally, shared with gateway)
+	methods.NewCronMethods(cronStore).Register(router)
+
+	// Phase 2: Pairing (store created externally, shared with channel manager).
+	// OnApprove callback is set later by the caller after channel manager is created.
+	pairingMethods := methods.NewPairingMethods(pairingStore)
+	pairingMethods.Register(router)
+
+	// Phase 2: Usage (queries SessionStore for real token data)
+	methods.NewUsageMethods(sessStore).Register(router)
+
+	// Phase 2: Exec approval (always registered — returns empty when manager is nil)
+	methods.NewExecApprovalMethods(execApprovalMgr).Register(router)
+
+	// Phase 2: Send (outbound message routing)
+	methods.NewSendMethods(msgBus).Register(router)
+
+	slog.Info("registered all RPC methods",
+		"phase1", []string{"chat", "agents", "sessions", "config"},
+		"phase2", []string{"skills", "cron", "pairing", "usage", "exec_approval", "send"},
+	)
+
+	return pairingMethods
+}

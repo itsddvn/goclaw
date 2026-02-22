@@ -1,0 +1,256 @@
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from "react";
+import { ArrowLeft, Trash2, RotateCcw, Info, Eye } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { MessageBubble } from "@/components/chat/message-bubble";
+import { MarkdownRenderer } from "@/components/shared/markdown-renderer";
+import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { useWsEvent } from "@/hooks/use-ws-event";
+import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
+import { Events } from "@/api/protocol";
+import { parseSessionKey } from "@/lib/session-key";
+import { formatDate, formatTokens } from "@/lib/format";
+import type { SessionInfo, SessionPreview } from "@/types/session";
+import type { ChatMessage, AgentEventPayload } from "@/types/chat";
+
+/** Check if a message is an internal system message (subagent results, cron, etc.) */
+function isSystemMessage(msg: ChatMessage): boolean {
+  return msg.content?.trimStart().startsWith("[System Message]") ?? false;
+}
+
+/** Check if a message should be displayed */
+function isDisplayable(msg: ChatMessage): boolean {
+  // Hide tool role messages (shown inline with assistant)
+  if (msg.role === "tool") return false;
+  // Hide messages with empty/whitespace content
+  if (!msg.content?.trim()) return false;
+  return true;
+}
+
+interface SessionDetailPageProps {
+  session: SessionInfo;
+  onBack: () => void;
+  onPreview: (key: string) => Promise<SessionPreview | null>;
+  onDelete: (key: string) => Promise<void>;
+  onReset: (key: string) => Promise<void>;
+}
+
+export function SessionDetailPage({
+  session,
+  onBack,
+  onPreview,
+  onDelete,
+  onReset,
+}: SessionDetailPageProps) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [summary, setSummary] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  const parsed = parseSessionKey(session.key);
+
+  const loadMessages = useCallback(() => {
+    onPreview(session.key)
+      .then((preview) => {
+        if (preview) {
+          setMessages(
+            preview.messages.map((m, i) => ({
+              ...m,
+              timestamp: Date.now() - (preview.messages.length - i) * 1000,
+            })),
+          );
+          setSummary(preview.summary ?? null);
+        }
+      })
+      .finally(() => setLoading(false));
+  }, [session.key, onPreview]);
+
+  useEffect(() => {
+    setLoading(true);
+    loadMessages();
+  }, [loadMessages]);
+
+  // Auto-refresh when the agent for this session completes a run
+  const debouncedRefresh = useDebouncedCallback(loadMessages, 2000);
+
+  const handleAgentEvent = useCallback(
+    (payload: unknown) => {
+      const event = payload as AgentEventPayload;
+      if (!event) return;
+      if (
+        (event.type === "run.completed" || event.type === "run.failed") &&
+        event.agentId === parsed.agentId
+      ) {
+        debouncedRefresh();
+      }
+    },
+    [debouncedRefresh, parsed.agentId],
+  );
+
+  useWsEvent(Events.AGENT, handleAgentEvent);
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Header */}
+      <div className="flex items-center justify-between border-b p-4">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="icon" onClick={onBack}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <h3 className="font-medium">{session.label || parsed.scope}</h3>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Badge variant="outline">{parsed.agentId}</Badge>
+              {session.channel && session.channel !== "ws" && (
+                <Badge variant="secondary" className="gap-1">
+                  <Eye className="h-3 w-3" />
+                  {session.channel}
+                </Badge>
+              )}
+              <span>{session.messageCount} messages</span>
+              <span>{formatDate(session.updated)}</span>
+              {session.inputTokens != null && (
+                <span>
+                  {formatTokens(session.inputTokens)} in / {formatTokens(session.outputTokens ?? 0)} out
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => setConfirmReset(true)} className="gap-1">
+            <RotateCcw className="h-3.5 w-3.5" /> Reset
+          </Button>
+          <Button variant="destructive" size="sm" onClick={() => setConfirmDelete(true)} className="gap-1">
+            <Trash2 className="h-3.5 w-3.5" /> Delete
+          </Button>
+        </div>
+      </div>
+
+      {/* Summary */}
+      {summary && (
+        <SummaryBlock text={summary} />
+      )}
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-6 py-4">
+        {loading && messages.length === 0 ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+          </div>
+        ) : messages.length === 0 ? (
+          <div className="py-12 text-center text-sm text-muted-foreground">
+            No messages in this session
+          </div>
+        ) : (
+          <div className="mx-auto max-w-3xl space-y-4">
+            {messages.filter(isDisplayable).map((msg, i) =>
+              isSystemMessage(msg) ? (
+                <SystemMessageBlock key={i} content={msg.content} />
+              ) : (
+                <MessageBubble key={i} message={msg} />
+              ),
+            )}
+          </div>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title="Delete Session"
+        description="This will permanently delete all messages in this session."
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={async () => {
+          await onDelete(session.key);
+          setConfirmDelete(false);
+          onBack();
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmReset}
+        onOpenChange={setConfirmReset}
+        title="Reset Session"
+        description="This will clear all messages but keep the session."
+        confirmLabel="Reset"
+        onConfirm={async () => {
+          await onReset(session.key);
+          setConfirmReset(false);
+          setMessages([]);
+        }}
+      />
+    </div>
+  );
+}
+
+function SystemMessageBlock({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  // Extract the first line as title, rest as body
+  const lines = content.split("\n");
+  const title = (lines[0] ?? "").replace(/^\[System Message\]\s*/, "").trim();
+  const body = lines.slice(1).join("\n").trim();
+
+  return (
+    <div className="mx-auto flex max-w-3xl items-start gap-2 rounded-md border border-dashed border-muted-foreground/30 bg-muted/30 px-4 py-2">
+      <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 text-xs text-muted-foreground">
+        <span className="font-medium">{title || "System Message"}</span>
+        {body && (
+          <>
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="ml-1 text-primary hover:underline"
+            >
+              {expanded ? "hide" : "show details"}
+            </button>
+            {expanded && (
+              <div className="mt-2">
+                <MarkdownRenderer content={body} className="text-xs" />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const SUMMARY_MAX_HEIGHT = 72; // ~3 lines of text
+
+function SummaryBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [needsTruncation, setNeedsTruncation] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (contentRef.current) {
+      setNeedsTruncation(contentRef.current.scrollHeight > SUMMARY_MAX_HEIGHT);
+    }
+  }, [text]);
+
+  return (
+    <div className="border-b bg-muted/50 px-6 py-3 text-sm">
+      <span className="font-medium">Summary: </span>
+      <div
+        ref={contentRef}
+        className="mt-1 overflow-hidden transition-[max-height] duration-200"
+        style={{ maxHeight: expanded ? contentRef.current?.scrollHeight : SUMMARY_MAX_HEIGHT }}
+      >
+        {text}
+      </div>
+      {needsTruncation && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-xs font-medium text-primary hover:underline"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </div>
+  );
+}

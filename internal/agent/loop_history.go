@@ -1,0 +1,283 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
+)
+
+func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, summary, userMessage, extraSystemPrompt, sessionKey, channel, userID string, historyLimit int) []providers.Message {
+	var messages []providers.Message
+
+	// Build full system prompt using the new builder (matching TS buildAgentSystemPrompt)
+	mode := PromptFull
+	if bootstrap.IsSubagentSession(sessionKey) || bootstrap.IsCronSession(sessionKey) {
+		mode = PromptMinimal
+	}
+
+	_, hasSpawn := l.tools.Get("spawn")
+	_, hasSkillSearch := l.tools.Get("skill_search")
+
+	systemPrompt := BuildSystemPrompt(SystemPromptConfig{
+		AgentID:        l.id,
+		Model:          l.model,
+		Workspace:      l.workspace,
+		Channel:        channel,
+		OwnerIDs:       l.ownerIDs,
+		Mode:           mode,
+		ToolNames:      l.tools.List(),
+		SkillsSummary:  l.resolveSkillsSummary(),
+		HasMemory:      l.hasMemory,
+		HasSpawn:       l.tools != nil && hasSpawn,
+		HasSkillSearch: hasSkillSearch,
+		ContextFiles:   l.resolveContextFiles(ctx, userID),
+		ExtraPrompt:    extraSystemPrompt,
+		SandboxEnabled:        l.sandboxEnabled,
+		SandboxContainerDir:   l.sandboxContainerDir,
+		SandboxWorkspaceAccess: l.sandboxWorkspaceAccess,
+	})
+
+	messages = append(messages, providers.Message{
+		Role:    "system",
+		Content: systemPrompt,
+	})
+
+	// Summary context
+	if summary != "" {
+		messages = append(messages, providers.Message{
+			Role:    "user",
+			Content: fmt.Sprintf("[Previous conversation summary]\n%s", summary),
+		})
+		messages = append(messages, providers.Message{
+			Role:    "assistant",
+			Content: "I understand the context from our previous conversation. How can I help you?",
+		})
+	}
+
+	// History pipeline matching TS: limitHistoryTurns → pruneContext → sanitizeHistory.
+	trimmed := limitHistoryTurns(history, historyLimit)
+	pruned := pruneContextMessages(trimmed, l.contextWindow, l.contextPruningCfg)
+	messages = append(messages, sanitizeHistory(pruned)...)
+
+	// Current user message
+	messages = append(messages, providers.Message{
+		Role:    "user",
+		Content: userMessage,
+	})
+
+	return messages
+}
+
+// resolveContextFiles returns per-user context files if available (managed mode),
+// falling back to the static contextFiles loaded at Loop creation.
+func (l *Loop) resolveContextFiles(ctx context.Context, userID string) []bootstrap.ContextFile {
+	if l.contextFileLoader != nil && userID != "" {
+		if files := l.contextFileLoader(ctx, l.agentUUID, userID, l.agentType); len(files) > 0 {
+			return files
+		}
+	}
+	return l.contextFiles
+}
+
+// Hybrid skill thresholds: when skill count and total token estimate are below
+// these limits, inline all skills as XML in the system prompt (like TS).
+// Above these limits, only include skill_search instructions.
+const (
+	skillInlineMaxCount  = 20   // max skills to inline
+	skillInlineMaxTokens = 3500 // max estimated tokens for skill descriptions
+)
+
+// resolveSkillsSummary dynamically builds the skills summary for the system prompt.
+// Called per-message so it picks up hot-reloaded skills automatically.
+// Returns (summary XML, useInline) — useInline=true means skills are inlined and
+// the system prompt should use TS-style "scan <available_skills>" instructions
+// instead of "use skill_search".
+func (l *Loop) resolveSkillsSummary() string {
+	if l.skillsLoader == nil {
+		return ""
+	}
+
+	filtered := l.skillsLoader.FilterSkills(l.skillAllowList)
+	if len(filtered) == 0 {
+		return ""
+	}
+
+	// Estimate tokens: ~1 token per 4 chars for name+description
+	totalChars := 0
+	for _, s := range filtered {
+		totalChars += len(s.Name) + len(s.Description) + 10 // +10 for XML tags overhead
+	}
+	estimatedTokens := totalChars / 4
+
+	if len(filtered) <= skillInlineMaxCount && estimatedTokens <= skillInlineMaxTokens {
+		// Inline mode: build full XML summary
+		return l.skillsLoader.BuildSummary(l.skillAllowList)
+	}
+
+	// Search mode: no XML in prompt, agent uses skill_search tool
+	return ""
+}
+
+// limitHistoryTurns keeps only the last N user turns (and their associated
+// assistant/tool messages) from history. A "turn" = one user message plus
+// all subsequent non-user messages until the next user message.
+// Matching TS src/agents/pi-embedded-runner/history.ts limitHistoryTurns().
+func limitHistoryTurns(msgs []providers.Message, limit int) []providers.Message {
+	if limit <= 0 || len(msgs) == 0 {
+		return msgs
+	}
+
+	// Walk backwards counting user messages.
+	userCount := 0
+	lastUserIndex := len(msgs)
+
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			userCount++
+			if userCount > limit {
+				return msgs[lastUserIndex:]
+			}
+			lastUserIndex = i
+		}
+	}
+
+	return msgs
+}
+
+// sanitizeHistory repairs tool_use/tool_result pairing in session history.
+// Matching TS session-transcript-repair.ts sanitizeToolUseResultPairing().
+//
+// Problems this fixes:
+//   - Orphaned tool messages at start of history (after truncation)
+//   - tool_result without matching tool_use in preceding assistant message
+//   - assistant with tool_calls but missing tool_results
+func sanitizeHistory(msgs []providers.Message) []providers.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+
+	// 1. Skip leading orphaned tool messages (no preceding assistant with tool_calls).
+	start := 0
+	for start < len(msgs) && msgs[start].Role == "tool" {
+		slog.Warn("dropping orphaned tool message at history start",
+			"tool_call_id", msgs[start].ToolCallID)
+		start++
+	}
+
+	if start >= len(msgs) {
+		return nil
+	}
+
+	// 2. Walk through messages ensuring tool_result follows matching tool_use.
+	var result []providers.Message
+	for i := start; i < len(msgs); i++ {
+		msg := msgs[i]
+
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			// Collect expected tool call IDs
+			expectedIDs := make(map[string]bool, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				expectedIDs[tc.ID] = true
+			}
+
+			result = append(result, msg)
+
+			// Collect matching tool results that follow
+			for i+1 < len(msgs) && msgs[i+1].Role == "tool" {
+				i++
+				toolMsg := msgs[i]
+				if expectedIDs[toolMsg.ToolCallID] {
+					result = append(result, toolMsg)
+					delete(expectedIDs, toolMsg.ToolCallID)
+				} else {
+					slog.Warn("dropping mismatched tool result",
+						"tool_call_id", toolMsg.ToolCallID)
+				}
+			}
+
+			// Synthesize missing tool results
+			for id := range expectedIDs {
+				slog.Warn("synthesizing missing tool result", "tool_call_id", id)
+				result = append(result, providers.Message{
+					Role:       "tool",
+					Content:    "[Tool result missing — session was compacted]",
+					ToolCallID: id,
+				})
+			}
+		} else if msg.Role == "tool" {
+			// Orphaned tool message mid-history (no preceding assistant with matching tool_calls)
+			slog.Warn("dropping orphaned tool message mid-history",
+				"tool_call_id", msg.ToolCallID)
+		} else {
+			result = append(result, msg)
+		}
+	}
+
+	return result
+}
+
+func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
+	history := l.sessions.GetHistory(sessionKey)
+	tokenEstimate := estimateTokens(history)
+	threshold := l.contextWindow * 75 / 100
+
+	if len(history) <= 50 && tokenEstimate <= threshold {
+		return
+	}
+
+	// Memory flush: run BEFORE compaction so agent can save important context.
+	// Matching TS: memory flush is a separate embedded agent turn before summarization.
+	flushSettings := ResolveMemoryFlushSettings(l.compactionCfg)
+	if l.shouldRunMemoryFlush(sessionKey, tokenEstimate, flushSettings) {
+		// Run flush synchronously before compaction (so writes happen before truncation)
+		l.runMemoryFlush(ctx, sessionKey, flushSettings)
+	}
+
+	// Summarize in background
+	go func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+
+		summary := l.sessions.GetSummary(sessionKey)
+
+		if len(history) <= 4 {
+			return
+		}
+
+		toSummarize := history[:len(history)-4]
+
+		var sb string
+		for _, m := range toSummarize {
+			if m.Role == "user" {
+				sb += fmt.Sprintf("user: %s\n", m.Content)
+			} else if m.Role == "assistant" {
+				sb += fmt.Sprintf("assistant: %s\n", SanitizeAssistantContent(m.Content))
+			}
+		}
+
+		prompt := "Provide a concise summary of this conversation, preserving key context:\n"
+		if summary != "" {
+			prompt += "Existing context: " + summary + "\n"
+		}
+		prompt += "\n" + sb
+
+		resp, err := l.provider.Chat(sctx, providers.ChatRequest{
+			Messages: []providers.Message{{Role: "user", Content: prompt}},
+			Model:    l.model,
+			Options:  map[string]interface{}{"max_tokens": 1024, "temperature": 0.3},
+		})
+		if err != nil {
+			slog.Warn("summarization failed", "session", sessionKey, "error", err)
+			return
+		}
+
+		l.sessions.SetSummary(sessionKey, SanitizeAssistantContent(resp.Content))
+		l.sessions.TruncateHistory(sessionKey, 4)
+		l.sessions.IncrementCompaction(sessionKey)
+		l.sessions.Save(sessionKey)
+	}()
+}

@@ -1,0 +1,14 @@
+.git
+.github
+.env*
+.dockerignore
+*.md
+docs/
+tests/
+config.json
+openclaw-go
+*.exe
+tmp/
+.claude/
+.vscode/
+.idea/

@@ -1,0 +1,33 @@
+export const ROUTES = {
+  LOGIN: "/login",
+  OVERVIEW: "/overview",
+  CHAT: "/chat",
+  CHAT_SESSION: "/chat/:sessionKey",
+  AGENTS: "/agents",
+  AGENT_DETAIL: "/agents/:id",
+  SESSIONS: "/sessions",
+  SESSION_DETAIL: "/sessions/:key",
+  SKILLS: "/skills",
+  SKILL_DETAIL: "/skills/:id",
+  CRON: "/cron",
+  CONFIG: "/config",
+  TRACES: "/traces",
+  TRACE_DETAIL: "/traces/:id",
+  USAGE: "/usage",
+  CHANNELS: "/channels",
+  APPROVALS: "/approvals",
+  NODES: "/nodes",
+  LOGS: "/logs",
+  PROVIDERS: "/providers",
+  CUSTOM_TOOLS: "/custom-tools",
+  MCP: "/mcp",
+  TTS: "/tts",
+} as const;
+
+export const LOCAL_STORAGE_KEYS = {
+  TOKEN: "goclaw:token",
+  USER_ID: "goclaw:userId",
+  SENDER_ID: "goclaw:senderID",
+  THEME: "goclaw:theme",
+  SIDEBAR_COLLAPSED: "goclaw:sidebarCollapsed",
+} as const;

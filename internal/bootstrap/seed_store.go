@@ -1,0 +1,124 @@
+package bootstrap
+
+import (
+	"context"
+	"log/slog"
+	"path/filepath"
+
+	"github.com/google/uuid"
+
+	"github.com/nextlevelbuilder/goclaw/internal/store"
+)
+
+// SeedToStore seeds embedded templates into agent_context_files (agent-level).
+// Used for predefined agents only — open agents get per-user files via SeedUserFiles.
+// Only writes files that don't already have content.
+// Returns the list of file names that were seeded.
+func SeedToStore(ctx context.Context, agentStore store.AgentStore, agentID uuid.UUID, agentType string) ([]string, error) {
+	// Open agents don't need agent-level context files —
+	// all files are seeded per-user from embedded templates on first chat.
+	if agentType == "open" {
+		return nil, nil
+	}
+
+	existing, err := agentStore.GetAgentContextFiles(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build set of files that already have content
+	hasContent := make(map[string]bool)
+	for _, f := range existing {
+		if f.Content != "" {
+			hasContent[f.FileName] = true
+		}
+	}
+
+	var seeded []string
+	for _, name := range templateFiles {
+		if hasContent[name] {
+			continue
+		}
+
+		content, err := templateFS.ReadFile(filepath.Join("templates", name))
+		if err != nil {
+			slog.Warn("bootstrap: failed to read embedded template", "file", name, "error", err)
+			continue
+		}
+
+		if err := agentStore.SetAgentContextFile(ctx, agentID, name, string(content)); err != nil {
+			return seeded, err
+		}
+		seeded = append(seeded, name)
+	}
+
+	if len(seeded) > 0 {
+		slog.Info("seeded agent context files to store", "agent", agentID, "files", seeded)
+	}
+
+	return seeded, nil
+}
+
+// userSeedFilesOpen is the full set of files seeded per-user for open agents.
+var userSeedFilesOpen = []string{
+	AgentsFile,
+	SoulFile,
+	ToolsFile,
+	IdentityFile,
+	UserFile,
+	HeartbeatFile,
+	BootstrapFile,
+}
+
+// userSeedFilesPredefined is the set of files seeded per-user for predefined agents.
+var userSeedFilesPredefined = []string{
+	UserFile,
+}
+
+// SeedUserFiles seeds embedded templates into user_context_files for a new user.
+// For "open" agents: all 7 files (including BOOTSTRAP.md).
+// For "predefined" agents: only USER.md.
+// Only writes files that don't already exist — safe to call multiple times.
+// Returns the list of file names that were seeded.
+func SeedUserFiles(ctx context.Context, agentStore store.AgentStore, agentID uuid.UUID, userID, agentType string) ([]string, error) {
+	files := userSeedFilesOpen
+	if agentType == "predefined" {
+		files = userSeedFilesPredefined
+	}
+
+	// Check existing files to avoid overwriting personalized content
+	existing, err := agentStore.GetUserContextFiles(ctx, agentID, userID)
+	if err != nil {
+		return nil, err
+	}
+	hasFile := make(map[string]bool, len(existing))
+	for _, f := range existing {
+		if f.Content != "" {
+			hasFile[f.FileName] = true
+		}
+	}
+
+	var seeded []string
+	for _, name := range files {
+		if hasFile[name] {
+			continue // already has content, don't overwrite
+		}
+
+		content, err := templateFS.ReadFile(filepath.Join("templates", name))
+		if err != nil {
+			slog.Warn("bootstrap: failed to read embedded template for user seed", "file", name, "error", err)
+			continue
+		}
+
+		if err := agentStore.SetUserContextFile(ctx, agentID, userID, name, string(content)); err != nil {
+			return seeded, err
+		}
+		seeded = append(seeded, name)
+	}
+
+	if len(seeded) > 0 {
+		slog.Info("seeded user context files", "agent", agentID, "user", userID, "type", agentType, "files", seeded)
+	}
+
+	return seeded, nil
+}

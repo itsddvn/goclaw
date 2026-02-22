@@ -1,0 +1,200 @@
+import { useState } from "react";
+import { Plug, Plus, RefreshCw, Pencil, Trash2, Users } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/shared/page-header";
+import { EmptyState } from "@/components/shared/empty-state";
+import { SearchInput } from "@/components/shared/search-input";
+import { TableSkeleton } from "@/components/shared/loading-skeleton";
+import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { useMCP, type MCPServerData, type MCPServerInput } from "./hooks/use-mcp";
+import { MCPFormDialog } from "./mcp-form-dialog";
+import { MCPGrantsDialog } from "./mcp-grants-dialog";
+import { useMinLoading } from "@/hooks/use-min-loading";
+
+const transportBadge: Record<string, string> = {
+  stdio: "default",
+  sse: "secondary",
+  "streamable-http": "outline",
+};
+
+export function MCPPage() {
+  const { servers, loading, refresh, createServer, updateServer, deleteServer, grantAgent, revokeAgent, listGrantsByAgent } = useMCP();
+  const spinning = useMinLoading(loading);
+  const [search, setSearch] = useState("");
+  const [formOpen, setFormOpen] = useState(false);
+  const [editServer, setEditServer] = useState<MCPServerData | null>(null);
+  const [grantsServer, setGrantsServer] = useState<MCPServerData | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<MCPServerData | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+
+  const filtered = servers.filter(
+    (s) =>
+      s.name.toLowerCase().includes(search.toLowerCase()) ||
+      (s.display_name || "").toLowerCase().includes(search.toLowerCase()),
+  );
+
+  const handleCreate = async (data: MCPServerInput) => {
+    await createServer(data);
+  };
+
+  const handleEdit = async (data: MCPServerInput) => {
+    if (!editServer) return;
+    await updateServer(editServer.id, data);
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
+    try {
+      await deleteServer(deleteTarget.id);
+      setDeleteTarget(null);
+    } finally {
+      setDeleteLoading(false);
+    }
+  };
+
+  return (
+    <div className="p-6">
+      <PageHeader
+        title="MCP Servers"
+        description="Manage Model Context Protocol server connections"
+        actions={
+          <div className="flex gap-2">
+            <Button size="sm" onClick={() => { setEditServer(null); setFormOpen(true); }} className="gap-1">
+              <Plus className="h-3.5 w-3.5" /> Add Server
+            </Button>
+            <Button variant="outline" size="sm" onClick={refresh} disabled={spinning} className="gap-1">
+              <RefreshCw className={"h-3.5 w-3.5" + (spinning ? " animate-spin" : "")} /> Refresh
+            </Button>
+          </div>
+        }
+      />
+
+      <div className="mt-4">
+        <SearchInput
+          value={search}
+          onChange={setSearch}
+          placeholder="Search servers..."
+          className="max-w-sm"
+        />
+      </div>
+
+      <div className="mt-4">
+        {loading && servers.length === 0 ? (
+          <TableSkeleton rows={5} />
+        ) : filtered.length === 0 ? (
+          <EmptyState
+            icon={Plug}
+            title={search ? "No matching servers" : "No MCP servers"}
+            description={search ? "Try a different search term." : "Add your first MCP server to get started."}
+          />
+        ) : (
+          <div className="rounded-md border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/50">
+                  <th className="px-4 py-3 text-left font-medium">Name</th>
+                  <th className="px-4 py-3 text-left font-medium">Transport</th>
+                  <th className="px-4 py-3 text-left font-medium">Tool Prefix</th>
+                  <th className="px-4 py-3 text-left font-medium">Enabled</th>
+                  <th className="px-4 py-3 text-left font-medium">Created By</th>
+                  <th className="px-4 py-3 text-right font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((srv) => (
+                  <tr key={srv.id} className="border-b last:border-0 hover:bg-muted/30">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <Plug className="h-4 w-4 text-muted-foreground" />
+                        <div>
+                          <span className="font-medium">{srv.display_name || srv.name}</span>
+                          {srv.display_name && (
+                            <span className="ml-1 text-xs text-muted-foreground">({srv.name})</span>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge variant={transportBadge[srv.transport] as "default" | "secondary" | "outline" ?? "outline"}>
+                        {srv.transport}
+                      </Badge>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                      {srv.tool_prefix || "-"}
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge variant={srv.enabled ? "default" : "secondary"}>
+                        {srv.enabled ? "Yes" : "No"}
+                      </Badge>
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">{srv.created_by || "-"}</td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setGrantsServer(srv)}
+                          className="gap-1"
+                          title="Manage grants"
+                        >
+                          <Users className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => { setEditServer(srv); setFormOpen(true); }}
+                          className="gap-1"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setDeleteTarget(srv)}
+                          className="gap-1 text-destructive hover:text-destructive"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <MCPFormDialog
+        open={formOpen}
+        onOpenChange={setFormOpen}
+        server={editServer}
+        onSubmit={editServer ? handleEdit : handleCreate}
+      />
+
+      {grantsServer && (
+        <MCPGrantsDialog
+          open={!!grantsServer}
+          onOpenChange={(open) => !open && setGrantsServer(null)}
+          server={grantsServer}
+          onGrant={(agentId, allow, deny) => grantAgent(grantsServer.id, agentId, allow, deny)}
+          onRevoke={(agentId) => revokeAgent(grantsServer.id, agentId)}
+          onLoadGrants={listGrantsByAgent}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete MCP Server"
+        description={`Are you sure you want to delete "${deleteTarget?.display_name || deleteTarget?.name}"? This will also remove all associated grants.`}
+        confirmLabel="Delete"
+        variant="destructive"
+        onConfirm={handleDelete}
+        loading={deleteLoading}
+      />
+    </div>
+  );
+}

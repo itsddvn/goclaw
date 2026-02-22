@@ -1,0 +1,246 @@
+package http
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+
+	"github.com/google/uuid"
+
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
+)
+
+// ChannelInstancesHandler handles channel instance CRUD endpoints (managed mode).
+type ChannelInstancesHandler struct {
+	store  store.ChannelInstanceStore
+	token  string
+	msgBus *bus.MessageBus
+}
+
+// NewChannelInstancesHandler creates a handler for channel instance management endpoints.
+func NewChannelInstancesHandler(s store.ChannelInstanceStore, token string, msgBus *bus.MessageBus) *ChannelInstancesHandler {
+	return &ChannelInstancesHandler{store: s, token: token, msgBus: msgBus}
+}
+
+// RegisterRoutes registers all channel instance routes on the given mux.
+func (h *ChannelInstancesHandler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/channels/instances", h.auth(h.handleList))
+	mux.HandleFunc("POST /v1/channels/instances", h.auth(h.handleCreate))
+	mux.HandleFunc("GET /v1/channels/instances/{id}", h.auth(h.handleGet))
+	mux.HandleFunc("PUT /v1/channels/instances/{id}", h.auth(h.handleUpdate))
+	mux.HandleFunc("DELETE /v1/channels/instances/{id}", h.auth(h.handleDelete))
+}
+
+func (h *ChannelInstancesHandler) auth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h.token != "" {
+			if extractBearerToken(r) != h.token {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				return
+			}
+		}
+		userID := extractUserID(r)
+		if userID != "" {
+			ctx := store.WithUserID(r.Context(), userID)
+			r = r.WithContext(ctx)
+		}
+		next(w, r)
+	}
+}
+
+func (h *ChannelInstancesHandler) emitCacheInvalidate() {
+	if h.msgBus == nil {
+		return
+	}
+	h.msgBus.Broadcast(bus.Event{
+		Name:    protocol.EventCacheInvalidate,
+		Payload: bus.CacheInvalidatePayload{Kind: "channel_instances"},
+	})
+}
+
+func (h *ChannelInstancesHandler) handleList(w http.ResponseWriter, r *http.Request) {
+	instances, err := h.store.ListAll(r.Context())
+	if err != nil {
+		slog.Error("channel_instances.list", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list instances"})
+		return
+	}
+
+	result := make([]map[string]interface{}, 0, len(instances))
+	for _, inst := range instances {
+		result = append(result, maskInstanceHTTP(inst))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"instances": result})
+}
+
+func (h *ChannelInstancesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name        string          `json:"name"`
+		DisplayName string          `json:"display_name"`
+		ChannelType string          `json:"channel_type"`
+		AgentID     string          `json:"agent_id"`
+		Credentials json.RawMessage `json:"credentials"`
+		Config      json.RawMessage `json:"config"`
+		Enabled     *bool           `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	if body.Name == "" || body.ChannelType == "" || body.AgentID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name, channel_type, and agent_id are required"})
+		return
+	}
+
+	if !isValidChannelType(body.ChannelType) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid channel_type"})
+		return
+	}
+
+	agentID, err := uuid.Parse(body.AgentID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid agent_id"})
+		return
+	}
+
+	enabled := true
+	if body.Enabled != nil {
+		enabled = *body.Enabled
+	}
+
+	userID := store.UserIDFromContext(r.Context())
+
+	inst := &store.ChannelInstanceData{
+		Name:        body.Name,
+		DisplayName: body.DisplayName,
+		ChannelType: body.ChannelType,
+		AgentID:     agentID,
+		Credentials: body.Credentials,
+		Config:      body.Config,
+		Enabled:     enabled,
+		CreatedBy:   userID,
+	}
+
+	if err := h.store.Create(r.Context(), inst); err != nil {
+		slog.Error("channel_instances.create", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	h.emitCacheInvalidate()
+	writeJSON(w, http.StatusCreated, maskInstanceHTTP(*inst))
+}
+
+func (h *ChannelInstancesHandler) handleGet(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid instance ID"})
+		return
+	}
+
+	inst, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "instance not found"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, maskInstanceHTTP(*inst))
+}
+
+func (h *ChannelInstancesHandler) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid instance ID"})
+		return
+	}
+
+	var updates map[string]interface{}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&updates); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	if err := h.store.Update(r.Context(), id, updates); err != nil {
+		slog.Error("channel_instances.update", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	h.emitCacheInvalidate()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (h *ChannelInstancesHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid instance ID"})
+		return
+	}
+
+	// Look up instance to check if it's a default (seeded) instance.
+	inst, err := h.store.Get(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "instance not found"})
+		return
+	}
+	if store.IsDefaultChannelInstance(inst.Name) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cannot delete default channel instance"})
+		return
+	}
+
+	if err := h.store.Delete(r.Context(), id); err != nil {
+		slog.Error("channel_instances.delete", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	h.emitCacheInvalidate()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// maskInstanceHTTP returns a map with credentials masked for HTTP responses.
+func maskInstanceHTTP(inst store.ChannelInstanceData) map[string]interface{} {
+	result := map[string]interface{}{
+		"id":           inst.ID,
+		"name":         inst.Name,
+		"display_name": inst.DisplayName,
+		"channel_type": inst.ChannelType,
+		"agent_id":     inst.AgentID,
+		"config":       inst.Config,
+		"enabled":      inst.Enabled,
+		"is_default":   store.IsDefaultChannelInstance(inst.Name),
+		"created_by":   inst.CreatedBy,
+		"created_at":   inst.CreatedAt,
+		"updated_at":   inst.UpdatedAt,
+	}
+
+	if len(inst.Credentials) > 0 {
+		var raw map[string]interface{}
+		if json.Unmarshal(inst.Credentials, &raw) == nil {
+			masked := make(map[string]interface{}, len(raw))
+			for k := range raw {
+				masked[k] = "***"
+			}
+			result["credentials"] = masked
+		} else {
+			result["credentials"] = map[string]string{}
+		}
+	} else {
+		result["credentials"] = map[string]string{}
+	}
+
+	return result
+}
+
+// isValidChannelType checks if the channel type is supported.
+func isValidChannelType(ct string) bool {
+	switch ct {
+	case "telegram", "discord", "whatsapp", "zalo_oa", "zalo_personal", "feishu":
+		return true
+	}
+	return false
+}

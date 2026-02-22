@@ -1,0 +1,394 @@
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
+	"github.com/nextlevelbuilder/goclaw/internal/sessions"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
+)
+
+// makeSchedulerRunFunc creates the RunFunc for the scheduler.
+// It extracts the agentID from the session key and routes to the correct agent loop.
+func makeSchedulerRunFunc(agents *agent.Router, cfg *config.Config) scheduler.RunFunc {
+	return func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+		// Extract agentID from session key (format: agent:{agentId}:{rest})
+		agentID := cfg.ResolveDefaultAgentID()
+		if parts := strings.SplitN(req.SessionKey, ":", 3); len(parts) >= 2 && parts[0] == "agent" {
+			agentID = parts[1]
+		}
+
+		loop, err := agents.Get(agentID)
+		if err != nil {
+			return nil, fmt.Errorf("agent %s not found: %w", agentID, err)
+		}
+		return loop.Run(ctx, req)
+	}
+}
+
+// consumeInboundMessages reads inbound messages from channels (Telegram, Discord, etc.)
+// and routes them through the scheduler/agent loop, then publishes the response back.
+// Also handles subagent announcements: routes them through the parent agent's session
+// (matching TS subagent-announce.ts pattern) so the agent can reformulate for the user.
+func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents *agent.Router, cfg *config.Config, sched *scheduler.Scheduler, channelMgr *channels.Manager) {
+	slog.Info("inbound message consumer started")
+
+	// Inbound message deduplication (matching TS src/infra/dedupe.ts + inbound-dedupe.ts).
+	// TTL=20min, max=5000 entries — prevents webhook retries / double-taps from duplicating agent runs.
+	dedupe := bus.NewDedupeCache(20*time.Minute, 5000)
+
+	// processNormalMessage handles routing, scheduling, and response delivery for a single
+	// (possibly merged) inbound message. Called directly by the debouncer's flush callback.
+	processNormalMessage := func(msg bus.InboundMessage) {
+		// Determine target agent via bindings or explicit AgentID
+		agentID := msg.AgentID
+		if agentID == "" {
+			agentID = resolveAgentRoute(cfg, msg.Channel, msg.ChatID, msg.PeerKind)
+		}
+
+		if _, err := agents.Get(agentID); err != nil {
+			slog.Warn("inbound: agent not found", "agent", agentID, "channel", msg.Channel)
+			return
+		}
+
+		// Build session key based on scope config (matching TS buildAgentPeerSessionKey).
+		peerKind := msg.PeerKind
+		if peerKind == "" {
+			peerKind = string(sessions.PeerDirect) // default to DM
+		}
+		sessionKey := sessions.BuildScopedSessionKey(agentID, msg.Channel, sessions.PeerKind(peerKind), msg.ChatID, cfg.Sessions.Scope, cfg.Sessions.DmScope, cfg.Sessions.MainKey)
+
+		// Forum topic: override session key to isolate per-topic history.
+		// TS ref: buildTelegramGroupPeerId() in src/telegram/bot/helpers.ts
+		if msg.Metadata["is_forum"] == "true" && peerKind == string(sessions.PeerGroup) {
+			var topicID int
+			fmt.Sscanf(msg.Metadata["message_thread_id"], "%d", &topicID)
+			if topicID > 0 {
+				sessionKey = sessions.BuildGroupTopicSessionKey(agentID, msg.Channel, msg.ChatID, topicID)
+			}
+		}
+
+		// Group-scoped UserID: treat the group as a single "virtual user" for
+		// context files, memory, traces, and seeding. Individual senderID is
+		// preserved in the InboundMessage for pairing/dedup/mention gate.
+		// Format: "group:{channel}:{chatID}" — e.g., "group:telegram:-1002541239372"
+		userID := msg.UserID
+		if peerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
+			userID = fmt.Sprintf("group:%s:%s", msg.Channel, msg.ChatID)
+		}
+
+		slog.Info("inbound: scheduling message (main lane)",
+			"channel", msg.Channel,
+			"chat_id", msg.ChatID,
+			"peer_kind", peerKind,
+			"agent", agentID,
+			"session", sessionKey,
+			"user_id", userID,
+		)
+
+		// Enable streaming when the channel supports it (so agent emits chunk events).
+		enableStream := channelMgr != nil && channelMgr.IsStreamingChannel(msg.Channel)
+
+		runID := fmt.Sprintf("inbound-%s-%s", msg.Channel, msg.ChatID)
+
+		// Register run with channel manager for streaming/reaction event forwarding.
+		// Use localKey (composite key with topic suffix) so streaming/reaction events
+		// route to the correct per-topic state in the channel.
+		messageID := 0
+		if mid := msg.Metadata["message_id"]; mid != "" {
+			fmt.Sscanf(mid, "%d", &messageID)
+		}
+		chatIDForRun := msg.ChatID
+		if lk := msg.Metadata["local_key"]; lk != "" {
+			chatIDForRun = lk
+		}
+		if channelMgr != nil {
+			channelMgr.RegisterRun(runID, msg.Channel, chatIDForRun, messageID)
+		}
+
+		// Group-aware system prompt: help the LLM adapt tone and behavior for group chats.
+		var extraPrompt string
+		if peerKind == string(sessions.PeerGroup) {
+			extraPrompt = "You are in a GROUP chat (multiple participants), not a private 1-on-1 DM.\n" +
+				"- Messages may include a [Chat messages since your last reply] section with recent group history. Each history line shows \"sender [time]: message\".\n" +
+				"- The current message (after [Your current message]) is from the person who @mentioned you — their name is NOT included.\n" +
+				"- Keep responses concise and focused; long replies are disruptive in groups.\n" +
+				"- Address the group naturally. If the history shows a multi-person conversation, consider the full context before answering."
+		}
+
+		// Schedule through main lane (per-session serialization + lane concurrency)
+		outCh := sched.Schedule(ctx, "main", agent.RunRequest{
+			SessionKey:        sessionKey,
+			Message:           msg.Content,
+			Channel:           msg.Channel,
+			ChatID:            msg.ChatID,
+			PeerKind:          peerKind,
+			UserID:            userID,
+			RunID:             runID,
+			Stream:            enableStream,
+			HistoryLimit:      msg.HistoryLimit,
+			ExtraSystemPrompt: extraPrompt,
+		})
+
+		// Build outbound metadata for reply-to + thread routing.
+		// message_id → reply_to_message_id so Send() replies to user's message.
+		outMeta := make(map[string]string)
+		if mid := msg.Metadata["message_id"]; mid != "" {
+			outMeta["reply_to_message_id"] = mid
+		}
+		for _, k := range []string{"message_thread_id", "local_key"} {
+			if v := msg.Metadata[k]; v != "" {
+				outMeta[k] = v
+			}
+		}
+
+		// Handle result asynchronously to not block the flush callback.
+		go func(channel, chatID, session, rID string, meta map[string]string) {
+			outcome := <-outCh
+
+			// Clean up run tracking (in case HandleAgentEvent didn't fire for terminal events)
+			if channelMgr != nil {
+				channelMgr.UnregisterRun(rID)
+			}
+
+			if outcome.Err != nil {
+				slog.Error("inbound: agent run failed", "error", outcome.Err, "channel", channel)
+				msgBus.PublishOutbound(bus.OutboundMessage{
+					Channel:  channel,
+					ChatID:   chatID,
+					Content:  formatAgentError(outcome.Err),
+					Metadata: meta,
+				})
+				return
+			}
+
+			// Suppress empty/NO_REPLY responses (matching TS normalize-reply.ts).
+			if outcome.Result.Content == "" || agent.IsSilentReply(outcome.Result.Content) {
+				slog.Info("inbound: suppressed silent/empty reply",
+					"channel", channel,
+					"chat_id", chatID,
+					"session", session,
+				)
+				return
+			}
+
+			// Publish response back to the channel
+			msgBus.PublishOutbound(bus.OutboundMessage{
+				Channel:  channel,
+				ChatID:   chatID,
+				Content:  outcome.Result.Content,
+				Metadata: meta,
+			})
+		}(msg.Channel, msg.ChatID, sessionKey, runID, outMeta)
+	}
+
+	// Inbound debounce: merge rapid messages from the same sender before processing.
+	// Matching TS createInboundDebouncer from src/auto-reply/inbound-debounce.ts.
+	debounceMs := cfg.Gateway.InboundDebounceMs
+	if debounceMs == 0 {
+		debounceMs = 1000 // default: 1000ms
+	}
+	debouncer := bus.NewInboundDebouncer(
+		time.Duration(debounceMs)*time.Millisecond,
+		processNormalMessage,
+	)
+	defer debouncer.Stop()
+
+	slog.Info("inbound debounce configured", "debounce_ms", debounceMs)
+
+	for {
+		msg, ok := msgBus.ConsumeInbound(ctx)
+		if !ok {
+			slog.Info("inbound message consumer stopped")
+			return
+		}
+
+		// --- Dedup: skip duplicate inbound messages (matching TS shouldSkipDuplicateInbound) ---
+		if msgID := msg.Metadata["message_id"]; msgID != "" {
+			dedupeKey := fmt.Sprintf("%s|%s|%s|%s", msg.Channel, msg.SenderID, msg.ChatID, msgID)
+			if dedupe.IsDuplicate(dedupeKey) {
+				slog.Debug("dedup: skipping duplicate message", "key", dedupeKey)
+				continue
+			}
+		}
+
+		// --- Subagent announce: bypass debounce, inject into parent agent session ---
+		if msg.Channel == "system" && strings.HasPrefix(msg.SenderID, "subagent:") {
+			origChannel := msg.Metadata["origin_channel"]
+			origPeerKind := msg.Metadata["origin_peer_kind"]
+			parentAgent := msg.Metadata["parent_agent"]
+			if parentAgent == "" {
+				parentAgent = "default"
+			}
+			if origPeerKind == "" {
+				origPeerKind = string(sessions.PeerDirect)
+			}
+
+			if origChannel == "" || msg.ChatID == "" {
+				slog.Warn("subagent announce: missing origin", "sender", msg.SenderID)
+				continue
+			}
+
+			// Use SAME session as user's original chat so agent has context.
+			sessionKey := sessions.BuildScopedSessionKey(parentAgent, origChannel, sessions.PeerKind(origPeerKind), msg.ChatID, cfg.Sessions.Scope, cfg.Sessions.DmScope, cfg.Sessions.MainKey)
+
+			slog.Info("subagent announce → scheduler (subagent lane)",
+				"subagent", msg.SenderID,
+				"label", msg.Metadata["subagent_label"],
+				"session", sessionKey,
+			)
+
+			// Extract parent trace context for announce linking
+			var parentTraceID, parentRootSpanID uuid.UUID
+			if tid := msg.Metadata["origin_trace_id"]; tid != "" {
+				parentTraceID, _ = uuid.Parse(tid)
+			}
+			if sid := msg.Metadata["origin_root_span_id"]; sid != "" {
+				parentRootSpanID, _ = uuid.Parse(sid)
+			}
+
+			// Group-scoped UserID for subagent announce (same logic as main lane).
+			announceUserID := msg.UserID
+			if origPeerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
+				announceUserID = fmt.Sprintf("group:%s:%s", origChannel, msg.ChatID)
+			}
+
+			// Schedule through subagent lane
+			outCh := sched.Schedule(ctx, "subagent", agent.RunRequest{
+				SessionKey:       sessionKey,
+				Message:          msg.Content,
+				Channel:          origChannel,
+				ChatID:           msg.ChatID,
+				PeerKind:         origPeerKind,
+				UserID:           announceUserID,
+				RunID:            fmt.Sprintf("announce-%s", msg.SenderID),
+				Stream:           false,
+				ParentTraceID:    parentTraceID,
+				ParentRootSpanID: parentRootSpanID,
+			})
+
+			// Handle result asynchronously to not block the consumer loop
+			go func(origCh, chatID, senderID, label string) {
+				outcome := <-outCh
+				if outcome.Err != nil {
+					slog.Error("subagent announce: agent run failed", "error", outcome.Err)
+					msgBus.PublishOutbound(bus.OutboundMessage{
+						Channel: origCh,
+						ChatID:  chatID,
+						Content: formatAgentError(outcome.Err),
+					})
+					return
+				}
+
+				// Suppress empty/NO_REPLY (matching TS normalize-reply.ts / tokens.ts).
+				if outcome.Result.Content == "" || agent.IsSilentReply(outcome.Result.Content) {
+					slog.Info("subagent announce: suppressed silent/empty reply",
+						"subagent", senderID,
+						"label", label,
+					)
+					return
+				}
+
+				// Deliver agent's reformulated response to origin channel.
+				msgBus.PublishOutbound(bus.OutboundMessage{
+					Channel: origCh,
+					ChatID:  chatID,
+					Content: outcome.Result.Content,
+				})
+			}(origChannel, msg.ChatID, msg.SenderID, msg.Metadata["subagent_label"])
+			continue
+		}
+
+		// --- Normal messages: route through debouncer ---
+		debouncer.Push(msg)
+	}
+}
+
+// resolveCronAgent resolves the agent ID for a cron job, falling back to the
+// config default if the requested agent doesn't exist.
+func resolveCronAgent(agentID string, agents *agent.Router, cfg *config.Config) string {
+	if agentID == "" {
+		return cfg.ResolveDefaultAgentID()
+	}
+	normalized := config.NormalizeAgentID(agentID)
+	if _, err := agents.Get(normalized); err != nil {
+		slog.Warn("cron agent not found, falling back to default", "requested", agentID)
+		return cfg.ResolveDefaultAgentID()
+	}
+	return normalized
+}
+
+// makeCronJobHandler creates a cron job handler that sends job messages through the agent.
+func makeCronJobHandler(agents *agent.Router, msgBus *bus.MessageBus, cfg *config.Config) func(job *store.CronJob) (string, error) {
+	return func(job *store.CronJob) (string, error) {
+		agentID := resolveCronAgent(job.AgentID, agents, cfg)
+		loop, err := agents.Get(agentID)
+		if err != nil {
+			return "", fmt.Errorf("agent %s not found: %w", agentID, err)
+		}
+
+		sessionKey := sessions.BuildCronSessionKey(agentID, job.ID, fmt.Sprintf("cron-%s", job.ID))
+		channel := job.Payload.Channel
+		if channel == "" {
+			channel = "cron"
+		}
+
+		result, err := loop.Run(context.Background(), agent.RunRequest{
+			SessionKey: sessionKey,
+			Message:    job.Payload.Message,
+			Channel:    channel,
+			ChatID:     job.Payload.To,
+			RunID:      fmt.Sprintf("cron-%s", job.ID),
+			Stream:     false,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		// If job wants delivery to a channel, publish outbound
+		if job.Payload.Deliver && job.Payload.Channel != "" && job.Payload.To != "" {
+			msgBus.PublishOutbound(bus.OutboundMessage{
+				Channel: job.Payload.Channel,
+				ChatID:  job.Payload.To,
+				Content: result.Content,
+			})
+		}
+
+		return result.Content, nil
+	}
+}
+
+// resolveAgentRoute determines which agent should handle a message
+// based on config bindings. Priority: peer → channel → default.
+// Matching TS resolve-route.ts binding resolution.
+func resolveAgentRoute(cfg *config.Config, channel, chatID, peerKind string) string {
+	for _, binding := range cfg.Bindings {
+		match := binding.Match
+		if match.Channel != channel {
+			continue
+		}
+
+		// Peer-level match (most specific)
+		if match.Peer != nil {
+			if match.Peer.Kind == peerKind && match.Peer.ID == chatID {
+				return config.NormalizeAgentID(binding.AgentID)
+			}
+			continue // has peer constraint but doesn't match — skip
+		}
+
+		// Channel-level match (least specific, no peer constraint)
+		return config.NormalizeAgentID(binding.AgentID)
+	}
+
+	return cfg.ResolveDefaultAgentID()
+}

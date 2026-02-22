@@ -1,0 +1,260 @@
+package config
+
+// ChannelsConfig contains per-channel configuration.
+type ChannelsConfig struct {
+	Telegram TelegramConfig `json:"telegram"`
+	Discord  DiscordConfig  `json:"discord"`
+	Slack    SlackConfig    `json:"slack"`
+	WhatsApp WhatsAppConfig `json:"whatsapp"`
+	Zalo     ZaloConfig     `json:"zalo"`
+	Feishu   FeishuConfig   `json:"feishu"`
+}
+
+type TelegramConfig struct {
+	Enabled        bool                `json:"enabled"`
+	Token          string              `json:"token"`
+	Proxy          string              `json:"proxy,omitempty"`
+	AllowFrom      FlexibleStringSlice `json:"allow_from"`
+	DMPolicy       string              `json:"dm_policy,omitempty"`        // "pairing" (default), "allowlist", "open", "disabled"
+	GroupPolicy    string              `json:"group_policy,omitempty"`     // "open" (default), "allowlist", "disabled"
+	RequireMention *bool               `json:"require_mention,omitempty"`  // require @bot mention in groups (default true)
+	HistoryLimit   int                 `json:"history_limit,omitempty"`    // max pending group messages for context (default 50, 0=disabled)
+	StreamMode     string              `json:"stream_mode,omitempty"`      // "off" (default), "partial" — streaming preview via message edits
+	ReactionLevel  string              `json:"reaction_level,omitempty"`   // "off" (default), "minimal", "full" — status emoji reactions
+	MediaMaxBytes  int64               `json:"media_max_bytes,omitempty"`  // max media download size in bytes (default 20MB)
+	LinkPreview    *bool               `json:"link_preview,omitempty"`     // enable URL previews in messages (default true)
+}
+
+type DiscordConfig struct {
+	Enabled     bool                `json:"enabled"`
+	Token       string              `json:"token"`
+	AllowFrom   FlexibleStringSlice `json:"allow_from"`
+	DMPolicy    string              `json:"dm_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
+	GroupPolicy string              `json:"group_policy,omitempty"` // "open" (default), "allowlist", "disabled"
+}
+
+type SlackConfig struct {
+	Enabled        bool                `json:"enabled"`
+	BotToken       string              `json:"bot_token"`
+	AppToken       string              `json:"app_token"`
+	AllowFrom      FlexibleStringSlice `json:"allow_from"`
+	DMPolicy       string              `json:"dm_policy,omitempty"`       // "open" (default), "allowlist", "disabled"
+	GroupPolicy    string              `json:"group_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
+	RequireMention bool               `json:"require_mention,omitempty"` // only respond to @bot in channels (default true)
+}
+
+type WhatsAppConfig struct {
+	Enabled     bool                `json:"enabled"`
+	BridgeURL   string              `json:"bridge_url"`
+	AllowFrom   FlexibleStringSlice `json:"allow_from"`
+	DMPolicy    string              `json:"dm_policy,omitempty"`    // "open" (default), "allowlist", "disabled"
+	GroupPolicy string              `json:"group_policy,omitempty"` // "open" (default), "allowlist", "disabled"
+}
+
+type ZaloConfig struct {
+	Enabled       bool                `json:"enabled"`
+	Token         string              `json:"token"`
+	AllowFrom     FlexibleStringSlice `json:"allow_from"`
+	DMPolicy      string              `json:"dm_policy,omitempty"`       // "pairing" (default), "allowlist", "open", "disabled"
+	WebhookURL    string              `json:"webhook_url,omitempty"`
+	WebhookSecret string              `json:"webhook_secret,omitempty"`
+	MediaMaxMB    int                 `json:"media_max_mb,omitempty"` // default 5
+}
+
+type FeishuConfig struct {
+	Enabled           bool                `json:"enabled"`
+	AppID             string              `json:"app_id"`
+	AppSecret         string              `json:"app_secret"`
+	EncryptKey        string              `json:"encrypt_key,omitempty"`
+	VerificationToken string              `json:"verification_token,omitempty"`
+	Domain            string              `json:"domain,omitempty"`             // "lark" (default/global), "feishu" (China), or custom URL
+	ConnectionMode    string              `json:"connection_mode,omitempty"`    // "websocket" (default), "webhook"
+	WebhookPort       int                 `json:"webhook_port,omitempty"`       // default 3000
+	WebhookPath       string              `json:"webhook_path,omitempty"`       // default "/feishu/events"
+	AllowFrom         FlexibleStringSlice `json:"allow_from"`
+	DMPolicy          string              `json:"dm_policy,omitempty"`          // "pairing" (default)
+	GroupPolicy       string              `json:"group_policy,omitempty"`       // "open" (default)
+	GroupAllowFrom    FlexibleStringSlice `json:"group_allow_from,omitempty"`
+	RequireMention    *bool               `json:"require_mention,omitempty"`    // default true (groups)
+	TopicSessionMode  string              `json:"topic_session_mode,omitempty"` // "disabled" (default)
+	TextChunkLimit    int                 `json:"text_chunk_limit,omitempty"`   // default 4000
+	MediaMaxMB        int                 `json:"media_max_mb,omitempty"`       // default 30
+	RenderMode        string              `json:"render_mode,omitempty"`        // "auto", "raw", "card"
+	Streaming         *bool               `json:"streaming,omitempty"`          // default true
+	HistoryLimit      int                 `json:"history_limit,omitempty"`
+}
+
+// ProvidersConfig maps provider name to its config.
+type ProvidersConfig struct {
+	Anthropic  ProviderConfig `json:"anthropic"`
+	OpenAI     ProviderConfig `json:"openai"`
+	OpenRouter ProviderConfig `json:"openrouter"`
+	Groq       ProviderConfig `json:"groq"`
+	Gemini     ProviderConfig `json:"gemini"`
+	DeepSeek   ProviderConfig `json:"deepseek"`
+	Mistral    ProviderConfig `json:"mistral"`
+	XAI        ProviderConfig `json:"xai"`
+	MiniMax    ProviderConfig `json:"minimax"`
+	Cohere     ProviderConfig `json:"cohere"`
+	Perplexity ProviderConfig `json:"perplexity"`
+}
+
+type ProviderConfig struct {
+	APIKey  string `json:"api_key"`
+	APIBase string `json:"api_base,omitempty"`
+}
+
+// HasAnyProvider returns true if at least one provider has an API key configured.
+func (c *Config) HasAnyProvider() bool {
+	p := c.Providers
+	return p.Anthropic.APIKey != "" ||
+		p.OpenAI.APIKey != "" ||
+		p.OpenRouter.APIKey != "" ||
+		p.Groq.APIKey != "" ||
+		p.Gemini.APIKey != "" ||
+		p.DeepSeek.APIKey != "" ||
+		p.Mistral.APIKey != "" ||
+		p.XAI.APIKey != "" ||
+		p.MiniMax.APIKey != "" ||
+		p.Cohere.APIKey != "" ||
+		p.Perplexity.APIKey != ""
+}
+
+// GatewayConfig controls the gateway server.
+type GatewayConfig struct {
+	Host            string   `json:"host"`
+	Port            int      `json:"port"`
+	Token           string   `json:"token,omitempty"`              // bearer token for WS/HTTP auth
+	OwnerIDs        []string `json:"owner_ids,omitempty"`          // sender IDs considered "owner"
+	AllowedOrigins  []string `json:"allowed_origins,omitempty"`    // WebSocket CORS whitelist (empty = allow all)
+	MaxMessageChars int      `json:"max_message_chars,omitempty"`  // max user message characters (default 32000)
+	RateLimitRPM      int      `json:"rate_limit_rpm,omitempty"`       // rate limit: requests per minute per user (default 20, 0 = disabled)
+	InjectionAction   string   `json:"injection_action,omitempty"`     // prompt injection action: "log", "warn" (default), "block", "off"
+	InboundDebounceMs int      `json:"inbound_debounce_ms,omitempty"` // merge rapid messages from same sender (default 1000ms, -1 = disabled)
+}
+
+// ToolsConfig controls tool availability, policy, and web search.
+type ToolsConfig struct {
+	Profile          string                        `json:"profile,omitempty"`            // global profile: "minimal", "coding", "messaging", "full"
+	Allow            []string                      `json:"allow,omitempty"`              // global allow list (tool names or "group:xxx")
+	Deny             []string                      `json:"deny,omitempty"`               // global deny list
+	AlsoAllow        []string                      `json:"alsoAllow,omitempty"`          // additive: adds without removing existing
+	ByProvider       map[string]*ToolPolicySpec    `json:"byProvider,omitempty"`         // per-provider overrides
+	ExecApproval     ExecApprovalCfg               `json:"execApproval,omitempty"`       // exec command approval settings
+	Web              WebToolsConfig                `json:"web"`
+	Browser          BrowserToolConfig             `json:"browser"`
+	RateLimitPerHour int                           `json:"rate_limit_per_hour,omitempty"` // max tool executions per hour per session (0 = disabled)
+	ScrubCredentials *bool                         `json:"scrub_credentials,omitempty"`   // auto-redact API keys/tokens in tool output (default true)
+	McpServers       map[string]*MCPServerConfig   `json:"mcp_servers,omitempty"`         // external MCP server connections
+}
+
+// MCPServerConfig configures a single external MCP server connection.
+type MCPServerConfig struct {
+	Transport  string            `json:"transport"`               // "stdio", "sse", "streamable-http"
+	Command    string            `json:"command,omitempty"`       // stdio: command to spawn
+	Args       []string          `json:"args,omitempty"`          // stdio: command arguments
+	Env        map[string]string `json:"env,omitempty"`           // stdio: extra environment variables
+	URL        string            `json:"url,omitempty"`           // sse/http: server URL
+	Headers    map[string]string `json:"headers,omitempty"`       // sse/http: extra HTTP headers
+	Enabled    *bool             `json:"enabled,omitempty"`       // default true
+	ToolPrefix string            `json:"tool_prefix,omitempty"`   // prefix for tool names (avoids collisions)
+	TimeoutSec int               `json:"timeout_sec,omitempty"`   // per-tool-call timeout in seconds (default 60)
+}
+
+// IsEnabled returns whether this MCP server is enabled (default true).
+func (c *MCPServerConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// ExecApprovalCfg configures command execution approval (matching TS exec-approval.ts).
+type ExecApprovalCfg struct {
+	Security  string   `json:"security,omitempty"`  // "deny", "allowlist", "full" (default "full")
+	Ask       string   `json:"ask,omitempty"`       // "off", "on-miss", "always" (default "off")
+	Allowlist []string `json:"allowlist,omitempty"` // glob patterns for allowed commands
+}
+
+// BrowserToolConfig controls the browser automation tool.
+type BrowserToolConfig struct {
+	Enabled  bool `json:"enabled"`            // enable the browser tool (default false)
+	Headless bool `json:"headless,omitempty"` // run Chrome in headless mode
+}
+
+// ToolPolicySpec defines a tool policy at any level (global, per-agent, per-provider).
+type ToolPolicySpec struct {
+	Profile    string                     `json:"profile,omitempty"`
+	Allow      []string                   `json:"allow,omitempty"`
+	Deny       []string                   `json:"deny,omitempty"`
+	AlsoAllow  []string                   `json:"alsoAllow,omitempty"`
+	ByProvider map[string]*ToolPolicySpec `json:"byProvider,omitempty"`
+}
+
+type WebToolsConfig struct {
+	Brave      BraveConfig      `json:"brave"`
+	DuckDuckGo DuckDuckGoConfig `json:"duckduckgo"`
+}
+
+type BraveConfig struct {
+	Enabled    bool   `json:"enabled"`
+	APIKey     string `json:"api_key"`
+	MaxResults int    `json:"max_results"`
+}
+
+type DuckDuckGoConfig struct {
+	Enabled    bool `json:"enabled"`
+	MaxResults int  `json:"max_results"`
+}
+
+// SessionsConfig controls session behavior.
+// Matching TS src/config/sessions/types.ts + src/config/types.base.ts.
+type SessionsConfig struct {
+	Storage string `json:"storage"`              // directory for session files
+	Scope   string `json:"scope,omitempty"`      // "per-sender" (default), "global"
+	DmScope string `json:"dm_scope,omitempty"`   // "main", "per-peer", "per-channel-peer" (default), "per-account-channel-peer"
+	MainKey string `json:"main_key,omitempty"`   // main session key suffix (default "main", used when dm_scope="main")
+}
+
+// TtsConfig configures text-to-speech.
+// Matching TS src/config/types.tts.ts.
+type TtsConfig struct {
+	Provider   string              `json:"provider,omitempty"`    // "openai", "elevenlabs", "edge", "minimax"
+	Auto       string              `json:"auto,omitempty"`        // "off" (default), "always", "inbound", "tagged"
+	Mode       string              `json:"mode,omitempty"`        // "final" (default), "all"
+	MaxLength  int                 `json:"max_length,omitempty"`  // max text length before truncation (default 1500)
+	TimeoutMs  int                 `json:"timeout_ms,omitempty"`  // API timeout in ms (default 30000)
+	OpenAI     TtsOpenAIConfig     `json:"openai,omitempty"`
+	ElevenLabs TtsElevenLabsConfig `json:"elevenlabs,omitempty"`
+	Edge       TtsEdgeConfig       `json:"edge,omitempty"`
+	MiniMax    TtsMiniMaxConfig    `json:"minimax,omitempty"`
+}
+
+// TtsOpenAIConfig configures the OpenAI TTS provider.
+type TtsOpenAIConfig struct {
+	APIKey  string `json:"api_key,omitempty"`
+	APIBase string `json:"api_base,omitempty"` // custom endpoint URL
+	Model   string `json:"model,omitempty"`    // default "gpt-4o-mini-tts"
+	Voice   string `json:"voice,omitempty"`    // default "alloy"
+}
+
+// TtsElevenLabsConfig configures the ElevenLabs TTS provider.
+type TtsElevenLabsConfig struct {
+	APIKey  string `json:"api_key,omitempty"`
+	BaseURL string `json:"base_url,omitempty"`
+	VoiceID string `json:"voice_id,omitempty"` // default "pMsXgVXv3BLzUgSXRplE"
+	ModelID string `json:"model_id,omitempty"` // default "eleven_multilingual_v2"
+}
+
+// TtsEdgeConfig configures the Microsoft Edge TTS provider (free, no API key).
+type TtsEdgeConfig struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Voice   string `json:"voice,omitempty"` // default "en-US-MichelleNeural"
+	Rate    string `json:"rate,omitempty"`  // speech rate, e.g. "+0%"
+}
+
+// TtsMiniMaxConfig configures the MiniMax TTS provider.
+type TtsMiniMaxConfig struct {
+	APIKey  string `json:"api_key,omitempty"`
+	GroupID string `json:"group_id,omitempty"` // MiniMax GroupId (required)
+	APIBase string `json:"api_base,omitempty"` // default "https://api.minimax.io/v1"
+	Model   string `json:"model,omitempty"`    // default "speech-02-hd"
+	VoiceID string `json:"voice_id,omitempty"` // default "Wise_Woman"
+}

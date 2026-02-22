@@ -1,0 +1,29 @@
+# Base docker-compose — shared service definition.
+# Combine with an overlay for your deployment mode:
+#
+#   Standalone:  docker compose -f docker-compose.yml -f docker-compose.standalone.yml up
+#   Managed:     docker compose -f docker-compose.yml -f docker-compose.managed.yml up
+#   Managed+OTel: docker compose -f docker-compose.yml -f docker-compose.managed.yml -f docker-compose.otel.yml up
+
+services:
+  goclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ENABLE_OTEL: "false"
+    ports:
+      - "${GOCLAW_PORT:-18790}:18790"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - GOCLAW_HOST=0.0.0.0
+      - GOCLAW_PORT=18790
+      - GOCLAW_CONFIG=/app/data/config.json
+    volumes:
+      - goclaw-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  goclaw-data:
