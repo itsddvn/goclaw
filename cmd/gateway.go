@@ -557,7 +557,7 @@ func runGateway() {
 		}
 
 		wireManagedExtras(managedStores, agentRouter, providerRegistry, msgBus, sessStore, toolsReg, toolPE, skillsLoader, hasMemory, traceCollector, workspace, cfg.Gateway.InjectionAction, cfg, sandboxMgr, dynamicLoader)
-		agentsH, skillsH, tracesH, mcpH, customToolsH, channelInstancesH, providersH := wireManagedHTTP(managedStores, cfg.Gateway.Token, msgBus, toolsReg)
+		agentsH, skillsH, tracesH, mcpH, customToolsH, channelInstancesH, providersH := wireManagedHTTP(managedStores, cfg.Gateway.Token, msgBus, toolsReg, providerRegistry)
 		if agentsH != nil {
 			server.SetAgentsHandler(agentsH)
 		}
@@ -614,7 +614,6 @@ func runGateway() {
 
 	// Managed mode: load channel instances from DB first.
 	var instanceLoader *channels.InstanceLoader
-	var loadedNames map[string]struct{}
 	if managedStores != nil && managedStores.ChannelInstances != nil {
 		instanceLoader = channels.NewInstanceLoader(managedStores.ChannelInstances, managedStores.Agents, channelMgr, msgBus, pairingStore)
 		instanceLoader.RegisterFactory("telegram", telegram.FactoryWithAgentStore(managedStores.Agents))
@@ -625,21 +624,17 @@ func runGateway() {
 		if err := instanceLoader.LoadAll(context.Background()); err != nil {
 			slog.Error("failed to load channel instances from DB", "error", err)
 		}
-		loadedNames = instanceLoader.LoadedNames()
 	}
 
-	// Register config-based channels as fallback.
-	// Telegram: kept for backward compat (only channel with production data).
-	// Other channels: skip config registration in managed mode if any DB instances loaded.
-	if cfg.Channels.Telegram.Enabled && cfg.Channels.Telegram.Token != "" {
-		if _, loaded := loadedNames["telegram"]; !loaded {
-			tg, err := telegram.New(cfg.Channels.Telegram, msgBus, pairingStore, nil)
-			if err != nil {
-				slog.Error("failed to initialize telegram channel", "error", err)
-			} else {
-				channelMgr.RegisterChannel("telegram", tg)
-				slog.Info("telegram channel enabled (config)")
-			}
+	// Register config-based channels as fallback (standalone mode only).
+	// In managed mode, channels are loaded from DB via instanceLoader — skip config-based registration.
+	if cfg.Channels.Telegram.Enabled && cfg.Channels.Telegram.Token != "" && instanceLoader == nil {
+		tg, err := telegram.New(cfg.Channels.Telegram, msgBus, pairingStore, nil)
+		if err != nil {
+			slog.Error("failed to initialize telegram channel", "error", err)
+		} else {
+			channelMgr.RegisterChannel("telegram", tg)
+			slog.Info("telegram channel enabled (config)")
 		}
 	}
 

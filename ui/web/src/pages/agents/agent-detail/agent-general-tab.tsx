@@ -35,9 +35,8 @@ export function AgentGeneralTab({ agent, onUpdate }: AgentGeneralTabProps) {
     [enabledProviders, provider],
   );
   const { models, loading: modelsLoading } = useProviderModels(selectedProviderId);
-  const [contextWindow, setContextWindow] = useState(agent.context_window);
-  const [maxToolIterations, setMaxToolIterations] = useState(agent.max_tool_iterations);
-  const [workspace, setWorkspace] = useState(agent.workspace);
+  const [contextWindow, setContextWindow] = useState(agent.context_window || 200000);
+  const [maxToolIterations, setMaxToolIterations] = useState(agent.max_tool_iterations || 20);
   const [restrictToWorkspace, setRestrictToWorkspace] = useState(agent.restrict_to_workspace);
   const [status, setStatus] = useState(agent.status);
   const [isDefault, setIsDefault] = useState(agent.is_default);
@@ -57,7 +56,6 @@ export function AgentGeneralTab({ agent, onUpdate }: AgentGeneralTabProps) {
         model,
         context_window: contextWindow,
         max_tool_iterations: maxToolIterations,
-        workspace,
         restrict_to_workspace: restrictToWorkspace,
         status,
         is_default: isDefault,
@@ -207,16 +205,12 @@ export function AgentGeneralTab({ agent, onUpdate }: AgentGeneralTabProps) {
         <h3 className="text-sm font-medium text-muted-foreground">Workspace</h3>
         <div className="space-y-4 rounded-lg border p-4">
           <div className="space-y-2">
-            <Label htmlFor="workspace">Workspace Path</Label>
-            <Input
-              id="workspace"
-              value={workspace}
-              onChange={(e) => setWorkspace(e.target.value)}
-              placeholder="/path/to/workspace"
-              className="font-mono text-sm"
-            />
+            <Label>Workspace Path</Label>
+            <p className="rounded-md border bg-muted/50 px-3 py-2 font-mono text-sm text-muted-foreground">
+              {agent.workspace || "No workspace configured"}
+            </p>
             <p className="text-xs text-muted-foreground">
-              Filesystem root the agent can access. Leave empty for no filesystem access.
+              Automatically assigned when the agent is created. Per-user subdirectories are created at runtime.
             </p>
           </div>
           <div className="flex items-center gap-2">

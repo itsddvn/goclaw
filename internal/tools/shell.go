@@ -208,7 +208,11 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) *Re
 		}
 	}
 
-	cwd := t.workingDir
+	// Use per-user workspace from context if available (managed mode), fallback to struct field
+	cwd := ToolWorkspaceFromCtx(ctx)
+	if cwd == "" {
+		cwd = t.workingDir
+	}
 	if wd, _ := args["working_dir"].(string); wd != "" {
 		if t.restrict {
 			resolved, err := resolvePath(wd, t.workingDir, true)

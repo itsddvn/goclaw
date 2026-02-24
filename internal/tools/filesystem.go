@@ -101,8 +101,12 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]interface{})
 		return t.executeInSandbox(ctx, path, sandboxKey)
 	}
 
-	// Host execution
-	resolved, err := resolvePathWithAllowed(path, t.workspace, t.restrict, t.allowedPrefixes)
+	// Host execution — use per-user workspace from context if available (managed mode)
+	workspace := ToolWorkspaceFromCtx(ctx)
+	if workspace == "" {
+		workspace = t.workspace
+	}
+	resolved, err := resolvePathWithAllowed(path, workspace, t.restrict, t.allowedPrefixes)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}

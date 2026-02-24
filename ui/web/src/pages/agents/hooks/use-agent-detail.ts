@@ -90,5 +90,13 @@ export function useAgentDetail(agentId: string | undefined) {
     [agent, ws, load],
   );
 
-  return { agent, files, loading, updateAgent, getFile, setFile, refresh: load };
+  const regenerateAgent = useCallback(
+    async (prompt: string) => {
+      if (!agentId) return;
+      await http.post(`/v1/agents/${agentId}/regenerate`, { prompt });
+    },
+    [agentId, http],
+  );
+
+  return { agent, files, loading, updateAgent, getFile, setFile, regenerateAgent, refresh: load };
 }

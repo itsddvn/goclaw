@@ -9,6 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -21,6 +22,7 @@ import type { AgentData } from "@/types/agent";
 import { slugify, isValidSlug } from "@/lib/slug";
 import { useProviders } from "@/pages/providers/hooks/use-providers";
 import { useProviderModels } from "@/pages/providers/hooks/use-provider-models";
+import { AGENT_PRESETS } from "./agent-presets";
 
 interface AgentCreateDialogProps {
   open: boolean;
@@ -35,6 +37,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
   const [agentType, setAgentType] = useState<"open" | "predefined">("open");
+  const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(false);
 
   const enabledProviders = providers.filter((p) => p.enabled);
@@ -56,7 +59,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
         provider: provider.trim(),
         model: model.trim(),
         agent_type: agentType,
-        status: "active",
+        other_config: description.trim() ? { description: description.trim() } : undefined,
       });
       onOpenChange(false);
       setAgentKey("");
@@ -64,6 +67,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
       setProvider("");
       setModel("");
       setAgentType("open");
+      setDescription("");
     } catch {
       // error handled upstream
     } finally {
@@ -78,7 +82,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Create Agent</DialogTitle>
         </DialogHeader>
@@ -148,6 +152,34 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
               </SelectContent>
             </Select>
           </div>
+
+          {agentType === "predefined" && (
+            <div className="space-y-3">
+              <Label>Describe Your Agent</Label>
+              <div className="flex flex-wrap gap-2">
+                {AGENT_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => setDescription(preset.prompt)}
+                    className="rounded-full border px-3 py-1 text-xs transition-colors hover:bg-accent"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              <Textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Describe your agent's personality, purpose, and behavior..."
+                className="min-h-[120px]"
+              />
+              <p className="text-xs text-muted-foreground">
+                AI will automatically generate your agent's context files from this description.
+                Leave empty to start with templates.
+              </p>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>

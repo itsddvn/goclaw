@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -15,14 +16,15 @@ import (
 
 // AgentsHandler handles agent CRUD and sharing endpoints (managed mode only).
 type AgentsHandler struct {
-	agents store.AgentStore
-	token  string
-	msgBus *bus.MessageBus // for cache invalidation events (nil = no events)
+	agents   store.AgentStore
+	token    string
+	msgBus   *bus.MessageBus  // for cache invalidation events (nil = no events)
+	summoner *AgentSummoner   // LLM-based agent setup (nil = disabled)
 }
 
 // NewAgentsHandler creates a handler for agent management endpoints.
-func NewAgentsHandler(agents store.AgentStore, token string, msgBus *bus.MessageBus) *AgentsHandler {
-	return &AgentsHandler{agents: agents, token: token, msgBus: msgBus}
+func NewAgentsHandler(agents store.AgentStore, token string, msgBus *bus.MessageBus, summoner *AgentSummoner) *AgentsHandler {
+	return &AgentsHandler{agents: agents, token: token, msgBus: msgBus, summoner: summoner}
 }
 
 // emitCacheInvalidate broadcasts a cache invalidation event if msgBus is set.
@@ -46,6 +48,7 @@ func (h *AgentsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/agents/{id}/shares", h.authMiddleware(h.handleListShares))
 	mux.HandleFunc("POST /v1/agents/{id}/shares", h.authMiddleware(h.handleShare))
 	mux.HandleFunc("DELETE /v1/agents/{id}/shares/{userID}", h.authMiddleware(h.handleRevokeShare))
+	mux.HandleFunc("POST /v1/agents/{id}/regenerate", h.authMiddleware(h.handleRegenerate))
 }
 
 func (h *AgentsHandler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -101,11 +104,30 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.OwnerID = userID
-	if req.Status == "" {
-		req.Status = "active"
-	}
 	if req.AgentType == "" {
 		req.AgentType = "open"
+	}
+	if req.ContextWindow <= 0 {
+		req.ContextWindow = 200000
+	}
+	if req.MaxToolIterations <= 0 {
+		req.MaxToolIterations = 20
+	}
+	if req.Workspace == "" {
+		if req.IsDefault {
+			req.Workspace = "~/.goclaw/workspace"
+		} else {
+			req.Workspace = fmt.Sprintf("~/.goclaw/%s-workspace", req.AgentKey)
+		}
+	}
+	req.RestrictToWorkspace = true
+
+	// Check if predefined agent has a description for LLM summoning
+	description := extractDescription(req.OtherConfig)
+	if req.AgentType == "predefined" && description != "" && h.summoner != nil {
+		req.Status = "summoning"
+	} else if req.Status == "" {
+		req.Status = "active"
 	}
 
 	if err := h.agents.Create(r.Context(), &req); err != nil {
@@ -113,9 +135,15 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Seed context files into agent_context_files (skipped for open agents)
+	// Seed context files into agent_context_files (skipped for open agents).
+	// For summoning agents, templates serve as fallback if LLM fails.
 	if _, err := bootstrap.SeedToStore(r.Context(), h.agents, req.ID, req.AgentType); err != nil {
 		slog.Warn("failed to seed context files for new agent", "agent", req.AgentKey, "error", err)
+	}
+
+	// Start LLM summoning in background if applicable
+	if req.Status == "summoning" {
+		go h.summoner.SummonAgent(req.ID, req.Provider, req.Model, description)
 	}
 
 	writeJSON(w, http.StatusCreated, req)
@@ -334,6 +362,69 @@ func (h *AgentsHandler) handleRevokeShare(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
+func (h *AgentsHandler) handleRegenerate(w http.ResponseWriter, r *http.Request) {
+	userID := store.UserIDFromContext(r.Context())
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid agent ID"})
+		return
+	}
+
+	// Only owner can regenerate
+	ag, err := h.agents.GetByID(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+		return
+	}
+	if userID != "" && ag.OwnerID != userID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only owner can regenerate agent"})
+		return
+	}
+	if ag.Status == "summoning" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "agent is already being summoned"})
+		return
+	}
+	if h.summoner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "summoning not available"})
+		return
+	}
+
+	var req struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if req.Prompt == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt is required"})
+		return
+	}
+
+	// Set status to summoning
+	if err := h.agents.Update(r.Context(), id, map[string]any{"status": "summoning"}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	go h.summoner.RegenerateAgent(id, ag.Provider, ag.Model, req.Prompt)
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"ok": "true", "status": "summoning"})
+}
+
+// extractDescription pulls the description string from other_config JSONB.
+func extractDescription(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var cfg map[string]interface{}
+	if json.Unmarshal(raw, &cfg) != nil {
+		return ""
+	}
+	desc, _ := cfg["description"].(string)
+	return desc
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

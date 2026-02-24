@@ -124,7 +124,7 @@ export function ChannelInstanceFormDialog({
       };
       // Only send credentials if user entered something
       if (Object.keys(cleanCreds).length > 0) {
-        data.credentials = JSON.stringify(cleanCreds);
+        data.credentials = cleanCreds;
       }
       await onSubmit(data);
       onOpenChange(false);

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
@@ -113,6 +115,16 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			sandboxWorkspaceAccess = string(resolved.WorkspaceAccess)
 		}
 
+		// Expand ~ in workspace path and ensure directory exists
+		workspace := ag.Workspace
+		if workspace != "" {
+			workspace = config.ExpandHome(workspace)
+			if !filepath.IsAbs(workspace) {
+				workspace, _ = filepath.Abs(workspace)
+			}
+			os.MkdirAll(workspace, 0755)
+		}
+
 		// Per-agent custom tools (clone registry if agent has custom tools)
 		toolsReg := deps.Tools
 		if deps.DynamicLoader != nil {
@@ -131,7 +143,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			Model:             ag.Model,
 			ContextWindow:     contextWindow,
 			MaxIterations:     maxIter,
-			Workspace:         ag.Workspace,
+			Workspace:         workspace,
 			Bus:               deps.Bus,
 			Sessions:          deps.Sessions,
 			Tools:             toolsReg,

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -321,6 +323,17 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	// Inject original sender ID for group file writer permission checks
 	if req.SenderID != "" {
 		ctx = store.WithSenderID(ctx, req.SenderID)
+	}
+
+	// Per-user workspace isolation (managed mode only).
+	// Each user gets a subdirectory within the agent's workspace.
+	if l.agentUUID != uuid.Nil && l.workspace != "" {
+		effectiveWorkspace := l.workspace
+		if req.UserID != "" {
+			effectiveWorkspace = filepath.Join(l.workspace, sanitizePathSegment(req.UserID))
+			os.MkdirAll(effectiveWorkspace, 0755)
+		}
+		ctx = tools.WithToolWorkspace(ctx, effectiveWorkspace)
 	}
 
 	// Ensure per-user context files exist (first-chat seeding, managed mode)
@@ -652,4 +665,18 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		Iterations: iteration,
 		Usage:      &totalUsage,
 	}, nil
+}
+
+// sanitizePathSegment makes a userID safe for use as a directory name.
+// Replaces colons, spaces, and other unsafe chars with underscores.
+func sanitizePathSegment(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }

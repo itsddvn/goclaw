@@ -20,6 +20,9 @@ const (
 	EventHeartbeat          = "heartbeat"
 	EventTalkMode           = "talk.mode"
 
+	// Agent summoning events (predefined agent setup via LLM).
+	EventAgentSummoning = "agent.summoning"
+
 	// Cache invalidation events (internal, not forwarded to WS clients).
 	EventCacheInvalidate = "cache.invalidate"
 )

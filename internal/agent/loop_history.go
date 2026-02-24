@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
@@ -22,10 +24,16 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 	_, hasSpawn := l.tools.Get("spawn")
 	_, hasSkillSearch := l.tools.Get("skill_search")
 
+	// Per-user workspace: show the user's subdirectory in the system prompt (managed mode)
+	promptWorkspace := l.workspace
+	if l.agentUUID != uuid.Nil && userID != "" && l.workspace != "" {
+		promptWorkspace = filepath.Join(l.workspace, sanitizePathSegment(userID))
+	}
+
 	systemPrompt := BuildSystemPrompt(SystemPromptConfig{
 		AgentID:        l.id,
 		Model:          l.model,
-		Workspace:      l.workspace,
+		Workspace:      promptWorkspace,
 		Channel:        channel,
 		OwnerIDs:       l.ownerIDs,
 		Mode:           mode,

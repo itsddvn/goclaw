@@ -15,6 +15,7 @@ const (
 	ctxPeerKind   toolContextKey = "tool_peer_kind"
 	ctxSandboxKey toolContextKey = "tool_sandbox_key"
 	ctxAsyncCB    toolContextKey = "tool_async_cb"
+	ctxWorkspace  toolContextKey = "tool_workspace"
 )
 
 func WithToolChannel(ctx context.Context, channel string) context.Context {
@@ -59,5 +60,14 @@ func WithToolAsyncCB(ctx context.Context, cb AsyncCallback) context.Context {
 
 func ToolAsyncCBFromCtx(ctx context.Context) AsyncCallback {
 	v, _ := ctx.Value(ctxAsyncCB).(AsyncCallback)
+	return v
+}
+
+func WithToolWorkspace(ctx context.Context, ws string) context.Context {
+	return context.WithValue(ctx, ctxWorkspace, ws)
+}
+
+func ToolWorkspaceFromCtx(ctx context.Context) string {
+	v, _ := ctx.Value(ctxWorkspace).(string)
 	return v
 }

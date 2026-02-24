@@ -36,6 +36,11 @@ func SeedToStore(ctx context.Context, agentStore store.AgentStore, agentID uuid.
 
 	var seeded []string
 	for _, name := range templateFiles {
+		// USER.md is always per-user for predefined agents — don't seed at agent level.
+		// Having it at agent level alongside the user copy can confuse the model.
+		if name == UserFile {
+			continue
+		}
 		if hasContent[name] {
 			continue
 		}
@@ -71,13 +76,15 @@ var userSeedFilesOpen = []string{
 }
 
 // userSeedFilesPredefined is the set of files seeded per-user for predefined agents.
+// Includes BOOTSTRAP.md for user onboarding (uses BOOTSTRAP_PREDEFINED.md template).
 var userSeedFilesPredefined = []string{
 	UserFile,
+	BootstrapFile,
 }
 
 // SeedUserFiles seeds embedded templates into user_context_files for a new user.
 // For "open" agents: all 7 files (including BOOTSTRAP.md).
-// For "predefined" agents: only USER.md.
+// For "predefined" agents: USER.md + BOOTSTRAP.md (user-focused onboarding template).
 // Only writes files that don't already exist — safe to call multiple times.
 // Returns the list of file names that were seeded.
 func SeedUserFiles(ctx context.Context, agentStore store.AgentStore, agentID uuid.UUID, userID, agentType string) ([]string, error) {
@@ -104,7 +111,13 @@ func SeedUserFiles(ctx context.Context, agentStore store.AgentStore, agentID uui
 			continue // already has content, don't overwrite
 		}
 
-		content, err := templateFS.ReadFile(filepath.Join("templates", name))
+		// Predefined agents use a user-focused bootstrap template
+		templateName := name
+		if agentType == "predefined" && name == BootstrapFile {
+			templateName = "BOOTSTRAP_PREDEFINED.md"
+		}
+
+		content, err := templateFS.ReadFile(filepath.Join("templates", templateName))
 		if err != nil {
 			slog.Warn("bootstrap: failed to read embedded template for user seed", "file", name, "error", err)
 			continue

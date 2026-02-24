@@ -271,7 +271,7 @@ func wireManagedExtras(
 }
 
 // wireManagedHTTP creates managed-mode HTTP handlers (agents + skills + traces + MCP + custom tools + channel instances + providers).
-func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus, toolsReg *tools.Registry) (*httpapi.AgentsHandler, *httpapi.SkillsHandler, *httpapi.TracesHandler, *httpapi.MCPHandler, *httpapi.CustomToolsHandler, *httpapi.ChannelInstancesHandler, *httpapi.ProvidersHandler) {
+func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus, toolsReg *tools.Registry, providerReg *providers.Registry) (*httpapi.AgentsHandler, *httpapi.SkillsHandler, *httpapi.TracesHandler, *httpapi.MCPHandler, *httpapi.CustomToolsHandler, *httpapi.ChannelInstancesHandler, *httpapi.ProvidersHandler) {
 	var agentsH *httpapi.AgentsHandler
 	var skillsH *httpapi.SkillsHandler
 	var tracesH *httpapi.TracesHandler
@@ -281,7 +281,11 @@ func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus,
 	var providersH *httpapi.ProvidersHandler
 
 	if stores != nil && stores.Agents != nil {
-		agentsH = httpapi.NewAgentsHandler(stores.Agents, token, msgBus)
+		var summoner *httpapi.AgentSummoner
+		if providerReg != nil {
+			summoner = httpapi.NewAgentSummoner(stores.Agents, providerReg, msgBus)
+		}
+		agentsH = httpapi.NewAgentsHandler(stores.Agents, token, msgBus, summoner)
 	}
 
 	if stores != nil && stores.Skills != nil {

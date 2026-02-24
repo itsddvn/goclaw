@@ -101,7 +101,7 @@ func NewContextFileInterceptor(as store.AgentStore, workspace string) *ContextFi
 // ReadFile attempts to read a context file from the DB (with cache).
 // Routes based on agent type from context:
 //   - "open": all files per-user → fallback to agent-level
-//   - "predefined": only USER.md per-user → all others agent-level
+//   - "predefined": USER.md + BOOTSTRAP.md per-user → all others agent-level
 //
 // Returns (content, true, nil) if handled, or ("", false, nil) if not a context file.
 func (b *ContextFileInterceptor) ReadFile(ctx context.Context, path string) (string, bool, error) {
@@ -131,8 +131,8 @@ func (b *ContextFileInterceptor) ReadFile(ctx context.Context, path string) (str
 		return b.readAgentFile(ctx, agentID, fileName)
 	}
 
-	// Predefined agent: only USER.md per-user
-	if agentType == "predefined" && userID != "" && fileName == "USER.md" {
+	// Predefined agent: USER.md and BOOTSTRAP.md per-user
+	if agentType == "predefined" && userID != "" && (fileName == "USER.md" || fileName == "BOOTSTRAP.md") {
 		content, handled, err := b.readUserFile(ctx, agentID, userID, fileName)
 		if err != nil {
 			return "", handled, err
@@ -262,13 +262,25 @@ func (b *ContextFileInterceptor) WriteFile(ctx context.Context, path, content st
 		// senderID empty = system context (cron, subagent) → fail open
 	}
 
-	// BOOTSTRAP.md deletion: empty content = first-run completed → delete row
+	// BOOTSTRAP.md deletion: empty content = first-run completed → delete row.
+	// Must come BEFORE the predefined write block so bootstrap completion works
+	// for both open and predefined agents.
 	if fileName == "BOOTSTRAP.md" && content == "" && userID != "" {
 		err := b.agentStore.DeleteUserContextFile(ctx, agentID, userID, fileName)
 		if err == nil {
 			b.invalidateUser(agentID, userID)
 		}
 		return true, err
+	}
+
+	// Predefined agent: block writes to shared files (only USER.md allowed per-user).
+	// This prevents any user from modifying the agent's identity/behavior via chat.
+	if agentType == "predefined" && fileName != "USER.md" {
+		return true, fmt.Errorf(
+			"this file (%s) is part of the agent's predefined configuration and cannot be modified through chat. "+
+				"Only the agent owner can edit it from the management dashboard.",
+			fileName,
+		)
 	}
 
 	// Open agent: all files per-user
@@ -353,6 +365,22 @@ func (b *ContextFileInterceptor) LoadContextFiles(ctx context.Context, agentID u
 				Content: content,
 			})
 		}
+
+		// Include user-only files not present at agent level
+		// (e.g. BOOTSTRAP.md — seeded per-user for onboarding, not at agent level)
+		agentFileSet := make(map[string]bool, len(agentFiles))
+		for _, f := range agentFiles {
+			agentFileSet[f.FileName] = true
+		}
+		for _, f := range userFiles {
+			if !agentFileSet[f.FileName] && f.Content != "" {
+				result = append(result, bootstrap.ContextFile{
+					Path:    f.FileName,
+					Content: f.Content,
+				})
+			}
+		}
+
 		return result
 	}
 

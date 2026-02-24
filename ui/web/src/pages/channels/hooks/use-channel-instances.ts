@@ -20,7 +20,7 @@ export interface ChannelInstanceInput {
   display_name?: string;
   channel_type: string;
   agent_id: string;
-  credentials?: string; // plaintext JSON, encrypted server-side
+  credentials?: Record<string, unknown>; // JSON object, encrypted server-side
   config?: Record<string, unknown>;
   enabled?: boolean;
 }

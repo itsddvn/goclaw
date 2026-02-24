@@ -83,9 +83,8 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		lines = append(lines,
 			"## FIRST RUN — MANDATORY",
 			"",
-			"BOOTSTRAP.md is loaded below in Project Context. This is your FIRST TIME running.",
-			"You MUST follow BOOTSTRAP.md instructions: introduce yourself, ask who the user is,",
-			"figure out your name/creature/vibe/emoji together, then update IDENTITY.md and USER.md.",
+			"BOOTSTRAP.md is loaded below in Project Context. This is your FIRST interaction with this user.",
+			"You MUST follow BOOTSTRAP.md instructions immediately.",
 			"Do NOT give a generic greeting. Do NOT ignore this. Read BOOTSTRAP.md and follow it NOW.",
 			"",
 		)

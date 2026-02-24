@@ -38,9 +38,15 @@ export function AgentCard({ agent, onClick }: AgentCardProps) {
             <div className="truncate text-xs text-muted-foreground">{agent.agent_key}</div>
           )}
         </div>
-        <Badge variant={agent.status === "active" ? "success" : "secondary"} className="shrink-0">
-          {agent.status}
-        </Badge>
+        {agent.status === "summoning" ? (
+          <Badge variant="outline" className="shrink-0 animate-pulse border-violet-400 text-violet-600 dark:text-violet-400">
+            Summoning...
+          </Badge>
+        ) : (
+          <Badge variant={agent.status === "active" ? "success" : "secondary"} className="shrink-0">
+            {agent.status}
+          </Badge>
+        )}
       </div>
 
       {/* Model info */}

@@ -32,7 +32,7 @@ function agentSubtitle(agent: { display_name?: string; agent_key: string; id: st
 }
 
 export function AgentDetailPage({ agentId, onBack }: AgentDetailPageProps) {
-  const { agent, files, loading, updateAgent, getFile, setFile } =
+  const { agent, files, loading, updateAgent, getFile, setFile, regenerateAgent } =
     useAgentDetail(agentId);
 
   if (loading || !agent) {
@@ -112,6 +112,7 @@ export function AgentDetailPage({ agentId, onBack }: AgentDetailPageProps) {
                 files={files}
                 onGetFile={getFile}
                 onSetFile={setFile}
+                onRegenerate={regenerateAgent}
               />
             </TabsContent>
 

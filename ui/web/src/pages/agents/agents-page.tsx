@@ -13,6 +13,7 @@ import { useAgents } from "./hooks/use-agents";
 import { AgentCard } from "./agent-card";
 import { AgentCreateDialog } from "./agent-create-dialog";
 import { AgentDetailPage } from "./agent-detail/agent-detail-page";
+import { SummoningModal } from "./summoning-modal";
 import { usePagination } from "@/hooks/use-pagination";
 
 export function AgentsPage() {
@@ -24,6 +25,7 @@ export function AgentsPage() {
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [summoningAgent, setSummoningAgent] = useState<{ id: string; name: string } | null>(null);
 
   // Show detail view if route has :id
   if (detailId) {
@@ -92,7 +94,16 @@ export function AgentsPage() {
                 <AgentCard
                   key={agent.id}
                   agent={agent}
-                  onClick={() => navigate(`/agents/${agent.id}`)}
+                  onClick={() => {
+                    if (agent.status === "summoning") {
+                      setSummoningAgent({
+                        id: agent.id,
+                        name: agent.display_name || agent.agent_key,
+                      });
+                    } else {
+                      navigate(`/agents/${agent.id}`);
+                    }
+                  }}
                 />
               ))}
             </div>
@@ -114,8 +125,13 @@ export function AgentsPage() {
         open={createOpen}
         onOpenChange={setCreateOpen}
         onCreate={async (data) => {
-          await createAgent(data);
+          const created = await createAgent(data);
           refresh();
+          // Auto-show summoning modal if agent is being summoned
+          if (created && typeof created === "object" && "status" in created && created.status === "summoning") {
+            const ag = created as { id: string; display_name?: string; agent_key: string };
+            setSummoningAgent({ id: ag.id, name: ag.display_name || ag.agent_key });
+          }
         }}
       />
 
@@ -133,6 +149,16 @@ export function AgentsPage() {
           }
         }}
       />
+
+      {summoningAgent && (
+        <SummoningModal
+          open={!!summoningAgent}
+          onOpenChange={(open) => { if (!open) setSummoningAgent(null); }}
+          agentId={summoningAgent.id}
+          agentName={summoningAgent.name}
+          onCompleted={refresh}
+        />
+      )}
     </div>
   );
 }

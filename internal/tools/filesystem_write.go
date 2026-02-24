@@ -91,8 +91,12 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]interface{}
 		return t.executeInSandbox(ctx, path, content, sandboxKey)
 	}
 
-	// Host execution
-	resolved, err := resolvePath(path, t.workspace, t.restrict)
+	// Host execution — use per-user workspace from context if available (managed mode)
+	workspace := ToolWorkspaceFromCtx(ctx)
+	if workspace == "" {
+		workspace = t.workspace
+	}
+	resolved, err := resolvePath(path, workspace, t.restrict)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}

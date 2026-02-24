@@ -58,8 +58,12 @@ func (t *DynamicTool) Execute(ctx context.Context, args map[string]interface{}) 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Working directory
-	cwd := t.workspace
+	// Working directory — per-user workspace from context, fallback to tool's workspace.
+	// Explicit WorkingDir on the tool definition still overrides everything.
+	cwd := ToolWorkspaceFromCtx(ctx)
+	if cwd == "" {
+		cwd = t.workspace
+	}
 	if t.def.WorkingDir != "" {
 		cwd = t.def.WorkingDir
 	}

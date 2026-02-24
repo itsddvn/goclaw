@@ -130,8 +130,12 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]interface{}) *Re
 		return t.executeInSandbox(ctx, path, oldStr, newStr, replaceAll, sandboxKey)
 	}
 
-	// Host execution
-	resolved, err := resolvePath(path, t.workspace, t.restrict)
+	// Host execution — use per-user workspace from context if available (managed mode)
+	workspace := ToolWorkspaceFromCtx(ctx)
+	if workspace == "" {
+		workspace = t.workspace
+	}
+	resolved, err := resolvePath(path, workspace, t.restrict)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}

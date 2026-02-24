@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -144,8 +145,18 @@ func (s *PGChannelInstanceStore) scanInstances(rows *sql.Rows) ([]store.ChannelI
 
 func (s *PGChannelInstanceStore) Update(ctx context.Context, id uuid.UUID, updates map[string]any) error {
 	// Encrypt credentials if present
-	if credsVal, ok := updates["credentials"]; ok {
-		if credsStr, isStr := credsVal.(string); isStr && credsStr != "" && s.encKey != "" {
+	if credsVal, ok := updates["credentials"]; ok && credsVal != nil {
+		var credsStr string
+		switch v := credsVal.(type) {
+		case string:
+			credsStr = v
+		default:
+			// Object/map from JSON — marshal to string for encryption
+			if b, err := json.Marshal(v); err == nil {
+				credsStr = string(b)
+			}
+		}
+		if credsStr != "" && s.encKey != "" {
 			encrypted, err := crypto.Encrypt(credsStr, s.encKey)
 			if err != nil {
 				return fmt.Errorf("encrypt credentials: %w", err)
