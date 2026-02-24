@@ -24,6 +24,13 @@ func (r *Registry) Register(provider Provider) {
 	r.providers[provider.Name()] = provider
 }
 
+// Unregister removes a provider from the registry.
+func (r *Registry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.providers, name)
+}
+
 // Get returns a provider by name.
 func (r *Registry) Get(name string) (Provider, error) {
 	r.mu.RLock()

@@ -323,6 +323,7 @@ func (s *PGCronStore) Start() error {
 	}
 	s.stop = make(chan struct{})
 	s.running = true
+	s.recomputeStaleJobs()
 	go s.runLoop()
 	slog.Info("pg cron service started")
 	return nil
@@ -414,6 +415,62 @@ func (s *PGCronStore) InvalidateCache() {
 	s.mu.Lock()
 	s.cacheLoaded = false
 	s.mu.Unlock()
+}
+
+// recomputeStaleJobs fixes enabled jobs that have next_run_at = NULL.
+// This happens when the gateway was stopped/crashed while a job was executing,
+// or when the previously computed next_run_at was consumed but never recomputed.
+// Mirrors the startup logic in cron.Service.Start() (standalone mode).
+func (s *PGCronStore) recomputeStaleJobs() {
+	rows, err := s.db.Query(
+		`SELECT id, schedule_kind, cron_expression, run_at, timezone, interval_ms
+		 FROM cron_jobs WHERE enabled = true AND next_run_at IS NULL`)
+	if err != nil {
+		slog.Warn("cron: failed to query stale jobs", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	now := time.Now()
+	var fixed int
+	for rows.Next() {
+		var id uuid.UUID
+		var scheduleKind string
+		var cronExpr, tz *string
+		var runAt *time.Time
+		var intervalMS *int64
+
+		if err := rows.Scan(&id, &scheduleKind, &cronExpr, &runAt, &tz, &intervalMS); err != nil {
+			continue
+		}
+
+		schedule := store.CronSchedule{Kind: scheduleKind}
+		if cronExpr != nil {
+			schedule.Expr = *cronExpr
+		}
+		if runAt != nil {
+			ms := runAt.UnixMilli()
+			schedule.AtMS = &ms
+		}
+		if intervalMS != nil {
+			schedule.EveryMS = intervalMS
+		}
+
+		next := computeNextRun(&schedule, now)
+		if next == nil {
+			if scheduleKind == "at" {
+				s.db.Exec("UPDATE cron_jobs SET enabled = false, updated_at = $1 WHERE id = $2", now, id)
+			}
+			continue
+		}
+
+		s.db.Exec("UPDATE cron_jobs SET next_run_at = $1, updated_at = $2 WHERE id = $3", *next, now, id)
+		fixed++
+	}
+
+	if fixed > 0 {
+		slog.Info("cron: recomputed stale next_run_at on startup", "fixed", fixed)
+	}
 }
 
 // --- Internal ---

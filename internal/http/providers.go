@@ -58,6 +58,19 @@ func maskAPIKey(p *store.LLMProviderData) {
 	}
 }
 
+// registerInMemory adds (or replaces) a provider in the in-memory registry
+// so it's immediately usable for verify/chat without a gateway restart.
+func (h *ProvidersHandler) registerInMemory(p *store.LLMProviderData) {
+	if h.providerReg == nil || !p.Enabled || p.APIKey == "" {
+		return
+	}
+	if p.ProviderType == "anthropic_native" {
+		h.providerReg.Register(providers.NewAnthropicProvider(p.APIKey))
+	} else {
+		h.providerReg.Register(providers.NewOpenAIProvider(p.Name, p.APIKey, p.APIBase, ""))
+	}
+}
+
 // --- Provider CRUD ---
 
 func (h *ProvidersHandler) handleListProviders(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +113,9 @@ func (h *ProvidersHandler) handleCreateProvider(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+
+	// Register in-memory so verify/chat work without restart
+	h.registerInMemory(&p)
 
 	maskAPIKey(&p)
 	writeJSON(w, http.StatusCreated, p)
@@ -168,6 +184,17 @@ func (h *ProvidersHandler) handleUpdateProvider(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Sync in-memory registry with updated provider
+	if h.providerReg != nil {
+		if updated, err := h.store.GetProvider(r.Context(), id); err == nil {
+			if !updated.Enabled {
+				h.providerReg.Unregister(updated.Name)
+			} else {
+				h.registerInMemory(updated)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -178,10 +205,20 @@ func (h *ProvidersHandler) handleDeleteProvider(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Read provider name before deleting so we can unregister it
+	var providerName string
+	if p, err := h.store.GetProvider(r.Context(), id); err == nil {
+		providerName = p.Name
+	}
+
 	if err := h.store.DeleteProvider(r.Context(), id); err != nil {
 		slog.Error("providers.delete", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+
+	if h.providerReg != nil && providerName != "" {
+		h.providerReg.Unregister(providerName)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
