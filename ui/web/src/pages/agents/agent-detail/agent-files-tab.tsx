@@ -199,9 +199,8 @@ export function AgentFilesTab({ agent, files, onGetFile, onSetFile, onRegenerate
                     size="sm"
                     onClick={handleSave}
                     disabled={!dirty || saving}
-                    className="gap-1"
                   >
-                    <Save className="h-3.5 w-3.5" />
+                    {!saving && <Save className="h-3.5 w-3.5" />}
                     {saving ? "Saving..." : "Save"}
                   </Button>
                 )}

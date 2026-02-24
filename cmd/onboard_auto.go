@@ -66,7 +66,23 @@ func runAutoOnboard(cfgPath string) bool {
 
 	fmt.Printf("  Provider: %s (model: %s)\n", provider, cfg.Agents.Defaults.Model)
 
-	// 2. Gateway token
+	// 2. Auto-enable memory: detect embedding-capable API keys from env.
+	// Embedding providers: openai, openrouter, gemini (same order as resolveEmbeddingProvider).
+	embProvider := autoDetectEmbeddingProvider(cfg)
+	if embProvider != "" {
+		enabled := true
+		cfg.Agents.Defaults.Memory = &config.MemoryConfig{
+			Enabled:           &enabled,
+			EmbeddingProvider: embProvider,
+		}
+		fmt.Printf("  Memory:   enabled (embedding: %s)\n", embProvider)
+	} else {
+		fmt.Println("  Memory:   enabled (FTS-only, no embedding API key)")
+		enabled := true
+		cfg.Agents.Defaults.Memory = &config.MemoryConfig{Enabled: &enabled}
+	}
+
+	// 3. Gateway token
 	if cfg.Gateway.Token == "" {
 		cfg.Gateway.Token = onboardGenerateToken(16)
 		slog.Info("auto-onboard: generated gateway token")
@@ -148,6 +164,36 @@ func runAutoOnboard(cfgPath string) bool {
 
 	fmt.Println("Auto-onboard complete.")
 	return true
+}
+
+// embeddingCapable lists providers that support text embeddings.
+// Only these three have embedding provider implementations in resolveEmbeddingProvider.
+var embeddingCapable = map[string]bool{
+	"openai":     true,
+	"openrouter": true,
+	"gemini":     true,
+}
+
+// autoDetectEmbeddingProvider picks an embedding provider from available API keys.
+// Priority: primary provider (GOCLAW_PROVIDER) if embedding-capable, then openai → openrouter → gemini.
+func autoDetectEmbeddingProvider(cfg *config.Config) string {
+	// Prioritize the primary provider if it supports embeddings.
+	primary := cfg.Agents.Defaults.Provider
+	if embeddingCapable[primary] && resolveProviderAPIKey(cfg, primary) != "" {
+		return primary
+	}
+
+	// Fallback: first available embedding-capable key.
+	if cfg.Providers.OpenAI.APIKey != "" {
+		return "openai"
+	}
+	if cfg.Providers.OpenRouter.APIKey != "" {
+		return "openrouter"
+	}
+	if cfg.Providers.Gemini.APIKey != "" {
+		return "gemini"
+	}
+	return ""
 }
 
 // detectProvider finds the first provider with an API key in the environment.
@@ -232,6 +278,19 @@ func saveCleanConfig(cfgPath string, cfg *config.Config) error {
 
 	if cfg.Agents.Defaults.Subagents != nil {
 		agents["defaults"].(map[string]interface{})["subagents"] = cfg.Agents.Defaults.Subagents
+	}
+
+	if mc := cfg.Agents.Defaults.Memory; mc != nil {
+		mem := map[string]interface{}{
+			"enabled": mc.Enabled == nil || *mc.Enabled,
+		}
+		if mc.EmbeddingProvider != "" {
+			mem["embedding_provider"] = mc.EmbeddingProvider
+		}
+		if mc.EmbeddingModel != "" {
+			mem["embedding_model"] = mc.EmbeddingModel
+		}
+		agents["defaults"].(map[string]interface{})["memory"] = mem
 	}
 
 	// Build gateway section (no token — secret).

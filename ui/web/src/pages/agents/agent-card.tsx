@@ -20,7 +20,7 @@ export function AgentCard({ agent, onClick }: AgentCardProps) {
     <button
       type="button"
       onClick={onClick}
-      className="flex flex-col gap-3 rounded-lg border bg-card p-4 text-left transition-all hover:border-primary/30 hover:shadow-md"
+      className="flex cursor-pointer flex-col gap-3 rounded-lg border bg-card p-4 text-left transition-all hover:border-primary/30 hover:shadow-md"
     >
       {/* Top row: icon + name + status */}
       <div className="flex items-center gap-3">

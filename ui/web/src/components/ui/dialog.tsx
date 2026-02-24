@@ -51,13 +51,15 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  overlayTransparent = false,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
+  overlayTransparent?: boolean
 }) {
   return (
     <DialogPortal data-slot="dialog-portal">
-      <DialogOverlay />
+      <DialogOverlay style={overlayTransparent ? { background: "rgba(0,0,0,0.15)" } : undefined} />
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(

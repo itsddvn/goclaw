@@ -72,7 +72,7 @@ export function SummoningModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md" onInteractOutside={(e) => { if (status === "summoning") e.preventDefault(); }}>
+      <DialogContent className="sm:max-w-md" overlayTransparent onInteractOutside={(e) => { if (status === "summoning") e.preventDefault(); }}>
         <DialogHeader>
           <DialogTitle className="text-center">
             {status === "completed"
@@ -126,7 +126,7 @@ export function SummoningModal({
           </div>
 
           {/* Agent name */}
-          <p className="text-sm text-foreground/80">
+          <p className="text-sm text-foreground">
             {status === "completed" ? (
               <span className="font-medium text-emerald-600 dark:text-emerald-400">
                 {agentName} is ready!
@@ -148,8 +148,8 @@ export function SummoningModal({
                 return (
                   <motion.div
                     key={file.name}
-                    initial={{ opacity: 0.6 }}
-                    animate={{ opacity: done ? 1 : 0.6 }}
+                    initial={{ opacity: 1 }}
+                    animate={{ opacity: 1 }}
                     transition={{ duration: 0.3 }}
                     className="flex items-center gap-3 rounded-md px-3 py-1.5"
                   >
@@ -165,7 +165,7 @@ export function SummoningModal({
                       {done ? "\u2713" : i + 1}
                     </motion.div>
                     <div className="flex-1">
-                      <span className={`text-sm ${done ? "font-medium" : ""}`}>
+                      <span className={`text-sm text-foreground ${done ? "font-medium" : ""}`}>
                         {file.name}
                       </span>
                       <span className="ml-2 text-xs text-muted-foreground">{file.label}</span>

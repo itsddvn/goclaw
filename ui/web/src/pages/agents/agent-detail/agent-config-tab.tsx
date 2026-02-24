@@ -149,8 +149,8 @@ export function AgentConfigTab({ agent, onUpdate }: AgentConfigTabProps) {
             <Check className="h-3.5 w-3.5" /> Saved
           </span>
         )}
-        <Button onClick={handleSave} disabled={saving} className="gap-1.5">
-          <Save className="h-4 w-4" />
+        <Button onClick={handleSave} disabled={saving}>
+          {!saving && <Save className="h-4 w-4" />}
           {saving ? "Saving..." : "Save Config"}
         </Button>
       </div>

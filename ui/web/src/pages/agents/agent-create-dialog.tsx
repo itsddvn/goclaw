@@ -33,6 +33,7 @@ interface AgentCreateDialogProps {
 export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateDialogProps) {
   const { providers } = useProviders();
   const [agentKey, setAgentKey] = useState("");
+  const [keyTouched, setKeyTouched] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
@@ -63,6 +64,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
       });
       onOpenChange(false);
       setAgentKey("");
+      setKeyTouched(false);
       setDisplayName("");
       setProvider("");
       setModel("");
@@ -82,33 +84,44 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Create Agent</DialogTitle>
         </DialogHeader>
-        <div className="space-y-4 py-4">
-          <div className="space-y-2">
-            <Label htmlFor="agentKey">Agent Key *</Label>
-            <Input
-              id="agentKey"
-              value={agentKey}
-              onChange={(e) => setAgentKey(slugify(e.target.value))}
-              placeholder="e.g. my-agent"
-            />
-            <p className="text-xs text-muted-foreground">Lowercase letters, numbers, and hyphens only</p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="displayName">Display Name</Label>
-            <Input
-              id="displayName"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="My Agent"
-            />
+        <div className="space-y-4 py-4 overflow-y-auto min-h-0">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="displayName">Display Name *</Label>
+              <Input
+                id="displayName"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                onBlur={() => {
+                  if (!keyTouched && displayName.trim()) {
+                    setAgentKey(slugify(displayName.trim()));
+                  }
+                }}
+                placeholder="My Agent"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="agentKey">Agent Key *</Label>
+              <Input
+                id="agentKey"
+                value={agentKey}
+                onChange={(e) => {
+                  setKeyTouched(true);
+                  setAgentKey(e.target.value);
+                }}
+                onBlur={() => setAgentKey(slugify(agentKey))}
+                placeholder="e.g. my-agent"
+              />
+              <p className="text-xs text-muted-foreground">Lowercase, numbers, hyphens</p>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>Provider</Label>
+              <Label>Provider *</Label>
               {enabledProviders.length > 0 ? (
                 <Select value={provider} onValueChange={handleProviderChange}>
                   <SelectTrigger>
@@ -131,38 +144,58 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
               )}
             </div>
             <div className="space-y-2">
-              <Label>Model</Label>
+              <Label>Model *</Label>
               <Combobox
                 value={model}
                 onChange={setModel}
                 options={models.map((m) => ({ value: m.id, label: m.name }))}
                 placeholder={modelsLoading ? "Loading models..." : "Enter or select model"}
               />
+              {provider && !modelsLoading && models.length === 0 && (
+                <p className="text-xs text-muted-foreground">This provider doesn't list models — type the model ID manually.</p>
+              )}
             </div>
           </div>
           <div className="space-y-2">
             <Label>Agent Type</Label>
-            <Select value={agentType} onValueChange={(v) => setAgentType(v as "open" | "predefined")}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="open">Open (per-user context)</SelectItem>
-                <SelectItem value="predefined">Predefined (agent-level)</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setAgentType("open")}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                  agentType === "open"
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input bg-background hover:bg-accent"
+                }`}
+              >
+                Open
+                <span className="block text-xs font-normal opacity-70">Per-user context</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAgentType("predefined")}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                  agentType === "predefined"
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input bg-background hover:bg-accent"
+                }`}
+              >
+                Predefined
+                <span className="block text-xs font-normal opacity-70">Agent-level config</span>
+              </button>
+            </div>
           </div>
 
           {agentType === "predefined" && (
             <div className="space-y-3">
               <Label>Describe Your Agent</Label>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-1.5">
                 {AGENT_PRESETS.map((preset) => (
                   <button
                     key={preset.label}
                     type="button"
                     onClick={() => setDescription(preset.prompt)}
-                    className="rounded-full border px-3 py-1 text-xs transition-colors hover:bg-accent"
+                    className="rounded-full border px-2.5 py-0.5 text-xs transition-colors hover:bg-accent"
                   >
                     {preset.label}
                   </button>
@@ -185,7 +218,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>
             Cancel
           </Button>
-          <Button onClick={handleCreate} disabled={!agentKey.trim() || !isValidSlug(agentKey) || loading}>
+          <Button onClick={handleCreate} disabled={!displayName.trim() || !agentKey.trim() || !isValidSlug(agentKey) || !provider.trim() || !model.trim() || loading}>
             {loading ? "Creating..." : "Create"}
           </Button>
         </DialogFooter>

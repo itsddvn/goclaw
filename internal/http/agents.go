@@ -122,6 +122,14 @@ func (h *AgentsHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	req.RestrictToWorkspace = true
 
+	// Default: enable compaction and memory for new agents
+	if len(req.CompactionConfig) == 0 {
+		req.CompactionConfig = json.RawMessage(`{}`)
+	}
+	if len(req.MemoryConfig) == 0 {
+		req.MemoryConfig = json.RawMessage(`{"enabled":true}`)
+	}
+
 	// Check if predefined agent has a description for LLM summoning
 	description := extractDescription(req.OtherConfig)
 	if req.AgentType == "predefined" && description != "" && h.summoner != nil {

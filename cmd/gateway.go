@@ -489,8 +489,18 @@ func runGateway() {
 		}
 	}
 
-	// Memory detection
+	// Memory detection: SQLite (standalone) or PG (managed) — either enables memory.
 	hasMemory := memMgr != nil
+	if !hasMemory && managedStores != nil && managedStores.Memory != nil {
+		hasMemory = true
+		// PG memory is available but SQLite failed or wasn't created.
+		// Ensure memory tools are registered so wireManagedExtras can wire PG store to them.
+		if _, exists := toolsReg.Get("memory_search"); !exists {
+			toolsReg.Register(tools.NewMemorySearchTool(nil))
+			toolsReg.Register(tools.NewMemoryGetTool(nil))
+			slog.Info("memory tools registered for managed mode (PG-backed)")
+		}
+	}
 
 	// Wire SessionStoreAware + BusAware on tools that need them
 	for _, name := range []string{"sessions_list", "session_status", "sessions_history", "sessions_send"} {

@@ -1,7 +1,6 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { ArrowLeft, Bot, Star } from "lucide-react";
 import { useAgentDetail } from "../hooks/use-agent-detail";
 import { AgentGeneralTab } from "./agent-general-tab";
@@ -88,40 +87,38 @@ export function AgentDetailPage({ agentId, onBack }: AgentDetailPageProps) {
       </div>
 
       {/* Tabs */}
-      <Card>
-        <CardContent className="pt-6">
-          <Tabs defaultValue="general">
-            <TabsList>
-              <TabsTrigger value="general">General</TabsTrigger>
-              <TabsTrigger value="config">Config</TabsTrigger>
-              <TabsTrigger value="files">Files</TabsTrigger>
-              <TabsTrigger value="shares">Shares</TabsTrigger>
-            </TabsList>
+      <div className="rounded-xl border bg-card p-4 shadow-sm">
+        <Tabs defaultValue="general">
+          <TabsList>
+            <TabsTrigger value="general">General</TabsTrigger>
+            <TabsTrigger value="config">Config</TabsTrigger>
+            <TabsTrigger value="files">Files</TabsTrigger>
+            <TabsTrigger value="shares">Shares</TabsTrigger>
+          </TabsList>
 
-            <TabsContent value="general" className="mt-4">
-              <AgentGeneralTab agent={agent} onUpdate={updateAgent} />
-            </TabsContent>
+          <TabsContent value="general" className="mt-4">
+            <AgentGeneralTab agent={agent} onUpdate={updateAgent} />
+          </TabsContent>
 
-            <TabsContent value="config" className="mt-4">
-              <AgentConfigTab agent={agent} onUpdate={updateAgent} />
-            </TabsContent>
+          <TabsContent value="config" className="mt-4">
+            <AgentConfigTab agent={agent} onUpdate={updateAgent} />
+          </TabsContent>
 
-            <TabsContent value="files" className="mt-4">
-              <AgentFilesTab
-                agent={agent}
-                files={files}
-                onGetFile={getFile}
-                onSetFile={setFile}
-                onRegenerate={regenerateAgent}
-              />
-            </TabsContent>
+          <TabsContent value="files" className="mt-4">
+            <AgentFilesTab
+              agent={agent}
+              files={files}
+              onGetFile={getFile}
+              onSetFile={setFile}
+              onRegenerate={regenerateAgent}
+            />
+          </TabsContent>
 
-            <TabsContent value="shares" className="mt-4">
-              <AgentSharesTab agentId={agentId} />
-            </TabsContent>
-          </Tabs>
-        </CardContent>
-      </Card>
+          <TabsContent value="shares" className="mt-4">
+            <AgentSharesTab agentId={agentId} />
+          </TabsContent>
+        </Tabs>
+      </div>
     </div>
   );
 }

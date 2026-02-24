@@ -135,6 +135,15 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			}
 		}
 
+		// Per-agent memory: enabled if global memory manager exists AND
+		// per-agent config doesn't explicitly disable it.
+		hasMemory := deps.HasMemory
+		if mc := ag.ParseMemoryConfig(); mc != nil && mc.Enabled != nil {
+			if !*mc.Enabled {
+				hasMemory = false
+			}
+		}
+
 		loop := NewLoop(LoopConfig{
 			ID:                ag.AgentKey,
 			AgentUUID:         ag.ID,
@@ -150,7 +159,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			ToolPolicy:        deps.ToolPolicy,
 			AgentToolPolicy:   ag.ParseToolsConfig(),
 			SkillsLoader:      deps.Skills,
-			HasMemory:         deps.HasMemory,
+			HasMemory:         hasMemory,
 			ContextFiles:      contextFiles,
 			EnsureUserFiles:   deps.EnsureUserFiles,
 			ContextFileLoader: deps.ContextFileLoader,
