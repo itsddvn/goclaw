@@ -140,14 +140,14 @@ export function ChannelInstanceFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !loading && onOpenChange(v)}>
-      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+      <DialogContent className="max-h-[85vh] max-w-lg flex flex-col">
         <DialogHeader>
           <DialogTitle>
             {instance ? "Edit Channel Instance" : "Create Channel Instance"}
           </DialogTitle>
         </DialogHeader>
 
-        <div className="grid gap-4 py-2">
+        <div className="grid gap-4 py-2 overflow-y-auto min-h-0">
           {/* Basic fields */}
           <div className="grid gap-1.5">
             <Label htmlFor="ci-name">Name *</Label>
@@ -246,9 +246,8 @@ export function ChannelInstanceFormDialog({
             <Switch id="ci-enabled" checked={enabled} onCheckedChange={setEnabled} />
             <Label htmlFor="ci-enabled">Enabled</Label>
           </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
-
-        {error && <p className="text-sm text-destructive">{error}</p>}
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>

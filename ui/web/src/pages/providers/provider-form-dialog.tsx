@@ -90,11 +90,11 @@ export function ProviderFormDialog({ open, onOpenChange, provider, onSubmit }: P
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>{isEdit ? "Edit Provider" : "Add Provider"}</DialogTitle>
         </DialogHeader>
-        <div className="space-y-4 py-4">
+        <div className="space-y-4 py-4 overflow-y-auto min-h-0">
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="name">Name *</Label>

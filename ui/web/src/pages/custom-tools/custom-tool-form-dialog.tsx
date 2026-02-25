@@ -90,12 +90,12 @@ export function CustomToolFormDialog({ open, onOpenChange, tool, onSubmit }: Cus
 
   return (
     <Dialog open={open} onOpenChange={(v) => !loading && onOpenChange(v)}>
-      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+      <DialogContent className="max-h-[85vh] max-w-lg flex flex-col">
         <DialogHeader>
           <DialogTitle>{tool ? "Edit Tool" : "Create Custom Tool"}</DialogTitle>
         </DialogHeader>
 
-        <div className="grid gap-4 py-2">
+        <div className="grid gap-4 py-2 overflow-y-auto min-h-0">
           <div className="grid gap-1.5">
             <Label htmlFor="ct-name">Name *</Label>
             <Input id="ct-name" value={name} onChange={(e) => setName(slugify(e.target.value))} placeholder="my-tool" />
@@ -152,9 +152,8 @@ export function CustomToolFormDialog({ open, onOpenChange, tool, onSubmit }: Cus
             <Switch id="ct-enabled" checked={enabled} onCheckedChange={setEnabled} />
             <Label htmlFor="ct-enabled">Enabled</Label>
           </div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
-
-        {error && <p className="text-sm text-destructive">{error}</p>}
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>Cancel</Button>
