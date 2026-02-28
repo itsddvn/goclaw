@@ -140,6 +140,14 @@ func runAutoOnboard(cfgPath string) bool {
 			m.Close()
 		}
 
+		// Verify provider connectivity for all configured providers before seeding
+		fmt.Println("  Verifying provider connectivity...")
+		if fatalErrors := verifyAllProviders(cfg); len(fatalErrors) > 0 {
+			slog.Error("auto-onboard: provider verification failed", "errors", fatalErrors)
+			fmt.Printf("  Provider verification FAILED: %d provider(s) have invalid API keys\n", len(fatalErrors))
+			return false
+		}
+
 		// Seed default data (non-fatal if already exists)
 		fmt.Print("  Seeding default agent/provider...")
 		if err := seedManagedData(cfg.Database.PostgresDSN, cfg); err != nil {
