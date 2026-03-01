@@ -62,6 +62,12 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
     await verify(selectedProviderId, model.trim());
   };
 
+  const handleVerifyAndCreate = async () => {
+    if (!selectedProviderId || !model.trim()) return;
+    const res = await verify(selectedProviderId, model.trim());
+    if (res?.valid) await handleCreate();
+  };
+
   const handleCreate = async () => {
     if (!agentKey.trim()) return;
     setLoading(true);
@@ -96,7 +102,7 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col">
+      <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Create Agent</DialogTitle>
         </DialogHeader>
@@ -251,6 +257,10 @@ export function AgentCreateDialog({ open, onOpenChange, onCreate }: AgentCreateD
           </Button>
           {loading ? (
             <Button disabled>Creating...</Button>
+          ) : !verifyResult?.valid && selectedProviderId && model.trim() ? (
+            <Button onClick={handleVerifyAndCreate} disabled={verifying || !displayName.trim() || !agentKey.trim() || !isValidSlug(agentKey)}>
+              {verifying ? "Checking..." : "Check & Create"}
+            </Button>
           ) : (
             <Button onClick={handleCreate} disabled={!displayName.trim() || !agentKey.trim() || !isValidSlug(agentKey) || !provider.trim() || !model.trim() || !verifyResult?.valid}>
               Create

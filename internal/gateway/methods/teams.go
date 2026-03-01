@@ -31,6 +31,8 @@ func (m *TeamsMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodTeamsGet, m.handleGet)
 	router.Register(protocol.MethodTeamsDelete, m.handleDelete)
 	router.Register(protocol.MethodTeamsTaskList, m.handleTaskList)
+	router.Register(protocol.MethodTeamsMembersAdd, m.handleAddMember)
+	router.Register(protocol.MethodTeamsMembersRemove, m.handleRemoveMember)
 }
 
 // --- List ---
@@ -135,11 +137,10 @@ func (m *TeamsMethods) handleCreate(_ context.Context, client *gateway.Client, r
 		}
 	}
 
-	// Auto-create bidirectional agent_links between all team members.
-	// This enables delegation between teammates.
+	// Auto-create outbound agent_links from lead to each member.
+	// Only the lead can delegate to members.
 	if m.linkStore != nil {
-		allAgents := append([]*store.AgentData{leadAgent}, memberAgents...)
-		m.autoCreateTeamLinks(ctx, team.ID, allAgents, client.UserID())
+		m.autoCreateTeamLinks(ctx, team.ID, leadAgent, memberAgents, client.UserID())
 	}
 
 	// Invalidate agent caches so TEAM.md gets injected
@@ -294,27 +295,188 @@ func (m *TeamsMethods) handleTaskList(_ context.Context, client *gateway.Client,
 	}))
 }
 
+// --- Add Member ---
+
+type teamsAddMemberParams struct {
+	TeamID string `json:"teamId"`
+	Agent  string `json:"agent"` // agent key or UUID
+}
+
+func (m *TeamsMethods) handleAddMember(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	if m.teamStore == nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "teams not available (standalone mode)"))
+		return
+	}
+
+	var params teamsAddMemberParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid params"))
+		return
+	}
+	if params.TeamID == "" || params.Agent == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "teamId and agent are required"))
+		return
+	}
+
+	teamID, err := uuid.Parse(params.TeamID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid teamId"))
+		return
+	}
+
+	ctx := context.Background()
+
+	// Validate team exists
+	team, err := m.teamStore.GetTeam(ctx, teamID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "team not found: "+err.Error()))
+		return
+	}
+
+	// Resolve agent
+	ag, err := resolveAgentInfo(m.agentStore, params.Agent)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "agent: "+err.Error()))
+		return
+	}
+
+	// Prevent adding lead again
+	if ag.ID == team.LeadAgentID {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "agent is already the team lead"))
+		return
+	}
+
+	// Add member
+	if err := m.teamStore.AddMember(ctx, teamID, ag.ID, store.TeamRoleMember); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to add member: "+err.Error()))
+		return
+	}
+
+	// Auto-create outbound link from lead to new member
+	if m.linkStore != nil {
+		leadAgent, err := m.agentStore.GetByID(ctx, team.LeadAgentID)
+		if err == nil {
+			m.autoCreateTeamLinks(ctx, teamID, leadAgent, []*store.AgentData{ag}, client.UserID())
+		}
+	}
+
+	// Invalidate caches for all team members
+	m.invalidateTeamCaches(ctx, teamID)
+
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{"ok": true}))
+}
+
+// --- Remove Member ---
+
+type teamsRemoveMemberParams struct {
+	TeamID  string `json:"teamId"`
+	AgentID string `json:"agentId"` // agent UUID
+}
+
+func (m *TeamsMethods) handleRemoveMember(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	if m.teamStore == nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "teams not available (standalone mode)"))
+		return
+	}
+
+	var params teamsRemoveMemberParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid params"))
+		return
+	}
+	if params.TeamID == "" || params.AgentID == "" {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "teamId and agentId are required"))
+		return
+	}
+
+	teamID, err := uuid.Parse(params.TeamID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid teamId"))
+		return
+	}
+	agentID, err := uuid.Parse(params.AgentID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid agentId"))
+		return
+	}
+
+	ctx := context.Background()
+
+	// Validate team exists and prevent removing the lead
+	team, err := m.teamStore.GetTeam(ctx, teamID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "team not found: "+err.Error()))
+		return
+	}
+	if agentID == team.LeadAgentID {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "cannot remove the team lead"))
+		return
+	}
+
+	// Remove member
+	if err := m.teamStore.RemoveMember(ctx, teamID, agentID); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to remove member: "+err.Error()))
+		return
+	}
+
+	// Clean up team-specific links
+	if m.linkStore != nil {
+		if err := m.linkStore.DeleteTeamLinksForAgent(ctx, teamID, agentID); err != nil {
+			slog.Warn("teams.members.remove: failed to clean up links", "error", err)
+		}
+	}
+
+	// Invalidate caches for all remaining members + removed agent
+	m.invalidateTeamCaches(ctx, teamID)
+	if m.agentRouter != nil {
+		ag, err := m.agentStore.GetByID(ctx, agentID)
+		if err == nil {
+			m.agentRouter.InvalidateAgent(ag.AgentKey)
+		}
+	}
+
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{"ok": true}))
+}
+
+// invalidateTeamCaches invalidates agent caches for all members of a team.
+func (m *TeamsMethods) invalidateTeamCaches(ctx context.Context, teamID uuid.UUID) {
+	if m.agentRouter == nil {
+		return
+	}
+	members, err := m.teamStore.ListMembers(ctx, teamID)
+	if err != nil {
+		return
+	}
+	for _, member := range members {
+		if member.AgentKey != "" {
+			m.agentRouter.InvalidateAgent(member.AgentKey)
+		}
+	}
+}
+
 // --- helpers ---
 
-// autoCreateTeamLinks creates bidirectional agent_links between all team members.
-// Silently skips existing links (UNIQUE constraint).
-func (m *TeamsMethods) autoCreateTeamLinks(ctx context.Context, teamID uuid.UUID, agents []*store.AgentData, createdBy string) {
-	for i := 0; i < len(agents); i++ {
-		for j := i + 1; j < len(agents); j++ {
-			link := &store.AgentLinkData{
-				SourceAgentID: agents[i].ID,
-				TargetAgentID: agents[j].ID,
-				Direction:     store.LinkDirectionBidirectional,
-				TeamID:        &teamID,
-				Description:   "auto-created by team",
-				MaxConcurrent: 3,
-				Status:        store.LinkStatusActive,
-				CreatedBy:     createdBy,
-			}
-			if err := m.linkStore.CreateLink(ctx, link); err != nil {
-				slog.Debug("teams: auto-link already exists or failed",
-					"source", agents[i].AgentKey, "target", agents[j].AgentKey, "error", err)
-			}
+// autoCreateTeamLinks creates outbound agent_links from lead to each member.
+// Only the lead can delegate to members — members cannot delegate back to lead
+// or to other members. Silently skips existing links (UNIQUE constraint).
+func (m *TeamsMethods) autoCreateTeamLinks(ctx context.Context, teamID uuid.UUID, leadAgent *store.AgentData, members []*store.AgentData, createdBy string) {
+	for _, member := range members {
+		if member.ID == leadAgent.ID {
+			continue
+		}
+		link := &store.AgentLinkData{
+			SourceAgentID: leadAgent.ID,
+			TargetAgentID: member.ID,
+			Direction:     store.LinkDirectionOutbound,
+			TeamID:        &teamID,
+			Description:   "auto-created by team",
+			MaxConcurrent: 3,
+			Status:        store.LinkStatusActive,
+			CreatedBy:     createdBy,
+		}
+		if err := m.linkStore.CreateLink(ctx, link); err != nil {
+			slog.Debug("teams: auto-link already exists or failed",
+				"source", leadAgent.AgentKey, "target", member.AgentKey, "error", err)
 		}
 	}
 }

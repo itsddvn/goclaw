@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Activity, RefreshCw, Search } from "lucide-react";
+import { Activity, GitFork, RefreshCw, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -20,12 +20,12 @@ export function TracesPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const { traces, total, loading, refresh, getTrace } = useTraces({
+  const { traces, total, loading, fetching, refresh, getTrace } = useTraces({
     agentId: appliedAgentFilter || undefined,
     limit: pageSize,
     offset: (page - 1) * pageSize,
   });
-  const spinning = useMinLoading(loading);
+  const spinning = useMinLoading(fetching);
   const showSkeleton = useDeferredLoading(loading && traces.length === 0);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -93,6 +93,9 @@ export function TracesPage() {
                     onClick={() => setSelectedTraceId(trace.id)}
                   >
                     <td className="max-w-[200px] truncate px-4 py-3 font-medium">
+                      {trace.parent_trace_id && (
+                        <GitFork className="mr-1.5 inline-block h-3.5 w-3.5 text-muted-foreground" />
+                      )}
                       {trace.name || "Unnamed"}
                       {trace.channel && (
                         <Badge variant="outline" className="ml-2 text-xs">
