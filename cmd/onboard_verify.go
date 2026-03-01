@@ -1,13 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
 // providerVerifyError holds the result of a provider connectivity probe.
@@ -18,79 +20,97 @@ type providerVerifyError struct {
 
 func (e *providerVerifyError) Error() string { return e.message }
 
-// verifyProviderConnectivity checks whether a provider's API key is valid by
-// sending a minimal POST to the chat completions endpoint. This endpoint always
-// requires authentication, unlike /models which is public on many providers.
-//
-// Strategy: POST an empty JSON body to /chat/completions.
-//   - 401/403 → invalid API key (fatal)
-//   - 400/422 → key is valid, request is bad (expected — means auth passed)
-//   - 2xx     → key is valid (unexpected but fine)
-//   - 5xx     → transient server error (non-fatal warning)
-func verifyProviderConnectivity(cfg *config.Config, providerName string) *providerVerifyError {
-	apiBase := resolveProviderAPIBase(providerName)
-	if apiBase == "" {
-		return nil // custom/unknown provider — skip verification
-	}
+// newProviderForVerify instantiates a temporary provider for key verification.
+// Mirrors the logic in registerProviders (gateway_providers.go) so auth headers,
+// base URL overrides, and custom chat paths are handled correctly.
+func newProviderForVerify(cfg *config.Config, name string) providers.Provider {
+	apiKey := resolveProviderAPIKey(cfg, name)
+	apiBase := resolveProviderAPIBase(name)
 
-	apiKey := resolveProviderAPIKey(cfg, providerName)
-	if apiKey == "" {
-		return nil // no key to verify
-	}
-
-	url := resolveAuthCheckEndpoint(providerName, apiBase)
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("POST", url, strings.NewReader("{}"))
-	if err != nil {
-		return &providerVerifyError{fatal: false, message: fmt.Sprintf("build request: %v", err)}
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Anthropic uses x-api-key header; all others use Bearer token.
-	if providerName == "anthropic" {
-		req.Header.Set("x-api-key", apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-	} else {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return &providerVerifyError{fatal: false, message: fmt.Sprintf("connectivity check failed (transient): %v", err)}
-	}
-	defer resp.Body.Close()
-
-	switch {
-	case resp.StatusCode == 401 || resp.StatusCode == 403:
-		return &providerVerifyError{fatal: true, message: fmt.Sprintf("%s returned %d — invalid API key", providerName, resp.StatusCode)}
-	case resp.StatusCode == 400 || resp.StatusCode == 422:
-		// Auth passed but request body is invalid — key is valid
-		return nil
-	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return nil
-	case resp.StatusCode >= 500:
-		return &providerVerifyError{fatal: false, message: fmt.Sprintf("%s returned %d (transient, continuing)", providerName, resp.StatusCode)}
+	switch name {
+	case "anthropic":
+		if cfg.Providers.Anthropic.APIBase != "" {
+			apiBase = cfg.Providers.Anthropic.APIBase
+		}
+		return providers.NewAnthropicProvider(apiKey, providers.WithAnthropicBaseURL(apiBase))
+	case "dashscope":
+		if cfg.Providers.DashScope.APIBase != "" {
+			apiBase = cfg.Providers.DashScope.APIBase
+		}
+		return providers.NewDashScopeProvider(apiKey, apiBase, "")
+	case "minimax":
+		return providers.NewOpenAIProvider(name, apiKey, apiBase, "").WithChatPath("/text/chatcompletion_v2")
+	case "openai":
+		if cfg.Providers.OpenAI.APIBase != "" {
+			apiBase = cfg.Providers.OpenAI.APIBase
+		}
+		return providers.NewOpenAIProvider(name, apiKey, apiBase, "")
+	case "bailian":
+		if cfg.Providers.Bailian.APIBase != "" {
+			apiBase = cfg.Providers.Bailian.APIBase
+		}
+		return providers.NewOpenAIProvider(name, apiKey, apiBase, "")
 	default:
-		// Unexpected status (404, 429, etc.) — warn but don't block
-		return &providerVerifyError{fatal: false, message: fmt.Sprintf("%s returned %d (unexpected, continuing)", providerName, resp.StatusCode)}
+		return providers.NewOpenAIProvider(name, apiKey, apiBase, "")
 	}
 }
 
-// resolveAuthCheckEndpoint returns the chat completions URL for auth verification.
-// This endpoint requires valid credentials on all providers.
-func resolveAuthCheckEndpoint(providerName, apiBase string) string {
-	switch providerName {
-	case "anthropic":
-		return "https://api.anthropic.com/v1/messages"
-	default:
-		return apiBase + "/chat/completions"
+// verifyProviderConnectivity checks whether a provider's API key is valid by
+// sending a minimal Chat request through the provider layer. This reuses the
+// same auth headers, base URLs, and HTTP client as the real provider calls.
+//
+// Strategy: provider.Chat() with message "hi", max_tokens=1.
+//   - 401/403 HTTPError → invalid API key (fatal)
+//   - Any other error   → non-fatal warning (transient/config issue)
+//   - Success           → key is valid
+func verifyProviderConnectivity(cfg *config.Config, providerName string) *providerVerifyError {
+	apiKey := resolveProviderAPIKey(cfg, providerName)
+	if apiKey == "" {
+		return nil
 	}
+
+	apiBase := resolveProviderAPIBase(providerName)
+	if apiBase == "" {
+		return nil // custom/unknown provider — skip
+	}
+
+	prov := newProviderForVerify(cfg, providerName)
+
+	model := ""
+	if pi, ok := providerMap[providerName]; ok {
+		model = pi.modelHint
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := prov.Chat(ctx, providers.ChatRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+		Model:    model,
+		Options:  map[string]interface{}{"max_tokens": 1},
+	})
+	if err != nil {
+		var httpErr *providers.HTTPError
+		if errors.As(err, &httpErr) && (httpErr.Status == 401 || httpErr.Status == 403) {
+			return &providerVerifyError{
+				fatal:   true,
+				message: fmt.Sprintf("%s returned %d — invalid API key", providerName, httpErr.Status),
+			}
+		}
+		// Non-auth errors: transient network issue, bad model, rate limit, etc.
+		return &providerVerifyError{
+			fatal:   false,
+			message: fmt.Sprintf("%s: %s", providerName, friendlyProviderError(err)),
+		}
+	}
+
+	return nil
 }
 
 // verifyAllProviders checks connectivity for every provider that has an API key.
-// Returns a list of fatal errors (invalid keys). Non-fatal warnings are logged.
-func verifyAllProviders(cfg *config.Config) []string {
+// Only the primary provider's auth failure is fatal (blocks bootstrap).
+// Secondary provider failures are logged as warnings.
+func verifyAllProviders(cfg *config.Config, primaryProvider string) []string {
 	var fatalErrors []string
 
 	for _, name := range providerPriority {
@@ -106,10 +126,13 @@ func verifyAllProviders(cfg *config.Config) []string {
 			continue
 		}
 
-		if verr.fatal {
-			slog.Error("provider key invalid", "provider", name, "error", verr.message)
+		if verr.fatal && name == primaryProvider {
+			slog.Error("primary provider key invalid", "provider", name, "error", verr.message)
 			fmt.Printf("    %s: FAILED — %s\n", name, verr.message)
 			fatalErrors = append(fatalErrors, fmt.Sprintf("%s: %s", name, verr.message))
+		} else if verr.fatal {
+			slog.Warn("secondary provider key invalid (continuing)", "provider", name, "error", verr.message)
+			fmt.Printf("    %s: WARNING — %s (non-primary, skipping)\n", name, verr.message)
 		} else {
 			slog.Warn("provider connectivity warning", "provider", name, "warning", verr.message)
 			fmt.Printf("    %s: WARNING — %s\n", name, verr.message)
@@ -117,4 +140,34 @@ func verifyAllProviders(cfg *config.Config) []string {
 	}
 
 	return fatalErrors
+}
+
+// friendlyProviderError extracts a human-readable message from provider errors.
+func friendlyProviderError(err error) string {
+	msg := err.Error()
+
+	// Try to extract "message" field from embedded JSON error blobs.
+	if idx := strings.Index(msg, `"message"`); idx >= 0 {
+		rest := msg[idx:]
+		if start := strings.Index(rest, `:`); start >= 0 {
+			rest = strings.TrimLeft(rest[start+1:], " ")
+			if len(rest) > 0 && rest[0] == '"' {
+				rest = rest[1:]
+				if end := strings.Index(rest, `"`); end >= 0 && rest[:end] != "" {
+					return rest[:end]
+				}
+			}
+		}
+	}
+
+	// Strip "HTTP NNN: provider: " prefix.
+	if idx := strings.LastIndex(msg, ": "); idx >= 0 && idx < len(msg)-2 {
+		suffix := msg[idx+2:]
+		if strings.HasPrefix(suffix, "{") {
+			return "request rejected by provider"
+		}
+		return suffix
+	}
+
+	return msg
 }
