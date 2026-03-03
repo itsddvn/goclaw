@@ -24,7 +24,7 @@ func NewTeamTasksTool(manager *TeamToolManager) *TeamTasksTool {
 func (t *TeamTasksTool) Name() string { return "team_tasks" }
 
 func (t *TeamTasksTool) Description() string {
-	return "Manage the shared team task list. Actions: list (active tasks overview), get (full task detail with result), create, claim, complete, search. See TEAM.md for your team context."
+	return "Manage the shared team task list. Actions: list (active tasks overview), get (full task detail with result), create, claim, complete, cancel, search. See TEAM.md for your team context."
 }
 
 func (t *TeamTasksTool) Parameters() map[string]interface{} {
@@ -33,7 +33,7 @@ func (t *TeamTasksTool) Parameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"action": map[string]interface{}{
 				"type":        "string",
-				"description": "'list', 'get', 'create', 'claim', 'complete', or 'search'",
+				"description": "'list', 'get', 'create', 'claim', 'complete', 'cancel', or 'search'",
 			},
 			"status": map[string]interface{}{
 				"type":        "string",
@@ -62,11 +62,15 @@ func (t *TeamTasksTool) Parameters() map[string]interface{} {
 			},
 			"task_id": map[string]interface{}{
 				"type":        "string",
-				"description": "Task ID (required for action=get, claim, complete)",
+				"description": "Task ID (required for action=get, claim, complete, cancel)",
 			},
 			"result": map[string]interface{}{
 				"type":        "string",
 				"description": "Task result summary (required for action=complete)",
+			},
+			"reason": map[string]interface{}{
+				"type":        "string",
+				"description": "Cancellation reason (optional for action=cancel)",
 			},
 		},
 		"required": []string{"action"},
@@ -87,10 +91,12 @@ func (t *TeamTasksTool) Execute(ctx context.Context, args map[string]interface{}
 		return t.executeClaim(ctx, args)
 	case "complete":
 		return t.executeComplete(ctx, args)
+	case "cancel":
+		return t.executeCancel(ctx, args)
 	case "search":
 		return t.executeSearch(ctx, args)
 	default:
-		return ErrorResult(fmt.Sprintf("unknown action: %s (use list, get, create, claim, complete, or search)", action))
+		return ErrorResult(fmt.Sprintf("unknown action: %s (use list, get, create, claim, complete, cancel, or search)", action))
 	}
 }
 
@@ -104,7 +110,14 @@ func (t *TeamTasksTool) executeList(ctx context.Context, args map[string]interfa
 
 	statusFilter, _ := args["status"].(string)
 
-	tasks, err := t.manager.teamStore.ListTasks(ctx, team.ID, "priority", statusFilter)
+	// Delegate/system channels see all tasks; end users only see their own.
+	filterUserID := ""
+	channel := ToolChannelFromCtx(ctx)
+	if channel != "delegate" && channel != "system" {
+		filterUserID = store.UserIDFromContext(ctx)
+	}
+
+	tasks, err := t.manager.teamStore.ListTasks(ctx, team.ID, "priority", statusFilter, filterUserID)
 	if err != nil {
 		return ErrorResult("failed to list tasks: " + err.Error())
 	}
@@ -133,6 +146,11 @@ func (t *TeamTasksTool) executeList(ctx context.Context, args map[string]interfa
 }
 
 func (t *TeamTasksTool) executeGet(ctx context.Context, args map[string]interface{}) *Result {
+	team, _, err := t.manager.resolveTeam(ctx)
+	if err != nil {
+		return ErrorResult(err.Error())
+	}
+
 	taskIDStr, _ := args["task_id"].(string)
 	if taskIDStr == "" {
 		return ErrorResult("task_id is required for get action")
@@ -145,6 +163,9 @@ func (t *TeamTasksTool) executeGet(ctx context.Context, args map[string]interfac
 	task, err := t.manager.teamStore.GetTask(ctx, taskID)
 	if err != nil {
 		return ErrorResult("failed to get task: " + err.Error())
+	}
+	if task.TeamID != team.ID {
+		return ErrorResult("task does not belong to your team")
 	}
 
 	// Truncate result for context protection (full result in DB)
@@ -172,7 +193,14 @@ func (t *TeamTasksTool) executeSearch(ctx context.Context, args map[string]inter
 		return ErrorResult("query is required for search action")
 	}
 
-	tasks, err := t.manager.teamStore.SearchTasks(ctx, team.ID, query, 20)
+	// Delegate/system channels see all tasks; end users only see their own.
+	filterUserID := ""
+	channel := ToolChannelFromCtx(ctx)
+	if channel != "delegate" && channel != "system" {
+		filterUserID = store.UserIDFromContext(ctx)
+	}
+
+	tasks, err := t.manager.teamStore.SearchTasks(ctx, team.ID, query, 20, filterUserID)
 	if err != nil {
 		return ErrorResult("failed to search tasks: " + err.Error())
 	}
@@ -236,6 +264,8 @@ func (t *TeamTasksTool) executeCreate(ctx context.Context, args map[string]inter
 		Status:      status,
 		BlockedBy:   blockedBy,
 		Priority:    priority,
+		UserID:      store.UserIDFromContext(ctx),
+		Channel:     ToolChannelFromCtx(ctx),
 	}
 
 	if err := t.manager.teamStore.CreateTask(ctx, task); err != nil {
@@ -253,7 +283,7 @@ func (t *TeamTasksTool) executeCreate(ctx context.Context, args map[string]inter
 }
 
 func (t *TeamTasksTool) executeClaim(ctx context.Context, args map[string]interface{}) *Result {
-	_, agentID, err := t.manager.resolveTeam(ctx)
+	team, agentID, err := t.manager.resolveTeam(ctx)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -267,7 +297,7 @@ func (t *TeamTasksTool) executeClaim(ctx context.Context, args map[string]interf
 		return ErrorResult("invalid task_id")
 	}
 
-	if err := t.manager.teamStore.ClaimTask(ctx, taskID, agentID); err != nil {
+	if err := t.manager.teamStore.ClaimTask(ctx, taskID, agentID, team.ID); err != nil {
 		return ErrorResult("failed to claim task: " + err.Error())
 	}
 
@@ -275,7 +305,7 @@ func (t *TeamTasksTool) executeClaim(ctx context.Context, args map[string]interf
 }
 
 func (t *TeamTasksTool) executeComplete(ctx context.Context, args map[string]interface{}) *Result {
-	_, agentID, err := t.manager.resolveTeam(ctx)
+	team, agentID, err := t.manager.resolveTeam(ctx)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -297,19 +327,51 @@ func (t *TeamTasksTool) executeComplete(ctx context.Context, args map[string]int
 	// Auto-claim if the task is still pending (saves an extra tool call).
 	// ClaimTask is atomic — only one agent can succeed, others get an error.
 	// Ignore claim error: task may already be in_progress (claimed by us or someone else).
-	_ = t.manager.teamStore.ClaimTask(ctx, taskID, agentID)
+	_ = t.manager.teamStore.ClaimTask(ctx, taskID, agentID, team.ID)
 
-	if err := t.manager.teamStore.CompleteTask(ctx, taskID, result); err != nil {
+	if err := t.manager.teamStore.CompleteTask(ctx, taskID, team.ID, result); err != nil {
 		return ErrorResult("failed to complete task: " + err.Error())
 	}
 
-	// Resolve team for event payload
-	if team, _, teamErr := t.manager.resolveTeam(ctx); teamErr == nil {
-		t.manager.broadcastTeamEvent(protocol.EventTeamTaskCompleted, map[string]string{
-			"team_id": team.ID.String(),
-			"task_id": taskIDStr,
-		})
-	}
+	t.manager.broadcastTeamEvent(protocol.EventTeamTaskCompleted, map[string]string{
+		"team_id": team.ID.String(),
+		"task_id": taskIDStr,
+	})
 
 	return NewResult(fmt.Sprintf("Task %s completed. Dependent tasks have been unblocked.", taskIDStr))
+}
+
+func (t *TeamTasksTool) executeCancel(ctx context.Context, args map[string]interface{}) *Result {
+	team, _, err := t.manager.resolveTeam(ctx)
+	if err != nil {
+		return ErrorResult(err.Error())
+	}
+
+	taskIDStr, _ := args["task_id"].(string)
+	if taskIDStr == "" {
+		return ErrorResult("task_id is required for cancel action")
+	}
+	taskID, err := uuid.Parse(taskIDStr)
+	if err != nil {
+		return ErrorResult("invalid task_id")
+	}
+
+	reason, _ := args["reason"].(string)
+	if reason == "" {
+		reason = "Cancelled: task was not executed"
+	}
+
+	if err := t.manager.teamStore.UpdateTask(ctx, taskID, map[string]any{
+		"status": store.TeamTaskStatusCompleted,
+		"result": "CANCELLED: " + reason,
+	}); err != nil {
+		return ErrorResult("failed to cancel task: " + err.Error())
+	}
+
+	t.manager.broadcastTeamEvent(protocol.EventTeamTaskCompleted, map[string]string{
+		"team_id": team.ID.String(),
+		"task_id": taskIDStr,
+	})
+
+	return NewResult(fmt.Sprintf("Task %s cancelled.", taskIDStr))
 }

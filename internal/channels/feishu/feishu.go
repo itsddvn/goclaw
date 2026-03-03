@@ -38,12 +38,20 @@ type Channel struct {
 	senderCache     sync.Map // open_id → *senderCacheEntry
 	dedup           sync.Map // message_id → struct{}
 	pairingDebounce sync.Map // senderID → time.Time
+	reactions       sync.Map // chatID → *reactionState
+	approvedGroups sync.Map // chatID → true (in-memory cache for paired groups)
 	groupAllowList  []string
 	groupHistory    *channels.PendingHistory
 	historyLimit    int
 	stopCh          chan struct{}
 	httpServer      *http.Server
 	wsClient        *WSClient
+}
+
+// reactionState tracks an active typing reaction on a user's message.
+type reactionState struct {
+	messageID  string // Lark message ID (om_xxx)
+	reactionID string // reaction ID returned by API for deletion
 }
 
 type senderCacheEntry struct {
@@ -136,39 +144,50 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		return fmt.Errorf("empty chat ID for feishu send")
 	}
 
-	text := msg.Content
-	if text == "" {
-		return nil
-	}
-
-	// Resolve render mode
-	renderMode := c.cfg.RenderMode
-	if renderMode == "" {
-		renderMode = "auto"
-	}
-
-	useCard := false
-	switch renderMode {
-	case "card":
-		useCard = true
-	case "auto":
-		useCard = shouldUseCard(text)
-	}
-
-	chunkLimit := c.cfg.TextChunkLimit
-	if chunkLimit <= 0 {
-		chunkLimit = defaultTextChunkLimit
-	}
-
 	// Determine receive_id_type
 	receiveIDType := resolveReceiveIDType(chatID)
 
-	// Send as card or text
-	if useCard {
-		return c.sendMarkdownCard(ctx, chatID, receiveIDType, text, nil)
+	// Send text content
+	text := msg.Content
+	if text != "" {
+		// Resolve render mode
+		renderMode := c.cfg.RenderMode
+		if renderMode == "" {
+			renderMode = "auto"
+		}
+
+		useCard := false
+		switch renderMode {
+		case "card":
+			useCard = true
+		case "auto":
+			useCard = shouldUseCard(text)
+		}
+
+		chunkLimit := c.cfg.TextChunkLimit
+		if chunkLimit <= 0 {
+			chunkLimit = defaultTextChunkLimit
+		}
+
+		if useCard {
+			if err := c.sendMarkdownCard(ctx, chatID, receiveIDType, text, nil); err != nil {
+				return err
+			}
+		} else {
+			if err := c.sendChunkedText(ctx, chatID, receiveIDType, text, chunkLimit); err != nil {
+				return err
+			}
+		}
 	}
 
-	return c.sendChunkedText(ctx, chatID, receiveIDType, text, chunkLimit)
+	// Send media attachments
+	for _, media := range msg.Media {
+		if err := c.sendMediaAttachment(ctx, chatID, receiveIDType, media); err != nil {
+			slog.Warn("feishu send media failed", "url", media.URL, "error", err)
+		}
+	}
+
+	return nil
 }
 
 // --- Connection modes ---
@@ -206,15 +225,40 @@ func (c *Channel) startWebSocket(ctx context.Context) error {
 	return nil
 }
 
-func (c *Channel) startWebhook(ctx context.Context) error {
-	port := c.cfg.WebhookPort
-	if port <= 0 {
-		port = defaultWebhookPort
+// WebhookHandler returns the webhook HTTP handler and path for mounting on the main gateway mux.
+// Returns ("", nil) if not in webhook mode or if webhook_port > 0 (separate server).
+func (c *Channel) WebhookHandler() (string, http.Handler) {
+	mode := c.cfg.ConnectionMode
+	if mode != "webhook" {
+		return "", nil
 	}
+	// Only mount on main mux when webhook_port is 0 (share main server port).
+	if c.cfg.WebhookPort > 0 {
+		return "", nil
+	}
+
 	path := c.cfg.WebhookPath
 	if path == "" {
 		path = defaultWebhookPath
 	}
+
+	handler := NewWebhookHandler(c.cfg.VerificationToken, c.cfg.EncryptKey, func(event *MessageEvent) {
+		c.handleMessageEvent(context.Background(), event)
+	})
+
+	return path, http.HandlerFunc(handler)
+}
+
+func (c *Channel) startWebhook(ctx context.Context) error {
+	// If webhook_port is 0, the handler is mounted on the main gateway mux
+	// via WebhookHandler() — no separate server needed.
+	if c.cfg.WebhookPort <= 0 {
+		slog.Info("feishu: webhook handler mounted on main gateway mux", "path", c.webhookPath())
+		return nil
+	}
+
+	port := c.cfg.WebhookPort
+	path := c.webhookPath()
 
 	slog.Info("feishu: starting Webhook server", "port", port, "path", path)
 
@@ -301,6 +345,14 @@ func (c *Channel) sendMarkdownCard(ctx context.Context, chatID, receiveIDType, t
 	return nil
 }
 
+// webhookPath returns the configured webhook path or the default.
+func (c *Channel) webhookPath() string {
+	if c.cfg.WebhookPath != "" {
+		return c.cfg.WebhookPath
+	}
+	return defaultWebhookPath
+}
+
 // --- Domain resolution ---
 
 func resolveDomain(domain string) string {
@@ -385,5 +437,67 @@ func (c *Channel) isDuplicate(messageID string) bool {
 	return loaded
 }
 
-// Ensure Channel implements the channels.Channel interface at compile time.
+// --- ReactionChannel implementation ---
+
+const typingEmoji = "Typing" // Lark emoji type for typing indicator (matching TS)
+
+// OnReactionEvent handles agent status change events by adding/removing a typing reaction
+// on the user's original message. messageID is the Lark message ID (e.g. "om_xxx").
+func (c *Channel) OnReactionEvent(ctx context.Context, chatID string, messageID string, status string) error {
+	if c.cfg.ReactionLevel == "off" || messageID == "" {
+		return nil
+	}
+
+	// Minimal mode: only act on terminal states.
+	if c.cfg.ReactionLevel == "minimal" && status != "done" && status != "error" {
+		return nil
+	}
+
+	// Terminal states: remove typing reaction.
+	if status == "done" || status == "error" {
+		return c.removeTypingReaction(ctx, chatID)
+	}
+
+	// Active states (thinking, tool): add typing reaction if not already present.
+	if _, loaded := c.reactions.Load(chatID); loaded {
+		return nil // already has a reaction
+	}
+
+	reactionID, err := c.client.AddMessageReaction(ctx, messageID, typingEmoji)
+	if err != nil {
+		slog.Debug("feishu: add typing reaction failed", "message_id", messageID, "error", err)
+		return nil // non-critical, don't fail the run
+	}
+
+	c.reactions.Store(chatID, &reactionState{
+		messageID:  messageID,
+		reactionID: reactionID,
+	})
+	return nil
+}
+
+// ClearReaction removes the typing reaction from a message.
+func (c *Channel) ClearReaction(ctx context.Context, chatID string, _ string) error {
+	return c.removeTypingReaction(ctx, chatID)
+}
+
+// removeTypingReaction removes the stored typing reaction for a chatID.
+func (c *Channel) removeTypingReaction(ctx context.Context, chatID string) error {
+	val, ok := c.reactions.LoadAndDelete(chatID)
+	if !ok {
+		return nil
+	}
+	rs := val.(*reactionState)
+	if rs.reactionID == "" {
+		return nil
+	}
+	if err := c.client.DeleteMessageReaction(ctx, rs.messageID, rs.reactionID); err != nil {
+		slog.Debug("feishu: remove typing reaction failed", "message_id", rs.messageID, "error", err)
+	}
+	return nil
+}
+
+// Ensure Channel implements the channels.Channel, WebhookChannel, and ReactionChannel interfaces at compile time.
 var _ channels.Channel = (*Channel)(nil)
+var _ channels.WebhookChannel = (*Channel)(nil)
+var _ channels.ReactionChannel = (*Channel)(nil)

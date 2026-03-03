@@ -14,6 +14,7 @@ type InboundMessage struct {
 	AgentID      string            `json:"agent_id,omitempty"`    // target agent (for multi-agent routing)
 	UserID       string            `json:"user_id,omitempty"`     // external user ID for per-user scoping (memory, bootstrap)
 	HistoryLimit int               `json:"history_limit,omitempty"` // max turns to keep in context (0=unlimited, from channel config)
+	ToolAllow    []string          `json:"tool_allow,omitempty"`    // per-group tool allow list (nil = no restriction)
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
@@ -48,6 +49,26 @@ const (
 	CacheKindCustomTools      = "custom_tools"
 	CacheKindChannelInstances = "channel_instances"
 	CacheKindBuiltinTools     = "builtin_tools"
+	CacheKindTeam             = "team"
+	CacheKindUserWorkspace       = "user_workspace"
+	CacheKindGroupFileWriters    = "group_file_writers"
+	CacheKindSkillGrants         = "skill_grants"
+)
+
+// Topic constants for msgBus.Subscribe() / Broadcast().
+const (
+	TopicCacheBootstrap        = "cache:bootstrap"
+	TopicCacheAgent            = "cache:agent"
+	TopicCacheSkills           = "cache:skills"
+	TopicCacheCron             = "cache:cron"
+	TopicCacheCustomTools      = "cache:custom_tools"
+	TopicCacheBuiltinTools     = "cache:builtin_tools"
+	TopicCacheTeam             = "cache:team"
+	TopicCacheUserWorkspace    = "cache:user_workspace"
+	TopicCacheChannelInstances    = "cache:channel_instances"
+	TopicCacheGroupFileWriters    = "cache:group_file_writers"
+	TopicCacheSkillGrants         = "cache:skill_grants"
+	TopicChannelStreaming          = "channel-streaming"
 )
 
 // CacheInvalidatePayload signals cache layers to evict stale entries.

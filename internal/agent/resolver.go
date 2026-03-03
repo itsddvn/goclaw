@@ -59,6 +59,9 @@ type ResolverDeps struct {
 
 	// Builtin tool settings (managed mode)
 	BuiltinToolStore store.BuiltinToolStore // nil if not managed
+
+	// Group file writer cache (managed mode)
+	GroupWriterCache *store.GroupWriterCache
 }
 
 // NewManagedResolver creates a ResolverFunc that builds Loops from DB agent data.
@@ -258,6 +261,9 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			}
 		}
 
+		// Managed mode: SkillAllowList is nil (all filesystem skills available).
+		// Per-agent DB skill filtering is handled by skill_search tool via SkillAccessStore.
+
 		loop := NewLoop(LoopConfig{
 			ID:                ag.AgentKey,
 			AgentUUID:         ag.ID,
@@ -273,6 +279,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			ToolPolicy:        deps.ToolPolicy,
 			AgentToolPolicy:   ag.ParseToolsConfig(),
 			SkillsLoader:      deps.Skills,
+			// SkillAllowList: nil = all filesystem skills (managed DB skill filtering via skill_search)
 			HasMemory:         hasMemory,
 			ContextFiles:      contextFiles,
 			EnsureUserFiles:   deps.EnsureUserFiles,
@@ -289,6 +296,8 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			SandboxWorkspaceAccess: sandboxWorkspaceAccess,
 			BuiltinToolSettings:    builtinSettings,
 			ThinkingLevel:         ag.ParseThinkingLevel(),
+			GroupWriterCache:      deps.GroupWriterCache,
+			TeamStore:             deps.TeamStore,
 		})
 
 		slog.Info("resolved agent from DB", "agent", agentKey, "model", ag.Model, "provider", ag.Provider)
@@ -339,6 +348,9 @@ func buildDelegateAgentsMD(targets []store.AgentLinkData) string {
 		sb.WriteString(fmt.Sprintf("\n### %s", t.TargetAgentKey))
 		if t.TargetDisplayName != "" {
 			sb.WriteString(fmt.Sprintf(" (%s)", t.TargetDisplayName))
+		}
+		if t.TargetIsTeamLead && t.TargetTeamName != "" {
+			sb.WriteString(fmt.Sprintf(" [Team Lead: %s]", t.TargetTeamName))
 		}
 		sb.WriteString("\n")
 		if t.TargetDescription != "" {
@@ -428,6 +440,8 @@ func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uu
 		sb.WriteString("spawn agent=writer, task=\"...\", team_task_id=B\n")
 		sb.WriteString("```\n\n")
 		sb.WriteString("The system ENFORCES this — spawn with agent but without team_task_id will be rejected.\n")
+		sb.WriteString("⚠️ `team_tasks create` alone does NOTHING — the task stays pending forever until you `spawn`.\n")
+		sb.WriteString("You MUST call `spawn` in the SAME turn. Do NOT respond with text before spawning.\n")
 		sb.WriteString("Each task auto-completes when its delegation finishes.\n\n")
 		sb.WriteString("When multiple delegations run in parallel, the system collects ALL results and delivers\n")
 		sb.WriteString("them to you in a single combined notification. Do NOT present partial results.\n\n")
@@ -446,7 +460,8 @@ func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uu
 		sb.WriteString("- action=list, status=all → all tasks including completed\n")
 		sb.WriteString("- action=get, task_id=<id> → full task detail with result\n")
 		sb.WriteString("- action=search, query=<text> → search tasks by subject/description\n")
-		sb.WriteString("- action=complete, task_id=<id>, result=<summary> → manually complete a task\n\n")
+		sb.WriteString("- action=complete, task_id=<id>, result=<summary> → manually complete a task\n")
+		sb.WriteString("- action=cancel, task_id=<id>, reason=<why> → cancel a pending task that is no longer needed\n\n")
 		sb.WriteString("Use `team_message` to send updates to team members.\n\n")
 		sb.WriteString("For simple questions about team composition, answer directly from the member list above.\n")
 	} else {

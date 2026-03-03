@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -15,7 +18,7 @@ import (
 type RunContext struct {
 	ChannelName  string
 	ChatID       string
-	MessageID    int
+	MessageID    string // platform message ID (string to support Feishu "om_xxx", Telegram "12345", etc.)
 	mu           sync.Mutex
 	streamBuffer string // accumulated streaming text (chunks are deltas)
 	inToolPhase  bool   // true after tool.call, reset on next chunk (new LLM iteration)
@@ -132,6 +135,21 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 					"channel", msg.Channel,
 					"error", err,
 				)
+				// Try to send a text-only error notification back to the chat.
+				// Only for media failures — text-only failures likely mean the chat
+				// is inaccessible (kicked, blocked, etc.) so retrying won't help.
+				if len(msg.Media) > 0 {
+					notifyMsg := bus.OutboundMessage{
+						Channel:  msg.Channel,
+						ChatID:   msg.ChatID,
+						Content:  formatChannelSendError(err),
+						Metadata: sendErrorMeta(msg.Metadata),
+					}
+					if err2 := channel.Send(ctx, notifyMsg); err2 != nil {
+						slog.Warn("failed to send error notification",
+							"channel", msg.Channel, "error", err2)
+					}
+				}
 			}
 
 			// Clean up temporary media files after successful (or failed) send.
@@ -196,6 +214,29 @@ func (m *Manager) UnregisterChannel(name string) {
 	delete(m.channels, name)
 }
 
+// WebhookRoute holds a path and handler pair for mounting on the main gateway mux.
+type WebhookRoute struct {
+	Path    string
+	Handler http.Handler
+}
+
+// WebhookHandlers returns all webhook handlers from channels that implement WebhookChannel.
+// Used to mount webhook routes on the main gateway mux.
+func (m *Manager) WebhookHandlers() []WebhookRoute {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var routes []WebhookRoute
+	for _, ch := range m.channels {
+		if wh, ok := ch.(WebhookChannel); ok {
+			if path, handler := wh.WebhookHandler(); path != "" && handler != nil {
+				routes = append(routes, WebhookRoute{Path: path, Handler: handler})
+			}
+		}
+	}
+	return routes
+}
+
 // SendToChannel delivers a message to a specific channel by name.
 func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, content string) error {
 	m.mu.RLock()
@@ -219,7 +260,7 @@ func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, conten
 
 // RegisterRun associates a run ID with a channel context so agent events
 // (chunks, tool calls, completion) can be forwarded to the originating channel.
-func (m *Manager) RegisterRun(runID, channelName, chatID string, messageID int) {
+func (m *Manager) RegisterRun(runID, channelName, chatID, messageID string) {
 	m.runs.Store(runID, &RunContext{
 		ChannelName: channelName,
 		ChatID:      chatID,
@@ -233,8 +274,9 @@ func (m *Manager) UnregisterRun(runID string) {
 }
 
 // IsStreamingChannel checks if a named channel implements StreamingChannel
-// AND has streaming currently enabled in its config (StreamEnabled() == true).
-func (m *Manager) IsStreamingChannel(channelName string) bool {
+// AND has streaming currently enabled for the given chat type.
+// isGroup: true for group chats, false for DMs.
+func (m *Manager) IsStreamingChannel(channelName string, isGroup bool) bool {
 	m.mu.RLock()
 	ch, exists := m.channels[channelName]
 	m.mu.RUnlock()
@@ -245,7 +287,7 @@ func (m *Manager) IsStreamingChannel(channelName string) bool {
 	if !ok {
 		return false
 	}
-	return sc.StreamEnabled()
+	return sc.StreamEnabled(isGroup)
 }
 
 // HandleAgentEvent routes agent lifecycle events to streaming/reaction channels.
@@ -375,4 +417,62 @@ func extractPayloadString(payload interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+// --- Send error notification helpers ---
+
+// telegramAPIDescRe extracts the human-readable description from Telegram Bot API errors.
+// Example: `telego: sendPhoto: api: 400 "Bad Request: not enough rights to send photos to the chat"`
+//
+//	→ "not enough rights to send photos to the chat"
+var telegramAPIDescRe = regexp.MustCompile(`"Bad Request:\s*(.+?)"`)
+
+// formatChannelSendError converts a channel.Send error into a user-friendly message.
+// Never exposes raw library/HTTP details.
+func formatChannelSendError(err error) string {
+	raw := err.Error()
+	lower := strings.ToLower(raw)
+
+	// Telegram "Bad Request: <description>" — extract description
+	if m := telegramAPIDescRe.FindStringSubmatch(raw); len(m) == 2 {
+		return fmt.Sprintf("⚠️ Send failed: %s", m[1])
+	}
+
+	// Common Telegram API errors (non-Bad Request)
+	switch {
+	case strings.Contains(lower, "not enough rights"):
+		return "⚠️ Send failed: bot doesn't have permission to send this type of message."
+	case strings.Contains(lower, "chat not found"):
+		return "⚠️ Send failed: chat not found."
+	case strings.Contains(lower, "bot was blocked"):
+		return "⚠️ Send failed: bot was blocked by the user."
+	case strings.Contains(lower, "user is deactivated"):
+		return "⚠️ Send failed: user account is deactivated."
+	case strings.Contains(lower, "too many requests") || strings.Contains(lower, "flood"):
+		return "⚠️ Send failed: rate limited by Telegram. Please try again later."
+	case strings.Contains(lower, "file is too big") || strings.Contains(lower, "wrong file"):
+		return "⚠️ Send failed: file is too large or invalid for Telegram."
+	}
+
+	// Generic fallback — don't expose internals
+	return "⚠️ Failed to deliver message. Check bot logs for details."
+}
+
+// sendErrorMeta copies only the routing fields from outbound metadata.
+// Strips reply_to_message_id, placeholder_key, audio_as_voice, etc.
+// that could cause unintended side effects on the error notification.
+func sendErrorMeta(orig map[string]string) map[string]string {
+	if orig == nil {
+		return nil
+	}
+	meta := make(map[string]string)
+	for _, k := range []string{"local_key", "message_thread_id"} {
+		if v := orig[k]; v != "" {
+			meta[k] = v
+		}
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
 }
