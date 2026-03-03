@@ -1,5 +1,6 @@
 import { useState, useRef } from "react";
-import { Radio, Plus, RefreshCw, Pencil, Trash2 } from "lucide-react";
+import { useParams, useNavigate } from "react-router";
+import { Radio, Plus, RefreshCw, Pencil, Trash2, QrCode } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
@@ -11,13 +12,18 @@ import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { useChannels } from "./hooks/use-channels";
 import { useChannelInstances, type ChannelInstanceData, type ChannelInstanceInput } from "./hooks/use-channel-instances";
 import { ChannelInstanceFormDialog } from "./channel-instance-form-dialog";
+import { channelsWithAuth, standaloneAuthDialogs } from "./channel-wizard-registry";
 import { ChannelsStatusView, channelTypeLabels } from "./channels-status-view";
+import { ChannelDetailPage } from "./channel-detail/channel-detail-page";
 import { useAgents } from "@/pages/agents/hooks/use-agents";
 import { useMinLoading } from "@/hooks/use-min-loading";
 import { useDeferredLoading } from "@/hooks/use-deferred-loading";
 import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
 
 export function ChannelsPage() {
+  const { id: detailId } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+
   const { channels, loading: statusLoading, refresh: refreshStatus } = useChannels();
 
   const [search, setSearch] = useState("");
@@ -25,9 +31,10 @@ export function ChannelsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [formOpen, setFormOpen] = useState(false);
-  const [editInstance, setEditInstance] = useState<ChannelInstanceData | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChannelInstanceData | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [editInstance, setEditInstance] = useState<ChannelInstanceData | null>(null);
+  const [qrTarget, setQrTarget] = useState<ChannelInstanceData | null>(null);
 
   const pendingSearchRef = useRef("");
   const flushSearch = useDebouncedCallback(() => {
@@ -61,18 +68,27 @@ export function ChannelsPage() {
     if (supported) refreshInstances();
   };
 
+  // Detail view
+  if (detailId) {
+    return <ChannelDetailPage instanceId={detailId} onBack={() => navigate("/channels")} />;
+  }
+
   // Standalone mode: show status-only cards
   if (!supported) {
     return <ChannelsStatusView channels={channels} loading={statusLoading} spinning={spinning} refresh={refreshStatus} />;
   }
 
   const handleCreate = async (data: ChannelInstanceInput) => {
-    await createInstance(data);
+    return await createInstance(data);
   };
 
   const handleEdit = async (data: ChannelInstanceInput) => {
     if (!editInstance) return;
     await updateInstance(editInstance.id, data);
+  };
+
+  const handleUpdate = async (id: string, data: Partial<ChannelInstanceInput>) => {
+    await updateInstance(id, data);
   };
 
   const handleDelete = async () => {
@@ -102,7 +118,7 @@ export function ChannelsPage() {
         description="Manage channel instances"
         actions={
           <div className="flex gap-2">
-            <Button size="sm" onClick={() => { setEditInstance(null); setFormOpen(true); }} className="gap-1">
+            <Button size="sm" onClick={() => setFormOpen(true)} className="gap-1">
               <Plus className="h-3.5 w-3.5" /> Add Channel
             </Button>
             <Button variant="outline" size="sm" onClick={refresh} disabled={spinning} className="gap-1">
@@ -147,7 +163,11 @@ export function ChannelsPage() {
                 {instances.map((inst) => {
                   const status = getStatus(inst.name);
                   return (
-                    <tr key={inst.id} className="border-b last:border-0 hover:bg-muted/30">
+                    <tr
+                      key={inst.id}
+                      className="border-b last:border-0 hover:bg-muted/30 cursor-pointer"
+                      onClick={() => navigate(`/channels/${inst.id}`)}
+                    >
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <Radio className="h-4 w-4 text-muted-foreground" />
@@ -188,10 +208,20 @@ export function ChannelsPage() {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1">
+                          {channelsWithAuth.has(inst.channel_type) && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              title={status?.running ? "Re-authenticate" : "Authenticate to start channel"}
+                              onClick={(e) => { e.stopPropagation(); setQrTarget(inst); }}
+                            >
+                              <QrCode className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => { setEditInstance(inst); setFormOpen(true); }}
+                            onClick={(e) => { e.stopPropagation(); setEditInstance(inst); setFormOpen(true); }}
                           >
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
@@ -199,7 +229,7 @@ export function ChannelsPage() {
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => setDeleteTarget(inst)}
+                              onClick={(e) => { e.stopPropagation(); setDeleteTarget(inst); }}
                               className="text-destructive hover:text-destructive"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
@@ -226,10 +256,17 @@ export function ChannelsPage() {
 
       <ChannelInstanceFormDialog
         open={formOpen}
-        onOpenChange={setFormOpen}
+        onOpenChange={(open) => {
+          setFormOpen(open);
+          if (!open) {
+            setEditInstance(null);
+            setTimeout(() => refresh(), 1500);
+          }
+        }}
         instance={editInstance}
         agents={agents}
         onSubmit={editInstance ? handleEdit : handleCreate}
+        onUpdate={handleUpdate}
       />
 
       <ConfirmDialog
@@ -242,6 +279,24 @@ export function ChannelsPage() {
         onConfirm={handleDelete}
         loading={deleteLoading}
       />
+
+      {qrTarget && (() => {
+        const AuthDialog = standaloneAuthDialogs[qrTarget.channel_type];
+        return AuthDialog ? (
+          <AuthDialog
+            open={!!qrTarget}
+            onOpenChange={(v) => !v && setQrTarget(null)}
+            instanceId={qrTarget.id}
+            instanceName={qrTarget.display_name || qrTarget.name}
+            onSuccess={() => {
+              setQrTarget(null);
+              // Backend reload is async (~2-3s: stop → sleep → restart).
+              // Refresh after reload has time to complete.
+              setTimeout(() => refresh(), 3000);
+            }}
+          />
+        ) : null;
+      })()}
     </div>
   );
 }

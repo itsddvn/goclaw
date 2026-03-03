@@ -15,7 +15,7 @@ import (
 // ChannelFactory creates a Channel from DB instance data.
 // name: channel name (registered in Manager, used in session keys).
 // creds: decrypted credentials JSON (token, API keys, etc.).
-// cfg: non-secret config JSONB (dm_policy, stream_mode, etc.).
+// cfg: non-secret config JSONB (dm_policy, dm_stream, group_stream, etc.).
 type ChannelFactory func(name string, creds json.RawMessage, cfg json.RawMessage,
 	msgBus *bus.MessageBus, pairingSvc store.PairingStore) (Channel, error)
 
@@ -165,6 +165,10 @@ func (l *InstanceLoader) loadInstance(ctx context.Context, inst store.ChannelIns
 	ch, err := factory(inst.Name, inst.Credentials, inst.Config, l.msgBus, l.pairingSvc)
 	if err != nil {
 		return err
+	}
+	if ch == nil {
+		slog.Info("channel instance not ready (missing credentials)", "name", inst.Name, "type", inst.ChannelType)
+		return nil
 	}
 
 	// Resolve agent_key from UUID — the routing system (Router, session keys) uses agent_key, not UUID.

@@ -80,6 +80,8 @@ type TeamTaskData struct {
 	Priority     int                    `json:"priority"`
 	Result       *string                `json:"result,omitempty"`
 	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	UserID       string                 `json:"user_id,omitempty"`
+	Channel      string                 `json:"channel,omitempty"`
 
 	// Joined fields
 	OwnerAgentKey string `json:"owner_agent_key,omitempty"`
@@ -156,6 +158,7 @@ type TeamStore interface {
 	// Team CRUD
 	CreateTeam(ctx context.Context, team *TeamData) error
 	GetTeam(ctx context.Context, teamID uuid.UUID) (*TeamData, error)
+	UpdateTeam(ctx context.Context, teamID uuid.UUID, updates map[string]any) error
 	DeleteTeam(ctx context.Context, teamID uuid.UUID) error
 	ListTeams(ctx context.Context) ([]TeamData, error)
 
@@ -168,23 +171,31 @@ type TeamStore interface {
 	// Returns nil, nil if the agent is not in any team.
 	GetTeamForAgent(ctx context.Context, agentID uuid.UUID) (*TeamData, error)
 
+	// KnownUserIDs returns distinct user IDs from sessions of team member agents.
+	// Used by team settings UI to populate user select boxes.
+	KnownUserIDs(ctx context.Context, teamID uuid.UUID, limit int) ([]string, error)
+
 	// Tasks (shared task list)
 	CreateTask(ctx context.Context, task *TeamTaskData) error
 	UpdateTask(ctx context.Context, taskID uuid.UUID, updates map[string]any) error
 	// ListTasks returns tasks for a team. orderBy: "priority" or "newest".
 	// statusFilter: "" = non-completed (default), "completed", "all".
-	ListTasks(ctx context.Context, teamID uuid.UUID, orderBy string, statusFilter string) ([]TeamTaskData, error)
+	// userID: if non-empty, filter to tasks created by this user.
+	ListTasks(ctx context.Context, teamID uuid.UUID, orderBy string, statusFilter string, userID string) ([]TeamTaskData, error)
 	// GetTask returns a single task by ID with joined agent info.
 	GetTask(ctx context.Context, taskID uuid.UUID) (*TeamTaskData, error)
 	// SearchTasks performs FTS search over task subject+description.
-	SearchTasks(ctx context.Context, teamID uuid.UUID, query string, limit int) ([]TeamTaskData, error)
+	// userID: if non-empty, filter to tasks created by this user.
+	SearchTasks(ctx context.Context, teamID uuid.UUID, query string, limit int, userID string) ([]TeamTaskData, error)
 
 	// ClaimTask atomically transitions a task from pending to in_progress.
 	// Only one agent can claim a given task (row-level lock, race-safe).
-	ClaimTask(ctx context.Context, taskID, agentID uuid.UUID) error
+	// teamID is validated in the WHERE clause to prevent cross-team task claiming.
+	ClaimTask(ctx context.Context, taskID, agentID, teamID uuid.UUID) error
 
 	// CompleteTask marks a task as completed and unblocks dependent tasks.
-	CompleteTask(ctx context.Context, taskID uuid.UUID, result string) error
+	// teamID is validated in the WHERE clause to prevent cross-team task completion.
+	CompleteTask(ctx context.Context, taskID, teamID uuid.UUID, result string) error
 
 	// Delegation history
 	SaveDelegationHistory(ctx context.Context, record *DelegationHistoryData) error

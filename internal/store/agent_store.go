@@ -197,13 +197,14 @@ type AgentStore interface {
 	SetUserOverride(ctx context.Context, override *UserAgentOverrideData) error
 
 	// User-agent profiles
-	GetOrCreateUserProfile(ctx context.Context, agentID uuid.UUID, userID, workspace string) (isNew bool, err error)
+	GetOrCreateUserProfile(ctx context.Context, agentID uuid.UUID, userID, workspace, channel string) (isNew bool, effectiveWorkspace string, err error)
 
 	// Group file writers (allowlist for protected file edits in group chats)
 	IsGroupFileWriter(ctx context.Context, agentID uuid.UUID, groupID, userID string) (bool, error)
 	AddGroupFileWriter(ctx context.Context, agentID uuid.UUID, groupID, userID, displayName, username string) error
 	RemoveGroupFileWriter(ctx context.Context, agentID uuid.UUID, groupID, userID string) error
 	ListGroupFileWriters(ctx context.Context, agentID uuid.UUID, groupID string) ([]GroupFileWriterData, error)
+	ListGroupFileWriterGroups(ctx context.Context, agentID uuid.UUID) ([]GroupWriterGroupInfo, error)
 }
 
 // GroupFileWriterData represents a group file writer entry.
@@ -211,4 +212,10 @@ type GroupFileWriterData struct {
 	UserID      string  `json:"user_id"`
 	DisplayName *string `json:"display_name,omitempty"`
 	Username    *string `json:"username,omitempty"`
+}
+
+// GroupWriterGroupInfo represents a group that has writers configured.
+type GroupWriterGroupInfo struct {
+	GroupID     string `json:"group_id"`
+	WriterCount int    `json:"writer_count"`
 }

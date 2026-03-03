@@ -103,6 +103,7 @@ export const Methods = {
 
   PAIRING_REQUEST: "device.pair.request",
   PAIRING_APPROVE: "device.pair.approve",
+  PAIRING_DENY: "device.pair.deny",
   PAIRING_LIST: "device.pair.list",
   PAIRING_REVOKE: "device.pair.revoke",
 
@@ -131,6 +132,8 @@ export const Methods = {
   TEAMS_TASK_LIST: "teams.tasks.list",
   TEAMS_MEMBERS_ADD: "teams.members.add",
   TEAMS_MEMBERS_REMOVE: "teams.members.remove",
+  TEAMS_UPDATE: "teams.update",
+  TEAMS_KNOWN_USERS: "teams.known_users",
 
   // Delegation history (managed mode)
   DELEGATIONS_LIST: "delegations.list",

@@ -65,6 +65,7 @@ const (
 
 	MethodPairingRequest = "device.pair.request"
 	MethodPairingApprove = "device.pair.approve"
+	MethodPairingDeny    = "device.pair.deny"
 	MethodPairingList    = "device.pair.list"
 	MethodPairingRevoke  = "device.pair.revoke"
 
@@ -106,6 +107,8 @@ const (
 	MethodTeamsTaskList      = "teams.tasks.list"
 	MethodTeamsMembersAdd    = "teams.members.add"
 	MethodTeamsMembersRemove = "teams.members.remove"
+	MethodTeamsUpdate        = "teams.update"
+	MethodTeamsKnownUsers    = "teams.known_users"
 )
 
 // Delegation history (managed mode)
@@ -130,4 +133,8 @@ const (
 	MethodBrowserScreenshot = "browser.screenshot"
 
 	MethodHeartbeat = "heartbeat"
+
+	// Zalo Personal (managed mode)
+	MethodZaloPersonalQRStart   = "zalo.personal.qr.start"
+	MethodZaloPersonalContacts  = "zalo.personal.contacts"
 )
