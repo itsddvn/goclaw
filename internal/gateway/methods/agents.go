@@ -33,6 +33,16 @@ func NewAgentsMethods(agents *agent.Router, cfg *config.Config, cfgPath, workspa
 	return &AgentsMethods{agents: agents, cfg: cfg, cfgPath: cfgPath, workspace: workspace, agentStore: agentStore, isManaged: isManaged, interceptor: interceptor}
 }
 
+// isOwnerUser checks if the given user ID is in the configured owner IDs.
+func (m *AgentsMethods) isOwnerUser(userID string) bool {
+	for _, id := range m.cfg.Gateway.OwnerIDs {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *AgentsMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodAgent, m.handleAgent)
 	router.Register(protocol.MethodAgentWait, m.handleAgentWait)
@@ -93,7 +103,45 @@ func (m *AgentsMethods) handleAgentWait(_ context.Context, client *gateway.Clien
 	}))
 }
 
-func (m *AgentsMethods) handleList(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+func (m *AgentsMethods) handleList(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	// In managed mode, query the store so ALL accessible agents appear (not just router-cached ones).
+	if m.isManaged && m.agentStore != nil {
+		userID := client.UserID()
+		var agents []store.AgentData
+		var err error
+		if userID == "" {
+			// No user context — fall through to router cache (safe default).
+		} else if m.isOwnerUser(userID) {
+			agents, err = m.agentStore.List(ctx, "")
+		} else {
+			agents, err = m.agentStore.ListAccessible(ctx, userID)
+		}
+		if err != nil {
+			slog.Warn("agents.list: store query failed, falling back to router", "error", err)
+		} else {
+			infos := make([]map[string]interface{}, 0, len(agents))
+			for _, a := range agents {
+				if a.Status != store.AgentStatusActive {
+					continue
+				}
+				infos = append(infos, map[string]interface{}{
+					"id":        a.AgentKey,
+					"name":      a.DisplayName,
+					"model":     a.Model,
+					"provider":  a.Provider,
+					"agentType": a.AgentType,
+					"status":    a.Status,
+					"isRunning": m.agents.IsRunning(a.AgentKey),
+				})
+			}
+			client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+				"agents": infos,
+			}))
+			return
+		}
+	}
+
+	// Standalone mode or store fallback: return router-cached agents.
 	infos := m.agents.ListInfo()
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
 		"agents": infos,
