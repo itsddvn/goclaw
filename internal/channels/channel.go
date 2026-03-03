@@ -11,6 +11,7 @@ package channels
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -84,13 +85,25 @@ type StreamingChannel interface {
 	OnStreamEnd(ctx context.Context, chatID string, finalText string) error
 }
 
+// WebhookChannel extends Channel with an HTTP handler that can be mounted
+// on the main gateway mux instead of starting a separate HTTP server.
+// This allows webhook-based channels (e.g. Feishu/Lark) to share the main
+// server port, avoiding the need to expose additional ports in Docker.
+type WebhookChannel interface {
+	Channel
+	// WebhookHandler returns the HTTP handler and the path it should be mounted on.
+	// Returns ("", nil) if the channel doesn't use webhook mode.
+	WebhookHandler() (path string, handler http.Handler)
+}
+
 // ReactionChannel extends Channel with status reaction support.
 // Channels that implement this interface can show emoji reactions on user messages
 // to indicate agent status (thinking, tool call, done, error, stall).
+// messageID is a string to support platforms with non-integer IDs (e.g., Feishu "om_xxx").
 type ReactionChannel interface {
 	Channel
-	OnReactionEvent(ctx context.Context, chatID string, messageID int, status string) error
-	ClearReaction(ctx context.Context, chatID string, messageID int) error
+	OnReactionEvent(ctx context.Context, chatID string, messageID string, status string) error
+	ClearReaction(ctx context.Context, chatID string, messageID string) error
 }
 
 // BaseChannel provides shared functionality for all channel implementations.
