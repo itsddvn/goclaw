@@ -48,6 +48,7 @@ export const credentialsSchema: Record<string, FieldDef[]> = {
     { key: "token", label: "OA Access Token", type: "password", required: true },
     { key: "webhook_secret", label: "Webhook Secret", type: "password" },
   ],
+  zalo_personal: [],
   whatsapp: [
     { key: "bridge_url", label: "Bridge URL", type: "text", required: true, placeholder: "http://bridge:3000" },
   ],
@@ -75,17 +76,21 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "Discord user IDs" },
   ],
   feishu: [
-    { key: "domain", label: "Domain", type: "select", options: [{ value: "lark", label: "Lark (global)" }, { value: "feishu", label: "Feishu (China)" }], defaultValue: "lark" },
-    { key: "connection_mode", label: "Connection Mode", type: "select", options: [{ value: "websocket", label: "WebSocket" }, { value: "webhook", label: "Webhook" }], defaultValue: "websocket" },
-    { key: "webhook_port", label: "Webhook Port", type: "number", defaultValue: 3000 },
-    { key: "webhook_path", label: "Webhook Path", type: "text", defaultValue: "/feishu/events" },
+    { key: "domain", label: "Domain", type: "select", options: [{ value: "lark", label: "Lark (global) — webhook only" }, { value: "feishu", label: "Feishu (China)" }], defaultValue: "lark" },
+    { key: "connection_mode", label: "Connection Mode", type: "select", options: [{ value: "webhook", label: "Webhook" }, { value: "websocket", label: "WebSocket (Feishu only)" }], defaultValue: "webhook", help: "Lark Global only supports Webhook" },
+    { key: "webhook_port", label: "Webhook Port", type: "number", defaultValue: 0, help: "0 = share main gateway port (recommended)" },
+    { key: "webhook_path", label: "Webhook Path", type: "text", defaultValue: "/feishu/events", help: "Path on main server for Lark events" },
     { key: "dm_policy", label: "DM Policy", type: "select", options: dmPolicyOptions, defaultValue: "pairing" },
     { key: "group_policy", label: "Group Policy", type: "select", options: groupPolicyOptions, defaultValue: "open" },
     { key: "require_mention", label: "Require @mention in groups", type: "boolean", defaultValue: true },
-    { key: "streaming", label: "Streaming", type: "boolean", defaultValue: true },
-    { key: "history_limit", label: "History Limit", type: "number" },
+    { key: "topic_session_mode", label: "Topic Session Mode", type: "select", options: [{ value: "disabled", label: "Disabled" }, { value: "enabled", label: "Enabled" }], defaultValue: "disabled", help: "Use thread root_id for session isolation" },
+    { key: "history_limit", label: "Group History Limit", type: "number", help: "Max pending group messages for context (0 = disabled)" },
     { key: "render_mode", label: "Render Mode", type: "select", options: [{ value: "auto", label: "Auto" }, { value: "raw", label: "Raw" }, { value: "card", label: "Card" }], defaultValue: "auto" },
-    { key: "allow_from", label: "Allowed Users", type: "tags", help: "User IDs" },
+    { key: "text_chunk_limit", label: "Text Chunk Limit", type: "number", defaultValue: 4000, help: "Max characters per message" },
+    { key: "media_max_mb", label: "Max Media Size (MB)", type: "number", defaultValue: 30, help: "Max inbound media download size" },
+    { key: "reaction_level", label: "Reaction Level", type: "select", options: [{ value: "off", label: "Off" }, { value: "minimal", label: "Minimal" }, { value: "full", label: "Full" }], defaultValue: "off", help: "Typing emoji reaction on user messages while bot is processing" },
+    { key: "allow_from", label: "Allowed Users", type: "tags", help: "Lark open_ids (ou_...)" },
+    { key: "group_allow_from", label: "Group Allowed Users", type: "tags", help: "Separate allowlist for group senders" },
   ],
   zalo_oa: [
     { key: "dm_policy", label: "DM Policy", type: "select", options: dmPolicyOptions, defaultValue: "pairing" },
@@ -93,9 +98,39 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "media_max_mb", label: "Max Media Size (MB)", type: "number", defaultValue: 5 },
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "Zalo user IDs" },
   ],
+  zalo_personal: [
+    { key: "dm_policy", label: "DM Policy", type: "select", options: dmPolicyOptions, defaultValue: "allowlist" },
+    { key: "group_policy", label: "Group Policy", type: "select", options: groupPolicyOptions, defaultValue: "allowlist" },
+    { key: "require_mention", label: "Require @mention in groups", type: "boolean", defaultValue: true },
+    { key: "allow_from", label: "Allowed Users", type: "tags", help: "Zalo user IDs or group IDs" },
+  ],
   whatsapp: [
     { key: "dm_policy", label: "DM Policy", type: "select", options: dmPolicyOptions, defaultValue: "open" },
     { key: "group_policy", label: "Group Policy", type: "select", options: groupPolicyOptions, defaultValue: "open" },
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "WhatsApp user IDs" },
   ],
+};
+
+// --- Post-create wizard configuration ---
+// Channels with multi-step create flows (e.g. auth then config).
+// Channels not listed here use the default single-step create.
+
+export interface WizardConfig {
+  /** Post-create step sequence */
+  steps: ("auth" | "config")[];
+  /** Custom label for the create button */
+  createLabel?: string;
+  /** Info banner shown on the form step during create */
+  formBanner?: string;
+  /** Config field keys excluded from form step (handled in wizard config step) */
+  excludeConfigFields?: string[];
+}
+
+export const wizardConfig: Partial<Record<string, WizardConfig>> = {
+  zalo_personal: {
+    steps: ["auth", "config"],
+    createLabel: "Create & Authenticate",
+    formBanner: "After creating, you'll authenticate via QR code and configure allowed users.",
+    excludeConfigFields: ["allow_from"],
+  },
 };

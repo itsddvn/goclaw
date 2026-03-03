@@ -261,6 +261,9 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			}
 		}
 
+		// Managed mode: SkillAllowList is nil (all filesystem skills available).
+		// Per-agent DB skill filtering is handled by skill_search tool via SkillAccessStore.
+
 		loop := NewLoop(LoopConfig{
 			ID:                ag.AgentKey,
 			AgentUUID:         ag.ID,
@@ -276,6 +279,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			ToolPolicy:        deps.ToolPolicy,
 			AgentToolPolicy:   ag.ParseToolsConfig(),
 			SkillsLoader:      deps.Skills,
+			// SkillAllowList: nil = all filesystem skills (managed DB skill filtering via skill_search)
 			HasMemory:         hasMemory,
 			ContextFiles:      contextFiles,
 			EnsureUserFiles:   deps.EnsureUserFiles,

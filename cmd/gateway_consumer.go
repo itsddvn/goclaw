@@ -139,10 +139,7 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 		// Register run with channel manager for streaming/reaction event forwarding.
 		// Use localKey (composite key with topic suffix) so streaming/reaction events
 		// route to the correct per-topic state in the channel.
-		messageID := 0
-		if mid := msg.Metadata["message_id"]; mid != "" {
-			fmt.Sscanf(mid, "%d", &messageID)
-		}
+		messageID := msg.Metadata["message_id"]
 		chatIDForRun := msg.ChatID
 		if lk := msg.Metadata["local_key"]; lk != "" {
 			chatIDForRun = lk
@@ -199,6 +196,7 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 			RunID:             runID,
 			Stream:            enableStream,
 			HistoryLimit:      msg.HistoryLimit,
+			ToolAllow:         msg.ToolAllow,
 			ExtraSystemPrompt: extraPrompt,
 			SkillFilter:       skillFilter,
 		}, scheduler.ScheduleOpts{
@@ -211,7 +209,7 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 		if mid := msg.Metadata["message_id"]; mid != "" {
 			outMeta["reply_to_message_id"] = mid
 		}
-		for _, k := range []string{"message_thread_id", "local_key", "placeholder_key"} {
+		for _, k := range []string{"message_thread_id", "local_key", "placeholder_key", "group_id"} {
 			if v := msg.Metadata[k]; v != "" {
 				outMeta[k] = v
 			}

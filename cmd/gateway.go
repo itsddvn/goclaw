@@ -18,6 +18,8 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/whatsapp"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo"
+	zalopersonal "github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal"
+	"github.com/nextlevelbuilder/goclaw/internal/channels/zalo/personal/zalomethods"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/cron"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -472,8 +474,11 @@ func runGateway() {
 	toolsReg.Register(skillSearchTool)
 	slog.Info("skill_search tool registered", "skills", len(skillsLoader.ListSkills()))
 
-	// Managed mode: wire embedding-based skill search
+	// Managed mode: wire embedding-based skill search + per-agent access filtering
 	if managedStores != nil && managedStores.Skills != nil {
+		if sas, ok := managedStores.Skills.(store.SkillAccessStore); ok {
+			skillSearchTool.SetSkillAccessStore(sas)
+		}
 		if pgSkills, ok := managedStores.Skills.(*pg.PGSkillStore); ok {
 			memCfg := cfg.Agents.Defaults.Memory
 			if embProvider := resolveEmbeddingProvider(cfg, memCfg); embProvider != nil {
@@ -509,13 +514,17 @@ func runGateway() {
 	slog.Info("session + message tools registered")
 
 	// Allow read_file to access skills directories (outside workspace).
-	// Skills can live in ~/.goclaw/skills/, ~/.agents/skills/, etc.
+	// Skills can live in ~/.goclaw/skills/, ~/.agents/skills/, ~/.goclaw/skills-store/, etc.
 	homeDir, _ := os.UserHomeDir()
 	if readTool, ok := toolsReg.Get("read_file"); ok {
 		if pa, ok := readTool.(tools.PathAllowable); ok {
 			pa.AllowPaths(globalSkillsDir)
 			if homeDir != "" {
 				pa.AllowPaths(filepath.Join(homeDir, ".agents", "skills"))
+			}
+			// Managed mode: also allow the skills store directory (uploaded skill content).
+			if managedStores != nil && managedStores.Skills != nil {
+				pa.AllowPaths(managedStores.Skills.Dirs()...)
 			}
 		}
 	}
@@ -697,6 +706,7 @@ func runGateway() {
 		instanceLoader.RegisterFactory("discord", discord.Factory)
 		instanceLoader.RegisterFactory("feishu", feishu.Factory)
 		instanceLoader.RegisterFactory("zalo_oa", zalo.Factory)
+		instanceLoader.RegisterFactory("zalo_personal", zalopersonal.Factory)
 		instanceLoader.RegisterFactory("whatsapp", whatsapp.Factory)
 		if err := instanceLoader.LoadAll(context.Background()); err != nil {
 			slog.Error("failed to load channel instances from DB", "error", err)
@@ -745,6 +755,16 @@ func runGateway() {
 		}
 	}
 
+	if cfg.Channels.ZaloPersonal.Enabled && instanceLoader == nil {
+		zp, err := zalopersonal.New(cfg.Channels.ZaloPersonal, msgBus, pairingStore)
+		if err != nil {
+			slog.Error("failed to initialize zca channel", "error", err)
+		} else {
+			channelMgr.RegisterChannel("zalo_personal", zp)
+			slog.Info("zca (zalo personal) channel enabled (config)")
+		}
+	}
+
 	if cfg.Channels.Feishu.Enabled && cfg.Channels.Feishu.AppID != "" && instanceLoader == nil {
 		f, err := feishu.New(cfg.Channels.Feishu, msgBus, pairingStore)
 		if err != nil {
@@ -771,6 +791,8 @@ func runGateway() {
 	// Register channel instances WS RPC methods (managed mode only)
 	if managedStores != nil && managedStores.ChannelInstances != nil {
 		methods.NewChannelInstancesMethods(managedStores.ChannelInstances, msgBus).Register(server.Router())
+		zalomethods.NewQRMethods(managedStores.ChannelInstances, msgBus).Register(server.Router())
+		zalomethods.NewContactsMethods(managedStores.ChannelInstances).Register(server.Router())
 	}
 
 	// Register agent links WS RPC methods (managed mode only)
@@ -930,6 +952,14 @@ func runGateway() {
 	// so the same routes are served on both the main listener and Tailscale.
 	// Compiled via build tags: `go build -tags tsnet` to enable.
 	mux := server.BuildMux()
+
+	// Mount channel webhook handlers on the main mux (e.g. Feishu /feishu/events).
+	// This allows webhook-based channels to share the main server port.
+	for _, route := range channelMgr.WebhookHandlers() {
+		mux.Handle(route.Path, route.Handler)
+		slog.Info("webhook route mounted on gateway", "path", route.Path)
+	}
+
 	tsCleanup := initTailscale(ctx, cfg, mux)
 	if tsCleanup != nil {
 		defer tsCleanup()

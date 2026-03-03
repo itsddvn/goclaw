@@ -6,8 +6,9 @@ type ChannelsConfig struct {
 	Discord  DiscordConfig  `json:"discord"`
 	Slack    SlackConfig    `json:"slack"`
 	WhatsApp WhatsAppConfig `json:"whatsapp"`
-	Zalo     ZaloConfig     `json:"zalo"`
-	Feishu   FeishuConfig   `json:"feishu"`
+	Zalo         ZaloConfig         `json:"zalo"`
+	ZaloPersonal ZaloPersonalConfig `json:"zalo_personal"`
+	Feishu       FeishuConfig       `json:"feishu"`
 }
 
 type TelegramConfig struct {
@@ -48,6 +49,7 @@ type TelegramGroupConfig struct {
 	AllowFrom      FlexibleStringSlice             `json:"allow_from,omitempty"`       // override allow_from for this group
 	Enabled        *bool                           `json:"enabled,omitempty"`          // disable bot for this group (default: true)
 	Skills         []string                        `json:"skills,omitempty"`           // skill whitelist (nil = all, [] = none)
+	Tools          []string                        `json:"tools,omitempty"`            // tool allow list (nil = all, supports "group:xxx")
 	SystemPrompt   string                          `json:"system_prompt,omitempty"`    // extra system prompt for this group
 	Topics         map[string]*TelegramTopicConfig `json:"topics,omitempty"`           // per-topic overrides (key: thread ID string)
 }
@@ -58,6 +60,7 @@ type TelegramTopicConfig struct {
 	RequireMention *bool               `json:"require_mention,omitempty"`
 	GroupPolicy    string              `json:"group_policy,omitempty"`
 	Skills         []string            `json:"skills,omitempty"`
+	Tools          []string            `json:"tools,omitempty"` // tool allow list (nil = inherit, supports "group:xxx")
 	Enabled        *bool               `json:"enabled,omitempty"`
 	AllowFrom      FlexibleStringSlice `json:"allow_from,omitempty"`
 	SystemPrompt   string              `json:"system_prompt,omitempty"`
@@ -101,6 +104,15 @@ type ZaloConfig struct {
 	MediaMaxMB    int                 `json:"media_max_mb,omitempty"` // default 5
 }
 
+type ZaloPersonalConfig struct {
+	Enabled         bool                `json:"enabled"`
+	AllowFrom       FlexibleStringSlice `json:"allow_from"`
+	DMPolicy        string              `json:"dm_policy,omitempty"`        // "pairing" (default), "allowlist", "open", "disabled"
+	GroupPolicy     string              `json:"group_policy,omitempty"`     // "open" (default), "allowlist", "disabled"
+	RequireMention  *bool               `json:"require_mention,omitempty"`  // require @bot mention in groups (default true)
+	CredentialsPath string              `json:"credentials_path,omitempty"` // path to saved cookies JSON (standalone)
+}
+
 type FeishuConfig struct {
 	Enabled           bool                `json:"enabled"`
 	AppID             string              `json:"app_id"`
@@ -121,6 +133,7 @@ type FeishuConfig struct {
 	MediaMaxMB        int                 `json:"media_max_mb,omitempty"`       // default 30
 	RenderMode        string              `json:"render_mode,omitempty"`        // "auto", "raw", "card"
 	Streaming         *bool               `json:"streaming,omitempty"`          // default true
+	ReactionLevel     string              `json:"reaction_level,omitempty"`     // "off" (default), "minimal", "full" — typing emoji reactions
 	HistoryLimit      int                 `json:"history_limit,omitempty"`
 }
 

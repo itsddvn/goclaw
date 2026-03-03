@@ -232,6 +232,18 @@ func wireManagedExtras(
 		})
 	}
 
+	// Skill grants cache: invalidate all agent caches when grants change
+	msgBus.Subscribe(bus.TopicCacheSkillGrants, func(event bus.Event) {
+		if event.Name != protocol.EventCacheInvalidate {
+			return
+		}
+		payload, ok := event.Payload.(bus.CacheInvalidatePayload)
+		if !ok || payload.Kind != bus.CacheKindSkillGrants {
+			return
+		}
+		agentRouter.InvalidateAll()
+	})
+
 	// Cron cache: invalidate job cache on cron changes
 	if ci, ok := stores.Cron.(store.CacheInvalidatable); ok {
 		msgBus.Subscribe(bus.TopicCacheCron, func(event bus.Event) {
@@ -449,7 +461,7 @@ func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus,
 		if pgSkills, ok := stores.Skills.(*pg.PGSkillStore); ok {
 			dirs := pgSkills.Dirs()
 			if len(dirs) > 0 {
-				skillsH = httpapi.NewSkillsHandler(pgSkills, dirs[0], token)
+				skillsH = httpapi.NewSkillsHandler(pgSkills, dirs[0], token, msgBus)
 			}
 		}
 	}
@@ -467,7 +479,7 @@ func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus,
 	}
 
 	if stores != nil && stores.ChannelInstances != nil {
-		channelInstancesH = httpapi.NewChannelInstancesHandler(stores.ChannelInstances, token, msgBus)
+		channelInstancesH = httpapi.NewChannelInstancesHandler(stores.ChannelInstances, stores.Agents, token, msgBus)
 	}
 
 	if stores != nil && stores.Providers != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -17,7 +18,7 @@ import (
 type RunContext struct {
 	ChannelName  string
 	ChatID       string
-	MessageID    int
+	MessageID    string // platform message ID (string to support Feishu "om_xxx", Telegram "12345", etc.)
 	mu           sync.Mutex
 	streamBuffer string // accumulated streaming text (chunks are deltas)
 	inToolPhase  bool   // true after tool.call, reset on next chunk (new LLM iteration)
@@ -213,6 +214,29 @@ func (m *Manager) UnregisterChannel(name string) {
 	delete(m.channels, name)
 }
 
+// WebhookRoute holds a path and handler pair for mounting on the main gateway mux.
+type WebhookRoute struct {
+	Path    string
+	Handler http.Handler
+}
+
+// WebhookHandlers returns all webhook handlers from channels that implement WebhookChannel.
+// Used to mount webhook routes on the main gateway mux.
+func (m *Manager) WebhookHandlers() []WebhookRoute {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var routes []WebhookRoute
+	for _, ch := range m.channels {
+		if wh, ok := ch.(WebhookChannel); ok {
+			if path, handler := wh.WebhookHandler(); path != "" && handler != nil {
+				routes = append(routes, WebhookRoute{Path: path, Handler: handler})
+			}
+		}
+	}
+	return routes
+}
+
 // SendToChannel delivers a message to a specific channel by name.
 func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, content string) error {
 	m.mu.RLock()
@@ -236,7 +260,7 @@ func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, conten
 
 // RegisterRun associates a run ID with a channel context so agent events
 // (chunks, tool calls, completion) can be forwarded to the originating channel.
-func (m *Manager) RegisterRun(runID, channelName, chatID string, messageID int) {
+func (m *Manager) RegisterRun(runID, channelName, chatID, messageID string) {
 	m.runs.Store(runID, &RunContext{
 		ChannelName: channelName,
 		ChatID:      chatID,
