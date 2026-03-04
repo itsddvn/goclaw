@@ -52,6 +52,7 @@ type Loop struct {
 	model         string
 	contextWindow int
 	maxIterations int
+	maxToolCalls  int
 	workspace     string
 
 	eventPub   bus.EventPublisher // currently unused by Loop; kept for future use
@@ -107,6 +108,9 @@ type Loop struct {
 
 	// Group writer cache for system prompt injection (managed mode)
 	groupWriterCache *store.GroupWriterCache
+
+	// Team store for cross-session pending task detection (managed mode)
+	teamStore store.TeamStore
 }
 
 // AgentEvent is emitted during agent execution for WS broadcasting.
@@ -124,6 +128,7 @@ type LoopConfig struct {
 	Model         string
 	ContextWindow int
 	MaxIterations int
+	MaxToolCalls  int
 	Workspace     string
 	Bus           bus.EventPublisher
 	Sessions      store.SessionStore
@@ -175,6 +180,9 @@ type LoopConfig struct {
 
 	// Group writer cache for system prompt injection (managed mode)
 	GroupWriterCache *store.GroupWriterCache
+
+	// Team store for cross-session pending task detection (managed mode)
+	TeamStore store.TeamStore
 }
 
 func NewLoop(cfg LoopConfig) *Loop {
@@ -208,6 +216,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		model:         cfg.Model,
 		contextWindow: cfg.ContextWindow,
 		maxIterations: cfg.MaxIterations,
+		maxToolCalls:  cfg.MaxToolCalls,
 		workspace:     cfg.Workspace,
 		eventPub:      cfg.Bus,
 		sessions:      cfg.Sessions,
@@ -235,6 +244,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		builtinToolSettings:   cfg.BuiltinToolSettings,
 		thinkingLevel:         cfg.ThinkingLevel,
 		groupWriterCache:      cfg.GroupWriterCache,
+		teamStore:             cfg.TeamStore,
 	}
 }
 
@@ -260,6 +270,7 @@ type RunRequest struct {
 	ParentRootSpanID uuid.UUID // if set, nest announce agent span under this parent span
 	TraceName        string    // override trace name (default: "chat <agentID>")
 	TraceTags        []string  // additional tags for the trace (e.g. "cron")
+	MaxIterations    int       // per-request override (0 = use agent default, must be lower)
 }
 
 // RunResult is the output of a completed agent run.
@@ -529,6 +540,49 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		}
 	}
 
+	// 2b. Cross-session recovery: notify team leads about orphaned pending tasks
+	// and in-progress tasks being handled by delegates.
+	// Safe because Bước 1 (early ClaimTask) ensures running tasks are in_progress,
+	// so only truly un-spawned tasks remain pending.
+	if l.teamStore != nil && l.agentUUID != uuid.Nil {
+		if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil && team.LeadAgentID == l.agentUUID {
+			if tasks, err := l.teamStore.ListTasks(ctx, team.ID, "newest", "", req.UserID); err == nil {
+				var stale []string
+				var inProgress []string
+				for _, t := range tasks {
+					if t.Status == store.TeamTaskStatusPending {
+						age := time.Since(t.CreatedAt).Truncate(time.Minute)
+						stale = append(stale, fmt.Sprintf("- %s: \"%s\" (pending %s)", t.ID, t.Subject, age))
+					}
+					if t.Status == store.TeamTaskStatusInProgress {
+						age := time.Since(t.UpdatedAt).Truncate(time.Minute)
+						inProgress = append(inProgress, fmt.Sprintf("- %s: \"%s\" (in progress %s)", t.ID, t.Subject, age))
+					}
+				}
+				var parts []string
+				if len(stale) > 0 {
+					parts = append(parts, fmt.Sprintf(
+						"You have %d pending team task(s) that were never spawned:\n%s\n"+
+							"Spawn each one, or cancel with team_tasks action=cancel if no longer needed.",
+						len(stale), strings.Join(stale, "\n")))
+				}
+				if len(inProgress) > 0 {
+					parts = append(parts, fmt.Sprintf(
+						"You have %d in-progress team task(s) being handled by delegates:\n%s\n"+
+							"Their results will arrive automatically. Do NOT cancel, re-create, or re-spawn these tasks.",
+						len(inProgress), strings.Join(inProgress, "\n")))
+				}
+				if len(parts) > 0 {
+					reminder := "[System] " + strings.Join(parts, "\n\n")
+					messages = append(messages,
+						providers.Message{Role: "user", Content: reminder},
+						providers.Message{Role: "assistant", Content: "I see the task status. Let me handle accordingly."},
+					)
+				}
+			}
+		}
+	}
+
 	// 3. Buffer new messages — write to session only AFTER the run completes.
 	// This prevents concurrent runs from seeing each other's in-progress messages.
 	// NOTE: pendingMsgs stores TEXT ONLY (no images) to avoid bloating session storage.
@@ -542,10 +596,15 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	var loopDetector toolLoopState // detects repeated no-progress tool calls
 	var totalUsage providers.Usage
 	iteration := 0
+	totalToolCalls := 0
 	var finalContent string
 	var asyncToolCalls []string   // track async spawn tool names for fallback
 	var mediaResults []MediaResult // media files from tool MEDIA: results
 	var deliverables []string      // actual content from tool outputs (for team task results)
+
+	// Mid-loop compaction: summarize in-memory messages when context exceeds threshold.
+	// Uses same config as maybeSummarize (contextWindow * historyShare).
+	var midLoopCompacted bool
 
 	// Team task orphan detection: track team_tasks create vs spawn calls.
 	// If the LLM creates tasks but forgets to spawn, inject a reminder.
@@ -567,7 +626,12 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		})
 	})
 
-	for iteration < l.maxIterations {
+	maxIter := l.maxIterations
+	if req.MaxIterations > 0 && req.MaxIterations < maxIter {
+		maxIter = req.MaxIterations
+	}
+
+	for iteration < maxIter {
 		iteration++
 
 		slog.Debug("agent iteration", "agent", l.id, "iteration", iteration, "messages", len(messages))
@@ -646,24 +710,68 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 			totalUsage.ThinkingTokens += resp.Usage.ThinkingTokens
 		}
 
+		// Mid-loop compaction: same threshold as maybeSummarize (contextWindow * historyShare)
+		// but applied to in-memory messages during the run. Prevents context overflow for
+		// long-running agents (e.g. delegated research tasks that accumulate many tool results).
+		if !midLoopCompacted && l.contextWindow > 0 {
+			historyShare := 0.75
+			if l.compactionCfg != nil && l.compactionCfg.MaxHistoryShare > 0 {
+				historyShare = l.compactionCfg.MaxHistoryShare
+			}
+			threshold := int(float64(l.contextWindow) * historyShare)
+
+			promptTokens := 0
+			if resp.Usage != nil && resp.Usage.PromptTokens > 0 {
+				promptTokens = resp.Usage.PromptTokens
+			} else {
+				promptTokens = EstimateTokens(messages)
+			}
+
+			if promptTokens >= threshold {
+				midLoopCompacted = true
+				if compacted := l.compactMessagesInPlace(ctx, messages); compacted != nil {
+					messages = compacted
+				}
+				slog.Info("mid_loop_compaction",
+					"agent", l.id,
+					"prompt_tokens", promptTokens,
+					"threshold", threshold,
+					"context_window", l.contextWindow)
+			}
+		}
+
 		// No tool calls → done
 		if len(resp.ToolCalls) == 0 {
 			// Guard: detect orphaned team_tasks create (created but not spawned).
-			// The LLM sometimes "forgets" step 2 (spawn) after creating a task.
-			// Inject a reminder and retry once so the task actually executes.
+			// Query DB for actual pending tasks instead of just counting tool calls,
+			// because auto-created tasks (from spawn without team_task_id) bypass the counter.
 			if teamTaskCreates > teamTaskSpawns && !teamTaskRetried {
-				teamTaskRetried = true
-				orphaned := teamTaskCreates - teamTaskSpawns
-				slog.Warn("team task orphan detected: created without spawn",
-					"agent", l.id, "orphaned", orphaned, "creates", teamTaskCreates, "spawns", teamTaskSpawns)
-				messages = append(messages,
-					providers.Message{Role: "assistant", Content: resp.Content},
-					providers.Message{
-						Role:    "user",
-						Content: fmt.Sprintf("[System] You created %d team task(s) but only spawned %d. Tasks without `spawn` will stay pending forever and never execute. Call `spawn` now for each pending task.", teamTaskCreates, teamTaskSpawns),
-					},
-				)
-				continue
+				if l.teamStore != nil && l.agentUUID != uuid.Nil {
+					if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil {
+						if tasks, err := l.teamStore.ListTasks(ctx, team.ID, "newest", "", req.UserID); err == nil {
+							var pendingIDs []string
+							for _, t := range tasks {
+								if t.Status == store.TeamTaskStatusPending {
+									pendingIDs = append(pendingIDs, t.ID.String())
+								}
+							}
+							if len(pendingIDs) > 0 {
+								teamTaskRetried = true
+								slog.Warn("team task orphan detected",
+									"agent", l.id, "pending", len(pendingIDs),
+									"creates", teamTaskCreates, "spawns", teamTaskSpawns)
+								messages = append(messages,
+									providers.Message{Role: "assistant", Content: resp.Content},
+									providers.Message{
+										Role:    "user",
+										Content: fmt.Sprintf("[System] You have %d pending task(s) that were never delegated: %s. Call `spawn` for each, or cancel with team_tasks action=cancel.", len(pendingIDs), strings.Join(pendingIDs, ", ")),
+									},
+								)
+								continue
+							}
+						}
+					}
+				}
 			}
 			finalContent = resp.Content
 			break
@@ -687,6 +795,19 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 					teamTaskCreates++
 				}
 			}
+		}
+
+		// Tool budget check: soft stop when total tool calls exceed the per-agent limit.
+		// Same pattern as maxIterations — no error thrown, LLM summarizes and returns.
+		totalToolCalls += len(resp.ToolCalls)
+		if l.maxToolCalls > 0 && totalToolCalls > l.maxToolCalls {
+			slog.Warn("security.tool_budget_exceeded",
+				"agent", l.id, "total", totalToolCalls, "limit", l.maxToolCalls)
+			messages = append(messages, providers.Message{
+				Role:    "user",
+				Content: fmt.Sprintf("[System] Tool call budget reached (%d/%d). Do NOT call any more tools. Summarize results so far and respond to the user.", totalToolCalls, l.maxToolCalls),
+			})
+			continue // one more LLM call for summarization, then loop exits (no tool calls)
 		}
 
 		// Execute tool calls (parallel when multiple, sequential when single)
@@ -1000,9 +1121,93 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	}, nil
 }
 
+// compactMessagesInPlace summarizes the first ~70% of messages into a condensed
+// summary, keeping the last ~30% intact. Operates purely on the local messages
+// slice — no session state touched, no locks needed.
+// Returns nil on failure (caller keeps original messages).
+func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.Message) []providers.Message {
+	if len(messages) < 6 {
+		return nil
+	}
+
+	// Resolve keepCount from compaction config (same defaults as maybeSummarize).
+	keepCount := 4
+	if l.compactionCfg != nil && l.compactionCfg.KeepLastMessages > 0 {
+		keepCount = l.compactionCfg.KeepLastMessages
+	}
+	// Ensure we keep at least 30% of messages.
+	if minKeep := len(messages) * 3 / 10; minKeep > keepCount {
+		keepCount = minKeep
+	}
+
+	splitIdx := len(messages) - keepCount
+
+	// Walk backward from splitIdx to find a clean boundary —
+	// avoid splitting tool_use → tool_result pairs.
+	for splitIdx > 0 {
+		m := messages[splitIdx]
+		if m.Role == "tool" || (m.Role == "assistant" && len(m.ToolCalls) > 0) {
+			splitIdx--
+			continue
+		}
+		break
+	}
+	if splitIdx <= 1 {
+		return nil
+	}
+
+	// Build summary input (same pattern as maybeSummarize in loop_history.go).
+	toSummarize := messages[:splitIdx]
+	var sb strings.Builder
+	for _, m := range toSummarize {
+		switch m.Role {
+		case "user":
+			fmt.Fprintf(&sb, "user: %s\n", m.Content)
+		case "assistant":
+			fmt.Fprintf(&sb, "assistant: %s\n", SanitizeAssistantContent(m.Content))
+		}
+	}
+
+	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := l.provider.Chat(sctx, providers.ChatRequest{
+		Messages: []providers.Message{{
+			Role:    "user",
+			Content: "Provide a concise summary of this conversation, preserving key findings, data, and context:\n\n" + sb.String(),
+		}},
+		Model:   l.model,
+		Options: map[string]interface{}{"max_tokens": 1024, "temperature": 0.3},
+	})
+	if err != nil {
+		slog.Warn("mid_loop_compaction_failed", "agent", l.id, "error", err)
+		return nil
+	}
+
+	summary := providers.Message{
+		Role:    "user",
+		Content: "[Summary of earlier conversation]\n" + SanitizeAssistantContent(resp.Content),
+	}
+	result := make([]providers.Message, 0, 1+keepCount)
+	result = append(result, summary)
+	result = append(result, messages[splitIdx:]...)
+
+	slog.Info("mid_loop_compacted",
+		"agent", l.id,
+		"original_msgs", len(messages),
+		"summarized", splitIdx,
+		"kept", len(result))
+
+	return result
+}
+
 // parseMediaResult extracts a MediaResult from a tool result string containing "MEDIA:" prefix.
 // Handles formats: "MEDIA:/path/to/file" and "[[audio_as_voice]]\nMEDIA:/path/to/file".
 // Returns nil if no MEDIA: prefix is found.
+//
+// IMPORTANT: Only matches "MEDIA:" at the start of the (trimmed) string to avoid false
+// positives when tool output contains "MEDIA:" in arbitrary text (e.g. a web page
+// mentioning a commit message like "return MEDIA: path from screenshot").
 func parseMediaResult(toolOutput string) *MediaResult {
 	s := toolOutput
 	asVoice := false
@@ -1011,15 +1216,15 @@ func parseMediaResult(toolOutput string) *MediaResult {
 	if strings.Contains(s, "[[audio_as_voice]]") {
 		asVoice = true
 		s = strings.ReplaceAll(s, "[[audio_as_voice]]", "")
-		s = strings.TrimSpace(s)
 	}
 
-	// Find MEDIA: prefix
-	idx := strings.Index(s, "MEDIA:")
-	if idx < 0 {
+	s = strings.TrimSpace(s)
+
+	// Only match MEDIA: at the beginning of the string.
+	if !strings.HasPrefix(s, "MEDIA:") {
 		return nil
 	}
-	path := strings.TrimSpace(s[idx+6:])
+	path := strings.TrimSpace(s[6:])
 	if path == "" {
 		return nil
 	}
@@ -1095,4 +1300,12 @@ func sanitizePathSegment(s string) string {
 // forcing the next request to re-read from user_agent_profiles.
 func (l *Loop) InvalidateUserWorkspace(userID string) {
 	l.userWorkspaces.Delete(userID)
+}
+
+// ProviderName returns the name of this agent's LLM provider (e.g. "anthropic", "openai").
+func (l *Loop) ProviderName() string {
+	if l.provider == nil {
+		return ""
+	}
+	return l.provider.Name()
 }

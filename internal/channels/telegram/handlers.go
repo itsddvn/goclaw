@@ -256,17 +256,19 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		}
 	}
 
+	// Handle bot commands BEFORE enriching with reply/forward context.
+	// Command parsing (SplitN on spaces) breaks when reply context is appended with newlines,
+	// e.g. "/addwriter@bot\n\n[Replying to ...]" — the bot-username check fails.
+	if handled := c.handleBotCommand(ctx, message, chatID, chatIDStr, localKey, content, senderID, isGroup, isForum, messageThreadID); handled {
+		return
+	}
+
 	// Enrich content with forward/reply/location context
 	msgCtx := buildMessageContext(message, c.bot.Username())
 	content = enrichContentWithContext(content, msgCtx)
 
 	if content == "" {
 		content = "[empty message]"
-	}
-
-	// Handle bot commands (/start, /help, /reset, /status, /addwriter, /removewriter, /writers).
-	if handled := c.handleBotCommand(ctx, message, chatID, chatIDStr, localKey, content, senderID, isGroup, isForum, messageThreadID); handled {
-		return
 	}
 
 	// Compute sender label for group context (used in history + current message annotation)
@@ -373,9 +375,10 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	_, thinkCancel := context.WithCancel(ctx)
 	c.stopThinking.Store(localKey, &thinkingCancel{fn: thinkCancel})
 
-	// Send placeholder message only for DMs.
-	// In groups the placeholder drifts away as new messages arrive;
-	// instead the response will be sent as a reply to the sender's message.
+	// Send "Thinking..." placeholder for DMs.
+	// The streaming system will edit this message progressively (editMessageText),
+	// giving a smooth transition: "Thinking..." → streaming chunks → final formatted response.
+	// Groups: no placeholder; response replies to the sender's message.
 	if !isGroup {
 		thinkMsg := tu.Message(chatIDObj, "Thinking...")
 		if dmThreadID > 0 {

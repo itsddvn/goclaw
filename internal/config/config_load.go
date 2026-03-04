@@ -24,6 +24,7 @@ func Default() *Config {
 				MaxTokens:           8192,
 				Temperature:         0.7,
 				MaxToolIterations:   20,
+				MaxToolCalls:        25,
 				ContextWindow:       200000,
 				Subagents: &SubagentsConfig{
 					MaxConcurrent: 20,
@@ -33,7 +34,6 @@ func Default() *Config {
 		},
 		Channels: ChannelsConfig{
 			Telegram: TelegramConfig{
-				StreamMode:    "none",
 				ReactionLevel: "full",
 			},
 		},
@@ -55,6 +55,7 @@ func Default() *Config {
 				Security: "full",
 				Ask:      "off",
 			},
+			RateLimitPerHour: 150,
 		},
 		Sessions: SessionsConfig{
 			Storage: "~/.goclaw/sessions",
@@ -310,6 +311,9 @@ func (c *Config) ResolveAgent(agentID string) AgentDefaults {
 		}
 		if spec.ContextWindow > 0 {
 			d.ContextWindow = spec.ContextWindow
+		}
+		if spec.MaxToolCalls > 0 {
+			d.MaxToolCalls = spec.MaxToolCalls
 		}
 		if spec.Workspace != "" {
 			d.Workspace = spec.Workspace

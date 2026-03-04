@@ -34,11 +34,25 @@ func formatDelegateAnnounce(task *DelegationTask, artifacts *DelegateArtifacts, 
 	if err != nil && len(artifacts.Results) == 0 {
 		return fmt.Sprintf(
 			"[System Message] All delegations finished. The last delegation to agent %q failed.\n\nError: %s\n\nStats: runtime %s\n\n"+
-				"Handle the failed task yourself or try a different agent.",
+				"IMPORTANT: Before retrying or handling the task yourself, send a brief, friendly message to the user "+
+				"letting them know there was a small hiccup and you're working on it. Keep it short and natural (1-2 sentences). "+
+				"Then retry the delegation or handle it yourself.",
 			task.TargetAgentKey, err.Error(), elapsed.Round(time.Millisecond))
 	}
 
 	msg := "[System Message] All team delegations completed.\n\n"
+
+	// List auto-completed task IDs so LLM doesn't reuse them
+	if len(artifacts.CompletedTaskIDs) > 0 {
+		msg += "Auto-completed team tasks: "
+		for i, tid := range artifacts.CompletedTaskIDs {
+			if i > 0 {
+				msg += ", "
+			}
+			msg += tid
+		}
+		msg += "\nFor follow-up delegations, create NEW tasks (do not reuse completed task IDs).\n\n"
+	}
 
 	// Render each delegation result
 	for i, r := range artifacts.Results {
