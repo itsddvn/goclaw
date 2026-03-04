@@ -297,6 +297,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			BuiltinToolSettings:    builtinSettings,
 			ThinkingLevel:         ag.ParseThinkingLevel(),
 			GroupWriterCache:      deps.GroupWriterCache,
+			TeamStore:             deps.TeamStore,
 		})
 
 		slog.Info("resolved agent from DB", "agent", agentKey, "model", ag.Model, "provider", ag.Provider)
@@ -425,25 +426,20 @@ func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uu
 	// Workflow guidance
 	sb.WriteString("\n## Workflow\n\n")
 	if selfRole == store.TeamRoleLead {
-		sb.WriteString("**MANDATORY**: ALWAYS use `team_tasks` to track work. NEVER delegate without a task.\n\n")
-		sb.WriteString("**ONE task per ONE delegation.** Each task tracks one unit of work for one agent.\n")
-		sb.WriteString("When delegating to multiple agents, create a SEPARATE task for each.\n\n")
-		sb.WriteString("Every delegation MUST follow these 2 steps:\n")
-		sb.WriteString("1. `team_tasks` action=create, subject=<brief title> → returns task_id\n")
-		sb.WriteString("2. `spawn` agent=<member>, task=<instructions>, team_task_id=<the task_id from step 1>\n\n")
+		sb.WriteString("**ONE delegation = ONE spawn call.** The system auto-creates a tracking task for each delegation.\n")
+		sb.WriteString("When delegating to multiple agents, call `spawn` once per agent.\n\n")
 		sb.WriteString("Example (2 agents):\n")
 		sb.WriteString("```\n")
-		sb.WriteString("team_tasks action=create, subject=\"Create illustration\" → task_id=A\n")
-		sb.WriteString("team_tasks action=create, subject=\"Write caption\" → task_id=B\n")
-		sb.WriteString("spawn agent=artist, task=\"...\", team_task_id=A\n")
-		sb.WriteString("spawn agent=writer, task=\"...\", team_task_id=B\n")
+		sb.WriteString("spawn agent=artist, task=\"Create illustration for...\", label=\"Create illustration\"\n")
+		sb.WriteString("spawn agent=writer, task=\"Write caption for...\", label=\"Write caption\"\n")
 		sb.WriteString("```\n\n")
-		sb.WriteString("The system ENFORCES this — spawn with agent but without team_task_id will be rejected.\n")
-		sb.WriteString("⚠️ `team_tasks create` alone does NOTHING — the task stays pending forever until you `spawn`.\n")
-		sb.WriteString("You MUST call `spawn` in the SAME turn. Do NOT respond with text before spawning.\n")
-		sb.WriteString("Each task auto-completes when its delegation finishes.\n\n")
+		sb.WriteString("The `label` parameter sets the task title on the board (keep it short).\n")
+		sb.WriteString("Each task auto-completes when its delegation finishes.\n")
+		sb.WriteString("Do NOT respond with text before spawning — call all spawns first, then tell the user.\n\n")
 		sb.WriteString("When multiple delegations run in parallel, the system collects ALL results and delivers\n")
 		sb.WriteString("them to you in a single combined notification. Do NOT present partial results.\n\n")
+		sb.WriteString("Advanced: For dependency chains, use `team_tasks` action=create with blocked_by,\n")
+		sb.WriteString("then `spawn` with team_task_id=<the created id>.\n\n")
 		sb.WriteString("## Orchestration Patterns\n\n")
 		sb.WriteString("You can orchestrate multiple rounds — not just one-shot parallel delegation:\n")
 		sb.WriteString("- **Sequential**: A finishes → review result → delegate to B with A's output as context\n")
@@ -459,7 +455,8 @@ func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uu
 		sb.WriteString("- action=list, status=all → all tasks including completed\n")
 		sb.WriteString("- action=get, task_id=<id> → full task detail with result\n")
 		sb.WriteString("- action=search, query=<text> → search tasks by subject/description\n")
-		sb.WriteString("- action=complete, task_id=<id>, result=<summary> → manually complete a task\n\n")
+		sb.WriteString("- action=complete, task_id=<id>, result=<summary> → manually complete a task\n")
+		sb.WriteString("- action=cancel, task_id=<id>, reason=<why> → cancel a pending task that is no longer needed\n\n")
 		sb.WriteString("Use `team_message` to send updates to team members.\n\n")
 		sb.WriteString("For simple questions about team composition, answer directly from the member list above.\n")
 	} else {
