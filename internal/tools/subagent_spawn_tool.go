@@ -92,6 +92,10 @@ func (t *SpawnTool) Parameters() map[string]interface{} {
 			"type":        "string",
 			"description": "Team task ID to auto-complete when task finishes (for team workflows)",
 		}
+		props["estimated_duration"] = map[string]interface{}{
+			"type":        "number",
+			"description": "Estimated task duration in seconds. A progress notification is sent to the user if the task takes longer than this. Default 90.",
+		}
 	}
 
 	return map[string]interface{}{
@@ -220,12 +224,21 @@ func (t *SpawnTool) executeDelegation(ctx context.Context, args map[string]inter
 		teamTaskID, _ = uuid.Parse(ttID)
 	}
 
+	var estimatedDuration time.Duration
+	if ed, ok := args["estimated_duration"].(float64); ok && ed > 0 {
+		estimatedDuration = time.Duration(ed) * time.Second
+	}
+
+	label, _ := args["label"].(string)
+
 	opts := DelegateOpts{
-		TargetAgentKey: agentKey,
-		Task:           task,
-		Context:        extraContext,
-		Mode:           mode,
-		TeamTaskID:     teamTaskID,
+		TargetAgentKey:    agentKey,
+		Task:              task,
+		Context:           extraContext,
+		Mode:              mode,
+		TeamTaskID:        teamTaskID,
+		EstimatedDuration: estimatedDuration,
+		Label:             label,
 	}
 
 	if mode == "async" {
@@ -233,10 +246,10 @@ func (t *SpawnTool) executeDelegation(ctx context.Context, args map[string]inter
 		if err != nil {
 			return ErrorResult(err.Error())
 		}
-		forLLM := fmt.Sprintf(`{"status":"accepted","delegation_id":%q,"target":%q,"mode":"async"}
+		forLLM := fmt.Sprintf(`{"status":"accepted","delegation_id":%q,"target":%q,"mode":"async","team_task_id":%q}
 Delegated to %q (async, id=%s). The result will be announced automatically when done — do NOT wait or poll.
 Briefly tell the user what you've delegated and to whom. Be friendly and natural.`,
-			result.DelegationID, agentKey, agentKey, result.DelegationID)
+			result.DelegationID, agentKey, result.TeamTaskID, agentKey, result.DelegationID)
 		return AsyncResult(forLLM)
 	}
 

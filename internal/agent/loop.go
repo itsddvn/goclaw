@@ -52,6 +52,7 @@ type Loop struct {
 	model         string
 	contextWindow int
 	maxIterations int
+	maxToolCalls  int
 	workspace     string
 
 	eventPub   bus.EventPublisher // currently unused by Loop; kept for future use
@@ -127,6 +128,7 @@ type LoopConfig struct {
 	Model         string
 	ContextWindow int
 	MaxIterations int
+	MaxToolCalls  int
 	Workspace     string
 	Bus           bus.EventPublisher
 	Sessions      store.SessionStore
@@ -214,6 +216,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		model:         cfg.Model,
 		contextWindow: cfg.ContextWindow,
 		maxIterations: cfg.MaxIterations,
+		maxToolCalls:  cfg.MaxToolCalls,
 		workspace:     cfg.Workspace,
 		eventPub:      cfg.Bus,
 		sessions:      cfg.Sessions,
@@ -537,27 +540,43 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		}
 	}
 
-	// 2b. Cross-session recovery: notify team leads about orphaned pending tasks.
+	// 2b. Cross-session recovery: notify team leads about orphaned pending tasks
+	// and in-progress tasks being handled by delegates.
 	// Safe because Bước 1 (early ClaimTask) ensures running tasks are in_progress,
 	// so only truly un-spawned tasks remain pending.
 	if l.teamStore != nil && l.agentUUID != uuid.Nil {
 		if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil && team.LeadAgentID == l.agentUUID {
 			if tasks, err := l.teamStore.ListTasks(ctx, team.ID, "newest", "", req.UserID); err == nil {
 				var stale []string
+				var inProgress []string
 				for _, t := range tasks {
 					if t.Status == store.TeamTaskStatusPending {
 						age := time.Since(t.CreatedAt).Truncate(time.Minute)
 						stale = append(stale, fmt.Sprintf("- %s: \"%s\" (pending %s)", t.ID, t.Subject, age))
 					}
+					if t.Status == store.TeamTaskStatusInProgress {
+						age := time.Since(t.UpdatedAt).Truncate(time.Minute)
+						inProgress = append(inProgress, fmt.Sprintf("- %s: \"%s\" (in progress %s)", t.ID, t.Subject, age))
+					}
 				}
+				var parts []string
 				if len(stale) > 0 {
-					reminder := fmt.Sprintf(
-						"[System] You have %d pending team task(s) that were never spawned:\n%s\n"+
+					parts = append(parts, fmt.Sprintf(
+						"You have %d pending team task(s) that were never spawned:\n%s\n"+
 							"Spawn each one, or cancel with team_tasks action=cancel if no longer needed.",
-						len(stale), strings.Join(stale, "\n"))
+						len(stale), strings.Join(stale, "\n")))
+				}
+				if len(inProgress) > 0 {
+					parts = append(parts, fmt.Sprintf(
+						"You have %d in-progress team task(s) being handled by delegates:\n%s\n"+
+							"Their results will arrive automatically. Do NOT cancel, re-create, or re-spawn these tasks.",
+						len(inProgress), strings.Join(inProgress, "\n")))
+				}
+				if len(parts) > 0 {
+					reminder := "[System] " + strings.Join(parts, "\n\n")
 					messages = append(messages,
 						providers.Message{Role: "user", Content: reminder},
-						providers.Message{Role: "assistant", Content: "I see the pending tasks. Let me handle them."},
+						providers.Message{Role: "assistant", Content: "I see the task status. Let me handle accordingly."},
 					)
 				}
 			}
@@ -577,6 +596,7 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	var loopDetector toolLoopState // detects repeated no-progress tool calls
 	var totalUsage providers.Usage
 	iteration := 0
+	totalToolCalls := 0
 	var finalContent string
 	var asyncToolCalls []string   // track async spawn tool names for fallback
 	var mediaResults []MediaResult // media files from tool MEDIA: results
@@ -723,21 +743,35 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		// No tool calls → done
 		if len(resp.ToolCalls) == 0 {
 			// Guard: detect orphaned team_tasks create (created but not spawned).
-			// The LLM sometimes "forgets" step 2 (spawn) after creating a task.
-			// Inject a reminder and retry once so the task actually executes.
+			// Query DB for actual pending tasks instead of just counting tool calls,
+			// because auto-created tasks (from spawn without team_task_id) bypass the counter.
 			if teamTaskCreates > teamTaskSpawns && !teamTaskRetried {
-				teamTaskRetried = true
-				orphaned := teamTaskCreates - teamTaskSpawns
-				slog.Warn("team task orphan detected: created without spawn",
-					"agent", l.id, "orphaned", orphaned, "creates", teamTaskCreates, "spawns", teamTaskSpawns)
-				messages = append(messages,
-					providers.Message{Role: "assistant", Content: resp.Content},
-					providers.Message{
-						Role:    "user",
-						Content: fmt.Sprintf("[System] You created %d team task(s) but only spawned %d. Tasks without `spawn` will stay pending forever and never execute. Call `spawn` now for each pending task.", teamTaskCreates, teamTaskSpawns),
-					},
-				)
-				continue
+				if l.teamStore != nil && l.agentUUID != uuid.Nil {
+					if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil {
+						if tasks, err := l.teamStore.ListTasks(ctx, team.ID, "newest", "", req.UserID); err == nil {
+							var pendingIDs []string
+							for _, t := range tasks {
+								if t.Status == store.TeamTaskStatusPending {
+									pendingIDs = append(pendingIDs, t.ID.String())
+								}
+							}
+							if len(pendingIDs) > 0 {
+								teamTaskRetried = true
+								slog.Warn("team task orphan detected",
+									"agent", l.id, "pending", len(pendingIDs),
+									"creates", teamTaskCreates, "spawns", teamTaskSpawns)
+								messages = append(messages,
+									providers.Message{Role: "assistant", Content: resp.Content},
+									providers.Message{
+										Role:    "user",
+										Content: fmt.Sprintf("[System] You have %d pending task(s) that were never delegated: %s. Call `spawn` for each, or cancel with team_tasks action=cancel.", len(pendingIDs), strings.Join(pendingIDs, ", ")),
+									},
+								)
+								continue
+							}
+						}
+					}
+				}
 			}
 			finalContent = resp.Content
 			break
@@ -761,6 +795,19 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 					teamTaskCreates++
 				}
 			}
+		}
+
+		// Tool budget check: soft stop when total tool calls exceed the per-agent limit.
+		// Same pattern as maxIterations — no error thrown, LLM summarizes and returns.
+		totalToolCalls += len(resp.ToolCalls)
+		if l.maxToolCalls > 0 && totalToolCalls > l.maxToolCalls {
+			slog.Warn("security.tool_budget_exceeded",
+				"agent", l.id, "total", totalToolCalls, "limit", l.maxToolCalls)
+			messages = append(messages, providers.Message{
+				Role:    "user",
+				Content: fmt.Sprintf("[System] Tool call budget reached (%d/%d). Do NOT call any more tools. Summarize results so far and respond to the user.", totalToolCalls, l.maxToolCalls),
+			})
+			continue // one more LLM call for summarization, then loop exits (no tool calls)
 		}
 
 		// Execute tool calls (parallel when multiple, sequential when single)
@@ -1253,4 +1300,12 @@ func sanitizePathSegment(s string) string {
 // forcing the next request to re-read from user_agent_profiles.
 func (l *Loop) InvalidateUserWorkspace(userID string) {
 	l.userWorkspaces.Delete(userID)
+}
+
+// ProviderName returns the name of this agent's LLM provider (e.g. "anthropic", "openai").
+func (l *Loop) ProviderName() string {
+	if l.provider == nil {
+		return ""
+	}
+	return l.provider.Name()
 }

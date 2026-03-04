@@ -17,6 +17,7 @@ import (
 )
 
 const defaultMaxDelegationLoad = 5
+const defaultProgressDelay = 90 * time.Second
 
 // DelegationTask tracks an active delegation for concurrency control and cancellation.
 type DelegationTask struct {
@@ -24,7 +25,8 @@ type DelegationTask struct {
 	SourceAgentID  uuid.UUID  `json:"source_agent_id"`
 	SourceAgentKey string     `json:"source_agent_key"`
 	TargetAgentID  uuid.UUID  `json:"target_agent_id"`
-	TargetAgentKey string     `json:"target_agent_key"`
+	TargetAgentKey     string `json:"target_agent_key"`
+	TargetDisplayName  string `json:"-"`
 	UserID         string     `json:"user_id"`
 	Task           string     `json:"task"`
 	Status         string     `json:"status"` // "running", "completed", "failed", "cancelled"
@@ -52,11 +54,13 @@ type DelegationTask struct {
 
 // DelegateOpts configures a single delegation call.
 type DelegateOpts struct {
-	TargetAgentKey string
-	Task           string
-	Context        string    // optional extra context
-	Mode           string    // "sync" (default) or "async"
-	TeamTaskID     uuid.UUID // optional: auto-complete this team task on success
+	TargetAgentKey    string
+	Task              string
+	Context           string        // optional extra context
+	Mode              string        // "sync" (default) or "async"
+	TeamTaskID        uuid.UUID     // optional: auto-complete this team task on success
+	EstimatedDuration time.Duration // optional: progress notification fires after this delay (default 90s)
+	Label             string        // optional: short label for auto-created task subject (falls back to Task)
 }
 
 // DelegateRunRequest is the request passed to the AgentRunFunc callback.
@@ -109,6 +113,7 @@ type DelegateResult struct {
 	Content      string
 	Iterations   int
 	DelegationID string   // for async: the delegation ID to track/cancel
+	TeamTaskID   string   // auto-created or provided team task ID (for tracing)
 	MediaPaths   []string // media file paths from delegation result
 }
 
@@ -133,6 +138,7 @@ type DelegateManager struct {
 
 	active            sync.Map // delegationID → *DelegationTask
 	pendingArtifacts  sync.Map // sourceAgentID string → *DelegateArtifacts
+	progressSent      sync.Map // "sourceAgentID:chatID" → true (dedup grouped notifications)
 	completedMu       sync.Mutex
 	completedSessions []string // session keys pending cleanup
 }
@@ -220,7 +226,7 @@ func (dm *DelegateManager) Delegate(ctx context.Context, opts DelegateOpts) (*De
 	dm.saveDelegationHistory(task, result.Content, nil, duration)
 	slog.Info("delegation completed", "id", task.ID, "target", opts.TargetAgentKey, "iterations", result.Iterations)
 
-	return &DelegateResult{Content: result.Content, Iterations: result.Iterations, DelegationID: task.ID, MediaPaths: result.MediaPaths}, nil
+	return &DelegateResult{Content: result.Content, Iterations: result.Iterations, DelegationID: task.ID, TeamTaskID: task.TeamTaskID.String(), MediaPaths: result.MediaPaths}, nil
 }
 
 // DelegateAsync spawns a delegation in the background and announces the result back.
@@ -253,6 +259,16 @@ func (dm *DelegateManager) DelegateAsync(ctx context.Context, opts DelegateOpts)
 			task.CompletedAt = &now
 			dm.active.Delete(task.ID)
 		}()
+
+		// Progress notification timer — fires once after delay if still running
+		progressDelay := opts.EstimatedDuration
+		if progressDelay <= 0 {
+			progressDelay = defaultProgressDelay
+		}
+		progressTimer := time.AfterFunc(progressDelay, func() {
+			dm.sendProgressNotification(task)
+		})
+		defer progressTimer.Stop()
 
 		startTime := time.Now()
 		result, runErr := dm.runAgent(taskCtx, opts.TargetAgentKey, runReq)
@@ -296,6 +312,9 @@ func (dm *DelegateManager) DelegateAsync(ctx context.Context, opts DelegateOpts)
 				slog.Info("delegation announce suppressed (siblings still running)",
 					"id", task.ID, "target", task.TargetAgentKey, "siblings", siblingCount)
 			} else {
+				// Last completion: clear progress dedup so next batch gets fresh notifications.
+				dm.progressSent.Delete(task.SourceAgentID.String() + ":" + task.OriginChatID)
+
 				// Last completion: collect all accumulated artifacts + own result
 				artifacts := dm.collectArtifacts(task.SourceAgentID)
 				if result != nil {
@@ -366,7 +385,7 @@ func (dm *DelegateManager) DelegateAsync(ctx context.Context, opts DelegateOpts)
 		slog.Info("delegation finished (async)", "id", task.ID, "target", task.TargetAgentKey, "status", task.Status)
 	}()
 
-	return &DelegateResult{DelegationID: task.ID}, nil
+	return &DelegateResult{DelegationID: task.ID, TeamTaskID: task.TeamTaskID.String()}, nil
 }
 
 // --- internal helpers ---
@@ -406,25 +425,40 @@ func (dm *DelegateManager) prepareDelegation(ctx context.Context, opts DelegateO
 		team, _ = dm.teamStore.GetTeamForAgent(ctx, sourceAgentID)
 	}
 
-	// Enforce team_task_id for team members: every delegation must be tracked.
+	// Auto-create team task when team_task_id is omitted.
+	// This eliminates the two-step create→spawn dance that caused LLM hallucination
+	// (LLM would call create+spawn in parallel, hallucinating the task_id).
 	if team != nil && opts.TeamTaskID == uuid.Nil {
-		hint := dm.pendingTasksHint(ctx, team.ID)
-		return nil, nil, fmt.Errorf(
-			"spawn requires a valid team_task_id (UUID). "+
-				"Create a task first with team_tasks action=create, "+
-				"then pass the returned task id as team_task_id.%s",
-			hint)
+		subject := opts.Label
+		if subject == "" {
+			subject = opts.Task
+			if len(subject) > 100 {
+				subject = subject[:100] + "..."
+			}
+		}
+		taskData := &store.TeamTaskData{
+			TeamID:      team.ID,
+			Subject:     subject,
+			Description: opts.Task,
+			Status:      store.TeamTaskStatusPending,
+			UserID:      store.UserIDFromContext(ctx),
+			Channel:     ToolChannelFromCtx(ctx),
+		}
+		if err := dm.teamStore.CreateTask(ctx, taskData); err != nil {
+			return nil, nil, fmt.Errorf("failed to auto-create team task: %w", err)
+		}
+		opts.TeamTaskID = taskData.ID
+		slog.Info("delegate: auto-created team task",
+			"task_id", taskData.ID, "subject", subject, "target", opts.TargetAgentKey)
 	}
 
 	// Validate that team_task_id belongs to the agent's team (prevent cross-team task completion).
 	if dm.teamStore != nil && opts.TeamTaskID != uuid.Nil {
 		teamTask, err := dm.teamStore.GetTask(ctx, opts.TeamTaskID)
 		if err != nil {
-			hint := ""
-			if team != nil {
-				hint = dm.pendingTasksHint(ctx, team.ID)
-			}
-			return nil, nil, fmt.Errorf("team_task_id %s not found.%s", opts.TeamTaskID, hint)
+			return nil, nil, fmt.Errorf(
+				"team_task_id %s not found. Use team_tasks action=list to see available tasks, or omit team_task_id to auto-create.",
+				opts.TeamTaskID)
 		}
 
 		// Guard: scope task to current user_id (prevent cross-group task leak).
@@ -434,30 +468,20 @@ func (dm *DelegateManager) prepareDelegation(ctx context.Context, opts DelegateO
 		channel := ToolChannelFromCtx(ctx)
 		if channel != "delegate" && channel != "system" &&
 			teamTask.UserID != "" && currentUserID != "" && teamTask.UserID != currentUserID {
-			hint := ""
-			if team != nil {
-				hint = dm.pendingTasksHint(ctx, team.ID)
-			}
 			return nil, nil, fmt.Errorf(
-				"team_task_id %s belongs to a different context. "+
-					"Create a new task with team_tasks action=create.%s",
-				opts.TeamTaskID, hint)
+				"team_task_id %s belongs to a different context. Omit team_task_id to auto-create a new task.",
+				opts.TeamTaskID)
 		}
 
 		// Guard: reject completed/cancelled tasks — enforce "one task per delegation".
 		if teamTask.Status == store.TeamTaskStatusCompleted || teamTask.Status == "cancelled" {
-			hint := ""
-			if team != nil {
-				hint = dm.pendingTasksHint(ctx, team.ID)
-			}
 			ownerLabel := "another agent"
 			if teamTask.OwnerAgentKey != "" {
 				ownerLabel = teamTask.OwnerAgentKey
 			}
 			return nil, nil, fmt.Errorf(
-				"team_task_id %s is already %s (completed by %q). "+
-					"Create a new task with team_tasks action=create for this delegation.%s",
-				opts.TeamTaskID, teamTask.Status, ownerLabel, hint)
+				"team_task_id %s is already %s (completed by %q). Omit team_task_id to auto-create a new task.",
+				opts.TeamTaskID, teamTask.Status, ownerLabel)
 		}
 
 		if team != nil {
@@ -511,7 +535,8 @@ func (dm *DelegateManager) prepareDelegation(ctx context.Context, opts DelegateO
 		SourceAgentID:  sourceAgentID,
 		SourceAgentKey: sourceAgent.AgentKey,
 		TargetAgentID:  targetAgent.ID,
-		TargetAgentKey: opts.TargetAgentKey,
+		TargetAgentKey:    opts.TargetAgentKey,
+		TargetDisplayName: targetAgent.DisplayName,
 		UserID:         userID,
 		Task:           opts.Task,
 		Status:         "running",
@@ -577,6 +602,52 @@ func (dm *DelegateManager) injectDependencyResults(ctx context.Context, opts *De
 	}
 }
 
+// sendProgressNotification sends a grouped "still working" message listing all
+// active delegations from the same source agent. Uses progressSent to dedup —
+// only the first timer that fires sends the notification; subsequent timers skip.
+func (dm *DelegateManager) sendProgressNotification(task *DelegationTask) {
+	// Skip internal/delegate channels — only notify on real user-facing channels.
+	if dm.msgBus == nil || task.OriginChannel == "" || task.OriginChatID == "" ||
+		task.OriginChannel == "delegate" || task.OriginChannel == "system" {
+		return
+	}
+
+	// Dedup: one grouped notification per source agent per chat.
+	dedupKey := task.SourceAgentID.String() + ":" + task.OriginChatID
+	if _, loaded := dm.progressSent.LoadOrStore(dedupKey, true); loaded {
+		return
+	}
+
+	// Collect all active delegations from same source agent.
+	active := dm.ListActive(task.SourceAgentID)
+	if len(active) == 0 {
+		dm.progressSent.Delete(dedupKey)
+		return
+	}
+
+	var lines []string
+	for _, t := range active {
+		elapsed := time.Since(t.CreatedAt).Round(time.Second)
+		label := t.TargetAgentKey
+		if t.TargetDisplayName != "" {
+			label = fmt.Sprintf("%s (%s)", t.TargetDisplayName, t.TargetAgentKey)
+		}
+		lines = append(lines, fmt.Sprintf("- %s: %s", label, elapsed))
+	}
+
+	content := fmt.Sprintf("⏳ Your team is working on it...\n%s", strings.Join(lines, "\n"))
+
+	dm.msgBus.PublishOutbound(bus.OutboundMessage{
+		Channel: task.OriginChannel,
+		ChatID:  task.OriginChatID,
+		Content: content,
+		Metadata: map[string]string{
+			"local_key": task.OriginLocalKey,
+			"peer_kind": task.OriginPeerKind,
+		},
+	})
+}
+
 func buildDelegateMessage(opts DelegateOpts) string {
 	if opts.Context != "" {
 		return fmt.Sprintf("[Additional Context]\n%s\n\n[Task]\n%s", opts.Context, opts.Task)
@@ -584,24 +655,6 @@ func buildDelegateMessage(opts DelegateOpts) string {
 	return opts.Task
 }
 
-// pendingTasksHint returns a formatted hint listing pending team tasks,
-// so the LLM can self-correct a hallucinated team_task_id.
-func (dm *DelegateManager) pendingTasksHint(ctx context.Context, teamID uuid.UUID) string {
-	tasks, err := dm.teamStore.ListTasks(ctx, teamID, "newest", "", store.UserIDFromContext(ctx))
-	if err != nil {
-		return ""
-	}
-	var ids []string
-	for _, t := range tasks {
-		if t.Status == store.TeamTaskStatusPending {
-			ids = append(ids, fmt.Sprintf("%s (%s)", t.ID, t.Subject))
-		}
-	}
-	if len(ids) == 0 {
-		return ""
-	}
-	return fmt.Sprintf(" Pending tasks: %s", strings.Join(ids, ", "))
-}
 
 func (dm *DelegateManager) buildRunRequest(task *DelegationTask, message string) DelegateRunRequest {
 	return DelegateRunRequest{
