@@ -315,6 +315,46 @@ func stripLeadingBlankLines(content string) string {
 	return leadingBlankLinesPattern.ReplaceAllString(content, "")
 }
 
+// --- 9. Config leak detection (predefined agents) ---
+
+// configLeakFileNames are internal file names that should not appear in user-facing output
+// when a predefined agent describes its procedures or configuration.
+var configLeakFileNames = []string{
+	"SOUL.md", "IDENTITY.md", "AGENTS.md", "BOOTSTRAP.md",
+	"internal_config", "system prompt",
+}
+
+// StripConfigLeak detects when a predefined agent dumps its internal configuration
+// (e.g. referencing SOUL.md, AGENTS.md, IDENTITY.md) and replaces the entire
+// response with a friendly decline.
+//
+// Only active for predefined agents. Single-gate detection:
+// 3+ distinct internal file names mentioned → replace entire response.
+// A predefined agent legitimately referencing 3+ internal config files in one
+// response is essentially impossible, so this has no false-positive risk.
+func StripConfigLeak(content, agentType string) string {
+	if agentType != "predefined" || content == "" {
+		return content
+	}
+
+	hits := 0
+	for _, name := range configLeakFileNames {
+		if strings.Contains(content, name) {
+			hits++
+		}
+	}
+	if hits < 3 {
+		return content
+	}
+
+	slog.Warn("security.config_leak_stripped",
+		"file_hits", hits,
+		"original_len", len(content),
+	)
+
+	return "🔒 Security check not passed."
+}
+
 // --- NO_REPLY detection ---
 
 // IsSilentReply checks if the text is a NO_REPLY token.
