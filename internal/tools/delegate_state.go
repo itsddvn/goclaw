@@ -12,6 +12,29 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
+// CancelForOrigin cancels all active async delegations originating from a given channel + chatID.
+// Used by /stopall to stop delegate tasks that bypass the scheduler.
+func (dm *DelegateManager) CancelForOrigin(channel, chatID string) int {
+	count := 0
+	dm.active.Range(func(key, val any) bool {
+		t := val.(*DelegationTask)
+		if t.Status == "running" && t.OriginChannel == channel && t.OriginChatID == chatID {
+			if t.cancelFunc != nil {
+				t.cancelFunc()
+			}
+			t.Status = "cancelled"
+			now := time.Now()
+			t.CompletedAt = &now
+			dm.active.Delete(key)
+			dm.emitEvent("delegation.cancelled", t)
+			slog.Info("delegation cancelled by /stopall", "id", t.ID, "target", t.TargetAgentKey)
+			count++
+		}
+		return true
+	})
+	return count
+}
+
 // Cancel cancels a running delegation by ID.
 func (dm *DelegateManager) Cancel(delegationID string) bool {
 	val, ok := dm.active.Load(delegationID)
@@ -29,6 +52,31 @@ func (dm *DelegateManager) Cancel(delegationID string) bool {
 	dm.emitEvent("delegation.cancelled", task)
 	slog.Info("delegation cancelled", "id", delegationID, "target", task.TargetAgentKey)
 	return true
+}
+
+// CancelByTeamTaskID cancels a running delegation associated with a team task.
+// Returns true if a delegation was found and cancelled.
+func (dm *DelegateManager) CancelByTeamTaskID(teamTaskID uuid.UUID) bool {
+	found := false
+	dm.active.Range(func(key, val any) bool {
+		t := val.(*DelegationTask)
+		if t.TeamTaskID == teamTaskID && t.Status == "running" {
+			if t.cancelFunc != nil {
+				t.cancelFunc()
+			}
+			t.Status = "cancelled"
+			now := time.Now()
+			t.CompletedAt = &now
+			dm.active.Delete(key)
+			dm.emitEvent("delegation.cancelled", t)
+			slog.Info("delegation cancelled by team task cancel",
+				"delegation_id", t.ID, "team_task_id", teamTaskID, "target", t.TargetAgentKey)
+			found = true
+			return false // stop iteration
+		}
+		return true
+	})
+	return found
 }
 
 // ListActive returns all active delegations for a source agent.
