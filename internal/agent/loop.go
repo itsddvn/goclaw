@@ -30,6 +30,7 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 
 	// Per-run emit wrapper: enriches every AgentEvent with delegation + routing context.
 	emitRun := func(event AgentEvent) {
+		event.RunKind = req.RunKind
 		event.DelegationID = req.DelegationID
 		event.TeamID = req.TeamID
 		event.TeamTaskID = req.TeamTaskID
@@ -151,6 +152,7 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) {
 	// Per-run emit wrapper: enriches every AgentEvent with delegation + routing context.
 	emitRun := func(event AgentEvent) {
+		event.RunKind = req.RunKind
 		event.DelegationID = req.DelegationID
 		event.TeamID = req.TeamID
 		event.TeamTaskID = req.TeamTaskID
@@ -288,7 +290,7 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 
 	// buildMessages resolves context files once and also detects BOOTSTRAP.md presence
 	// (hadBootstrap) — no extra DB roundtrip needed for bootstrap detection.
-	messages, hadBootstrap := l.buildMessages(ctx, history, summary, req.Message, req.ExtraSystemPrompt, req.SessionKey, req.Channel, req.UserID, req.HistoryLimit, req.SkillFilter)
+	messages, hadBootstrap := l.buildMessages(ctx, history, summary, req.Message, req.ExtraSystemPrompt, req.SessionKey, req.Channel, req.PeerKind, req.UserID, req.HistoryLimit, req.SkillFilter)
 
 	// 2. Attach vision images to the current user message (last in messages slice).
 	// Images are only attached to the live request, NOT persisted in session history.
@@ -823,6 +825,9 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 
 	// 4. Full sanitization pipeline (matching TS extractAssistantText + sanitizeUserFacingText)
 	finalContent = SanitizeAssistantContent(finalContent)
+
+	// 4b. Config leak detection (predefined agents only)
+	finalContent = StripConfigLeak(finalContent, l.agentType)
 
 	// 5. Handle NO_REPLY: save to session for context but mark as silent.
 	// Matching TS: NO_REPLY is saved (via resolveSilentReplyFallbackText) but
