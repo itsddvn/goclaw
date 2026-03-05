@@ -12,6 +12,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
+	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 func (dm *DelegateManager) prepareDelegation(ctx context.Context, opts DelegateOpts, mode string) (*DelegationTask, *store.AgentLinkData, error) {
@@ -157,7 +158,8 @@ func (dm *DelegateManager) prepareDelegation(ctx context.Context, opts DelegateO
 	task := &DelegationTask{
 		ID:             delegationID,
 		SourceAgentID:  sourceAgentID,
-		SourceAgentKey: sourceAgent.AgentKey,
+		SourceAgentKey:    sourceAgent.AgentKey,
+		SourceDisplayName: sourceAgent.DisplayName,
 		TargetAgentID:  targetAgent.ID,
 		TargetAgentKey:    opts.TargetAgentKey,
 		TargetDisplayName: targetAgent.DisplayName,
@@ -180,6 +182,12 @@ func (dm *DelegateManager) prepareDelegation(ctx context.Context, opts DelegateO
 	// Carry team_id from the link (for delegation history filtering by team)
 	if link.TeamID != nil {
 		task.TeamID = *link.TeamID
+	}
+
+	// Resolve progress notifications: per-team setting overrides global default.
+	task.progressEnabled = dm.progressEnabled
+	if team != nil {
+		task.progressEnabled = parseProgressNotifications(team.Settings, dm.progressEnabled)
 	}
 
 	return task, link, nil
@@ -230,6 +238,9 @@ func (dm *DelegateManager) injectDependencyResults(ctx context.Context, opts *De
 // active delegations from the same source agent. Uses progressSent to dedup —
 // concurrent tickers only send one notification per cycle, then release for next tick.
 func (dm *DelegateManager) sendProgressNotification(task *DelegationTask) {
+	if !task.progressEnabled {
+		return
+	}
 	// Skip internal/delegate channels — only notify on real user-facing channels.
 	if dm.msgBus == nil || task.OriginChannel == "" || task.OriginChatID == "" ||
 		task.OriginChannel == "delegate" || task.OriginChannel == "system" {
@@ -270,6 +281,33 @@ func (dm *DelegateManager) sendProgressNotification(task *DelegationTask) {
 			"peer_kind": task.OriginPeerKind,
 		},
 	})
+
+	// Emit WS progress event alongside the outbound channel message.
+	var progressItems []protocol.DelegationProgressItem
+	for _, t := range active {
+		item := protocol.DelegationProgressItem{
+			DelegationID:      t.ID,
+			TargetAgentKey:    t.TargetAgentKey,
+			TargetDisplayName: t.TargetDisplayName,
+			ElapsedMS:         int(time.Since(t.CreatedAt).Milliseconds()),
+		}
+		if t.TeamTaskID != uuid.Nil {
+			item.TeamTaskID = t.TeamTaskID.String()
+		}
+		progressItems = append(progressItems, item)
+	}
+	dm.msgBus.Broadcast(bus.Event{
+		Name: protocol.EventDelegationProgress,
+		Payload: protocol.DelegationProgressPayload{
+			SourceAgentID:  task.SourceAgentID.String(),
+			SourceAgentKey: task.SourceAgentKey,
+			UserID:         task.UserID,
+			Channel:        task.OriginChannel,
+			ChatID:         task.OriginChatID,
+			TeamID:         func() string { if task.TeamID != uuid.Nil { return task.TeamID.String() }; return "" }(),
+			Active:         progressItems,
+		},
+	})
 }
 
 func buildDelegateMessage(opts DelegateOpts) string {
@@ -296,5 +334,9 @@ func (dm *DelegateManager) buildRunRequest(task *DelegationTask, message string)
 			"- Do NOT use your persona name or self-references (e.g. do not say your name). Write factual, neutral content.\n" +
 			"- Be concise and deliver actionable results.\n" +
 			"- IMPORTANT: If the delegated task falls outside your expertise scope (as defined in your SOUL.md), politely refuse and explain that this task is not within your domain. Do NOT attempt tasks outside your scope.",
+		DelegationID:  task.ID,
+		TeamID:        func() string { if task.TeamID != uuid.Nil { return task.TeamID.String() }; return "" }(),
+		TeamTaskID:    func() string { if task.TeamTaskID != uuid.Nil { return task.TeamTaskID.String() }; return "" }(),
+		ParentAgentID: task.SourceAgentKey,
 	}
 }
