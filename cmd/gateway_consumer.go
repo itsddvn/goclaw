@@ -45,7 +45,7 @@ func makeSchedulerRunFunc(agents *agent.Router, cfg *config.Config) scheduler.Ru
 // and routes them through the scheduler/agent loop, then publishes the response back.
 // Also handles subagent announcements: routes them through the parent agent's session
 // (matching TS subagent-announce.ts pattern) so the agent can reformulate for the user.
-func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents *agent.Router, cfg *config.Config, sched *scheduler.Scheduler, channelMgr *channels.Manager, teamStore store.TeamStore, quotaChecker *channels.QuotaChecker, delegateMgr *tools.DelegateManager) {
+func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents *agent.Router, cfg *config.Config, sched *scheduler.Scheduler, channelMgr *channels.Manager, teamStore store.TeamStore, quotaChecker *channels.QuotaChecker, delegateMgr *tools.DelegateManager, sessStore store.SessionStore, agentStore store.AgentStore) {
 	slog.Info("inbound message consumer started")
 
 	// Inbound message deduplication (matching TS src/infra/dedupe.ts + inbound-dedupe.ts).
@@ -126,6 +126,16 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 				groupID = guildID
 			}
 			userID = fmt.Sprintf("group:%s:%s", msg.Channel, groupID)
+		}
+
+		// Persist friendly names from channel metadata into session + user profile.
+		if sessionMeta := extractSessionMetadata(msg, peerKind); len(sessionMeta) > 0 {
+			sessStore.SetSessionMetadata(sessionKey, sessionMeta)
+			if agentStore != nil {
+				if agentUUID, err := uuid.Parse(agentID); err == nil && agentUUID != uuid.Nil {
+					_ = agentStore.UpdateUserProfileMetadata(ctx, agentUUID, userID, sessionMeta)
+				}
+			}
 		}
 
 		// --- Quota check ---
@@ -225,7 +235,7 @@ func consumeInboundMessages(ctx context.Context, msgBus *bus.MessageBus, agents 
 
 		// Delegation announces carry media as ForwardMedia (not deleted, forwarded to output).
 		// User-uploaded media goes in Media (loaded as images for LLM, then deleted).
-		var reqMedia, fwdMedia []string
+		var reqMedia, fwdMedia []bus.MediaFile
 		if msg.Metadata["delegation_id"] != "" || msg.Metadata["subagent_id"] != "" {
 			fwdMedia = msg.Media
 		} else {
@@ -892,6 +902,35 @@ func overrideSessionKeyFromLocalKey(sessionKey, localKey, agentID, channel, chat
 	return sessionKey
 }
 
+// extractSessionMetadata builds a metadata map from channel InboundMessage metadata.
+// Used to persist friendly names (display_name, username, chat_title) into sessions
+// and user profiles so the web UI can show human-readable labels.
+func extractSessionMetadata(msg bus.InboundMessage, peerKind string) map[string]string {
+	meta := make(map[string]string)
+
+	// Display name: prefer first_name (Telegram), fall back to display_name (Discord)
+	if v := msg.Metadata["first_name"]; v != "" {
+		meta["display_name"] = v
+	} else if v := msg.Metadata["display_name"]; v != "" {
+		meta["display_name"] = v
+	}
+
+	if v := msg.Metadata["username"]; v != "" {
+		meta["username"] = v
+	}
+	if peerKind != "" {
+		meta["peer_kind"] = peerKind
+	}
+	if v := msg.Metadata["chat_title"]; v != "" {
+		meta["chat_title"] = v
+	}
+
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
+}
+
 // buildAnnounceOutMeta builds outbound metadata for announce messages so that
 // Send() can route replies to the correct forum topic or DM thread.
 // mediaToMarkdown converts media results to markdown image/link syntax using the
@@ -933,18 +972,21 @@ func mediaToMarkdown(media []agent.MediaResult, cfg *config.Config) string {
 
 // mediaToMarkdownFromPaths is like mediaToMarkdown but accepts raw file paths
 // ([]string from bus.InboundMessage.Media) instead of []agent.MediaResult.
-func mediaToMarkdownFromPaths(paths []string, cfg *config.Config) string {
-	if len(paths) == 0 {
+func mediaToMarkdownFromPaths(files []bus.MediaFile, cfg *config.Config) string {
+	if len(files) == 0 {
 		return ""
 	}
-	media := make([]agent.MediaResult, 0, len(paths))
-	for _, p := range paths {
-		ct := mime.TypeByExtension(filepath.Ext(p))
+	media := make([]agent.MediaResult, 0, len(files))
+	for _, f := range files {
+		ct := f.MimeType
+		if ct == "" {
+			ct = mime.TypeByExtension(filepath.Ext(f.Path))
+		}
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
 		media = append(media, agent.MediaResult{
-			Path:        p,
+			Path:        f.Path,
 			ContentType: ct,
 		})
 	}
