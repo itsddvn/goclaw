@@ -129,13 +129,14 @@ var defaultDenyPatterns = []*regexp.Regexp{
 
 // ExecTool executes shell commands, optionally inside a sandbox container.
 type ExecTool struct {
-	workingDir   string
-	timeout      time.Duration
-	denyPatterns []*regexp.Regexp
-	restrict     bool
-	sandboxMgr   sandbox.Manager        // nil = no sandbox, execute on host
-	approvalMgr  *ExecApprovalManager   // nil = no approval needed
-	agentID      string                  // for approval request context
+	workingDir        string
+	timeout           time.Duration
+	denyPatterns      []*regexp.Regexp
+	allowExemptions   []*regexp.Regexp
+	restrict          bool
+	sandboxMgr        sandbox.Manager        // nil = no sandbox, execute on host
+	approvalMgr       *ExecApprovalManager   // nil = no approval needed
+	agentID           string                  // for approval request context
 }
 
 // NewExecTool creates an exec tool that runs commands directly on the host.
@@ -168,6 +169,15 @@ func (t *ExecTool) DenyPaths(paths ...string) {
 	for _, p := range paths {
 		escaped := regexp.QuoteMeta(p)
 		t.denyPatterns = append(t.denyPatterns, regexp.MustCompile(escaped))
+	}
+}
+
+// AllowPathExemptions adds patterns that exempt commands from deny rules.
+// If a command matches both a deny pattern and an exemption, the exemption wins.
+func (t *ExecTool) AllowPathExemptions(paths ...string) {
+	for _, p := range paths {
+		escaped := regexp.QuoteMeta(p)
+		t.allowExemptions = append(t.allowExemptions, regexp.MustCompile(escaped))
 	}
 }
 
@@ -205,7 +215,16 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]interface{}) *Re
 	// Check for dangerous commands (applies to both host and sandbox)
 	for _, pattern := range t.denyPatterns {
 		if pattern.MatchString(command) {
-			return ErrorResult(fmt.Sprintf("command denied by safety policy: matches pattern %s", pattern.String()))
+			exempt := false
+			for _, allow := range t.allowExemptions {
+				if allow.MatchString(command) {
+					exempt = true
+					break
+				}
+			}
+			if !exempt {
+				return ErrorResult(fmt.Sprintf("command denied by safety policy: matches pattern %s", pattern.String()))
+			}
 		}
 	}
 
