@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Users } from "lucide-react";
-import { DeferredSpinner } from "@/components/shared/loading-skeleton";
+import { ArrowLeft, Users, Trash2 } from "lucide-react";
+import { DetailPageSkeleton } from "@/components/shared/loading-skeleton";
+import { ConfirmDeleteDialog } from "@/components/shared/confirm-delete-dialog";
 import { useTeams } from "./hooks/use-teams";
 import { TeamMembersTab } from "./team-members-tab";
 import { TeamTasksTab } from "./team-tasks-tab";
@@ -17,11 +18,12 @@ interface TeamDetailPageProps {
 }
 
 export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
-  const { getTeam, getTeamTasks, addMember, removeMember } = useTeams();
+  const { getTeam, getTeamTasks, addMember, removeMember, deleteTeam } = useTeams();
   const [team, setTeam] = useState<TeamData | null>(null);
   const [members, setMembers] = useState<TeamMemberData[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("members");
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -63,14 +65,7 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
   }, [teamId, removeMember, reload]);
 
   if (loading || !team) {
-    return (
-      <div className="p-4 sm:p-6">
-        <Button variant="ghost" onClick={onBack} className="mb-4 gap-1">
-          <ArrowLeft className="h-4 w-4" /> Back
-        </Button>
-        <DeferredSpinner />
-      </div>
-    );
+    return <DetailPageSkeleton tabs={4} />;
   }
 
   return (
@@ -103,10 +98,18 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
             <p className="mt-1 text-sm text-muted-foreground/70">{team.description}</p>
           )}
         </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="shrink-0 text-muted-foreground hover:text-destructive"
+          onClick={() => setDeleteOpen(true)}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
       </div>
 
       {/* Tabs */}
-      <div className="max-w-4xl">
+      <div className="max-w-4xl rounded-xl border bg-card p-3 shadow-sm sm:p-4">
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList className="w-full justify-start overflow-x-auto overflow-y-hidden">
             <TabsTrigger value="members">Members</TabsTrigger>
@@ -137,6 +140,20 @@ export function TeamDetailPage({ teamId, onBack }: TeamDetailPageProps) {
           </TabsContent>
         </Tabs>
       </div>
+
+      <ConfirmDeleteDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title="Delete Team"
+        description={`Are you sure you want to delete "${team.name}"? All members, tasks, and configuration will be permanently removed.`}
+        confirmValue={team.name}
+        confirmLabel="Delete"
+        onConfirm={async () => {
+          await deleteTeam(teamId);
+          setDeleteOpen(false);
+          onBack();
+        }}
+      />
     </div>
   );
 }

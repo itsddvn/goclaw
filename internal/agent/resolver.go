@@ -20,7 +20,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
 )
 
-// ResolverDeps holds shared dependencies for the managed-mode agent resolver.
+// ResolverDeps holds shared dependencies for the agent resolver.
 type ResolverDeps struct {
 	AgentStore     store.AgentStore
 	ProviderReg    *providers.Registry
@@ -33,7 +33,7 @@ type ResolverDeps struct {
 	OnEvent        func(AgentEvent)
 	TraceCollector *tracing.Collector
 
-	// Per-user file seeding + dynamic context loading (managed mode)
+	// Per-user file seeding + dynamic context loading
 	EnsureUserFiles   EnsureUserFilesFunc
 	ContextFileLoader ContextFileLoaderFunc
 	BootstrapCleanup  BootstrapCleanupFunc
@@ -49,30 +49,33 @@ type ResolverDeps struct {
 	SandboxContainerDir    string
 	SandboxWorkspaceAccess string
 
-	// Dynamic custom tools (managed mode)
-	DynamicLoader *tools.DynamicToolLoader // nil if not managed
+	// Dynamic custom tools
+	DynamicLoader *tools.DynamicToolLoader
 
-	// Inter-agent delegation (managed mode)
-	AgentLinkStore store.AgentLinkStore // nil if not managed or no links
+	// Inter-agent delegation
+	AgentLinkStore store.AgentLinkStore
 
-	// Agent teams (managed mode)
-	TeamStore store.TeamStore // nil if not managed or no teams
+	// Agent teams
+	TeamStore store.TeamStore
 
-	// Builtin tool settings (managed mode)
-	BuiltinToolStore store.BuiltinToolStore // nil if not managed
+	// Builtin tool settings
+	BuiltinToolStore store.BuiltinToolStore
 
-	// MCP server store (managed mode) — for per-agent MCP tool loading
-	MCPStore store.MCPServerStore // nil if not managed or no MCP
+	// MCP server store — for per-agent MCP tool loading
+	MCPStore store.MCPServerStore
 
-	// Skill access store (managed mode) — for per-agent skill visibility filtering
-	SkillAccessStore store.SkillAccessStore // nil if not managed
+	// Shared MCP connection pool — eliminates duplicate connections across agents
+	MCPPool *mcpbridge.Pool
 
-	// Group file writer cache (managed mode)
+	// Skill access store — for per-agent skill visibility filtering
+	SkillAccessStore store.SkillAccessStore
+
+	// Group file writer cache
 	GroupWriterCache *store.GroupWriterCache
 }
 
 // NewManagedResolver creates a ResolverFunc that builds Loops from DB agent data.
-// This is the core of managed mode: agents are defined in Postgres, not config.json.
+// Agents are defined in Postgres, not config.json.
 func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 	return func(agentKey string) (Agent, error) {
 		ctx := context.Background()
@@ -270,9 +273,21 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			if toolsReg == deps.Tools {
 				toolsReg = deps.Tools.Clone()
 			}
-			mcpMgr := mcpbridge.NewManager(toolsReg, mcpbridge.WithStore(deps.MCPStore))
+			var mcpOpts []mcpbridge.ManagerOption
+		mcpOpts = append(mcpOpts, mcpbridge.WithStore(deps.MCPStore))
+		if deps.MCPPool != nil {
+			mcpOpts = append(mcpOpts, mcpbridge.WithPool(deps.MCPPool))
+		}
+		mcpMgr := mcpbridge.NewManager(toolsReg, mcpOpts...)
 			if err := mcpMgr.LoadForAgent(ctx, ag.ID, ""); err != nil {
 				slog.Warn("failed to load MCP servers for agent", "agent", agentKey, "error", err)
+			} else if mcpMgr.IsSearchMode() {
+				// Search mode: too many tools — register mcp_tool_search meta-tool
+				searchTool := mcpbridge.NewMCPToolSearchTool(mcpMgr)
+				toolsReg.Register(searchTool)
+				hasMCPTools = true
+				slog.Info("mcp.agent.search_mode", "agent", agentKey,
+					"deferred_tools", len(mcpMgr.DeferredToolInfos()))
 			} else {
 				toolNames := mcpMgr.ToolNames()
 				if len(toolNames) > 0 {

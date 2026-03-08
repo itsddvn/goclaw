@@ -49,7 +49,7 @@ type Loader struct {
 	globalSkills        string // ~/.goclaw/skills/
 	builtinSkills       string // bundled with binary
 
-	// Managed skills directory (set via SetManagedDir in managed mode).
+	// DB-managed skills directory (set via SetManagedDir).
 	// Uses versioned subdirectory structure: <dir>/<slug>/<version>/SKILL.md
 	managedSkillsDir string
 
@@ -92,7 +92,7 @@ func NewLoader(workspace, globalSkills, builtinSkills string) *Loader {
 
 // SetManagedDir sets the managed skills directory (skills-store).
 // Managed skills use versioned subdirectories: <dir>/<slug>/<version>/SKILL.md.
-// Called in managed mode after PG stores are created.
+// Called after PG stores are created.
 func (l *Loader) SetManagedDir(dir string) {
 	l.managedSkillsDir = dir
 	l.BumpVersion() // trigger re-scan
@@ -441,8 +441,16 @@ func parseMetadata(path string) *Metadata {
 	}
 }
 
+// normalizeLineEndings converts \r\n and bare \r to \n so frontmatter regex matches
+// files created on Windows or uploaded via ZIP with CRLF line endings.
+func normalizeLineEndings(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return s
+}
+
 func extractFrontmatter(content string) string {
-	match := frontmatterRe.FindStringSubmatch(content)
+	match := frontmatterRe.FindStringSubmatch(normalizeLineEndings(content))
 	if len(match) > 1 {
 		return match[1]
 	}
@@ -450,7 +458,7 @@ func extractFrontmatter(content string) string {
 }
 
 func stripFrontmatter(content string) string {
-	return frontmatterRe.ReplaceAllString(content, "")
+	return frontmatterRe.ReplaceAllString(normalizeLineEndings(content), "")
 }
 
 func parseSimpleYAML(content string) map[string]string {

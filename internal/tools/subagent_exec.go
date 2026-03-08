@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -28,6 +29,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			Label:      task.Label,
 			Status:     task.Status,
 			Result:     task.Result,
+			Media:      task.Media,
 			Runtime:    elapsed,
 			Iterations: iterations,
 		}
@@ -37,6 +39,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			OriginPeerKind:   task.OriginPeerKind,
 			OriginLocalKey:   task.OriginLocalKey,
 			OriginUserID:     task.OriginUserID,
+			OriginSessionKey: task.OriginSessionKey,
 			ParentAgent:      task.ParentID,
 			OriginTraceID:    task.OriginTraceID.String(),
 			OriginRootSpanID: task.OriginRootSpanID.String(),
@@ -63,6 +66,9 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 			if task.OriginLocalKey != "" {
 				announceMeta["origin_local_key"] = task.OriginLocalKey
 			}
+			if task.OriginSessionKey != "" {
+				announceMeta["origin_session_key"] = task.OriginSessionKey
+			}
 			sm.msgBus.PublishInbound(bus.InboundMessage{
 				Channel:  "system",
 				SenderID: fmt.Sprintf("subagent:%s", task.ID),
@@ -70,6 +76,7 @@ func (sm *SubagentManager) runTask(ctx context.Context, task *SubagentTask, call
 				Content:  announceContent,
 				UserID:   task.OriginUserID,
 				Metadata: announceMeta,
+				Media:    task.Media,
 			})
 		}
 	}
@@ -159,6 +166,7 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	}
 
 	// Run LLM iteration loop (similar to agent loop but simplified)
+	var mediaPaths []string
 	maxIterations := 20
 
 	for iteration < maxIterations {
@@ -219,6 +227,20 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 			argsJSON, _ := json.Marshal(tc.Arguments)
 			sm.emitToolSpan(subTraceCtx, toolStart, tc.Name, tc.ID, string(argsJSON), result.ForLLM, result.IsError)
 
+			// Capture media file paths from tool results (e.g. image generation).
+			if len(result.Media) > 0 {
+				mediaPaths = append(mediaPaths, result.Media...)
+			} else if strings.HasPrefix(strings.TrimSpace(result.ForLLM), "MEDIA:") {
+				// Fallback: parse MEDIA: prefix from ForLLM (same as agent loop's parseMediaResult)
+				p := strings.TrimSpace(strings.TrimSpace(result.ForLLM)[6:])
+				if nl := strings.IndexByte(p, '\n'); nl >= 0 {
+					p = strings.TrimSpace(p[:nl])
+				}
+				if p != "" {
+					mediaPaths = append(mediaPaths, p)
+				}
+			}
+
 			messages = append(messages, providers.Message{
 				Role:       "tool",
 				Content:    result.ForLLM,
@@ -233,6 +255,7 @@ func (sm *SubagentManager) executeTask(ctx context.Context, task *SubagentTask) 
 	}
 	task.Status = TaskStatusCompleted
 	task.Result = finalContent
+	task.Media = mediaPaths
 	sm.mu.Unlock()
 
 	slog.Info("subagent completed", "id", task.ID, "iterations", iteration)

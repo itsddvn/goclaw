@@ -8,13 +8,16 @@ import (
 
 // SkillInfo describes a discovered skill.
 type SkillInfo struct {
-	ID          string `json:"id,omitempty"` // DB UUID (managed mode only)
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Path        string `json:"path"`
-	BaseDir     string `json:"baseDir"`
-	Source      string `json:"source"`
-	Description string `json:"description"`
+	ID          string   `json:"id,omitempty"` // DB UUID
+	Name        string   `json:"name"`
+	Slug        string   `json:"slug"`
+	Path        string   `json:"path"`
+	BaseDir     string   `json:"baseDir"`
+	Source      string   `json:"source"`
+	Description string   `json:"description"`
+	Visibility  string   `json:"visibility,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Version     int      `json:"version,omitempty"`
 }
 
 // SkillSearchResult is a scored skill returned from embedding search.
@@ -27,8 +30,7 @@ type SkillSearchResult struct {
 }
 
 // SkillStore manages skill discovery and loading.
-// In standalone mode, wraps the filesystem-based Loader.
-// In managed mode, backed by Postgres + filesystem content.
+// Backed by Postgres (PGSkillStore) or filesystem (FileSkillStore).
 type SkillStore interface {
 	ListSkills() []SkillInfo
 	LoadSkill(name string) (string, bool)
@@ -42,7 +44,7 @@ type SkillStore interface {
 }
 
 // SkillAccessStore is an optional interface for stores that support
-// per-agent skill access filtering (managed mode).
+// per-agent skill access filtering.
 type SkillAccessStore interface {
 	ListAccessible(ctx context.Context, agentID uuid.UUID, userID string) ([]SkillInfo, error)
 }

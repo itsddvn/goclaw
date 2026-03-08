@@ -27,16 +27,10 @@ var toolGroups = map[string][]string{
 		"memory_search", "memory_get",
 		"sessions_list", "sessions_history", "sessions_send", "spawn", "session_status",
 		"cron", "message", "create_forum_topic",
-		"read_image", "create_image", "skill_search", "tts",
+		"read_image", "create_image", "skill_search", "mcp_tool_search", "tts",
 		"handoff", "delegate_search", "evaluate_loop",
 		"team_tasks", "team_message",
 	},
-}
-
-// ownerOnlyTools are tools that only the instance owner can execute.
-// Matching TS OWNER_ONLY_TOOL_NAMES.
-var ownerOnlyTools = map[string]bool{
-	"whatsapp_login": true,
 }
 
 // RegisterToolGroup adds or replaces a dynamic tool group.

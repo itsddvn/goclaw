@@ -33,10 +33,11 @@ type DelegationTask struct {
 	CompletedAt    *time.Time `json:"completed_at,omitempty"`
 
 	// Origin metadata for async announce routing
-	OriginChannel  string `json:"-"`
-	OriginChatID   string `json:"-"`
-	OriginPeerKind string `json:"-"`
-	OriginLocalKey string `json:"-"` // composite key with topic/thread suffix for routing
+	OriginChannel    string `json:"-"`
+	OriginChatID     string `json:"-"`
+	OriginPeerKind   string `json:"-"`
+	OriginLocalKey   string `json:"-"` // composite key with topic/thread suffix for routing
+	OriginSessionKey string `json:"-"` // exact parent session key for announce routing (WS uses non-standard format)
 
 	// Trace context for announce linking (same pattern as SubagentTask)
 	OriginTraceID    uuid.UUID `json:"-"`
@@ -48,6 +49,13 @@ type DelegationTask struct {
 
 	cancelFunc      context.CancelFunc `json:"-"`
 	progressEnabled bool               `json:"-"` // resolved from team settings or global default
+}
+
+// originKey returns a composite key scoping this delegation to its origin conversation.
+// Used for sibling counting and artifact accumulation so that delegations from
+// different channels/chats are NOT treated as siblings of each other.
+func (t *DelegationTask) originKey() string {
+	return t.SourceAgentID.String() + ":" + t.OriginChannel + ":" + t.OriginChatID
 }
 
 // DelegateOpts configures a single delegation call.

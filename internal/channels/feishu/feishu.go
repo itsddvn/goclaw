@@ -6,6 +6,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -115,6 +116,9 @@ func (c *Channel) Start(ctx context.Context) error {
 		return c.startWebSocket(ctx)
 	}
 }
+
+// BlockReplyEnabled returns the per-channel block_reply override (nil = inherit gateway default).
+func (c *Channel) BlockReplyEnabled() *bool { return c.cfg.BlockReply }
 
 // Stop shuts down the Feishu channel.
 func (c *Channel) Stop(_ context.Context) error {
@@ -275,7 +279,7 @@ func (c *Channel) startWebhook(ctx context.Context) error {
 	}
 
 	go func() {
-		if err := c.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := c.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("feishu webhook server error", "error", err)
 		}
 	}()

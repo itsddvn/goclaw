@@ -1,25 +1,27 @@
 import { useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useWs, useHttp } from "@/hooks/use-ws";
+import { useAuthStore } from "@/stores/use-auth-store";
 import { Methods } from "@/api/protocol";
 import { queryKeys } from "@/lib/query-keys";
-import type { SkillInfo } from "@/types/skill";
+import type { SkillInfo, SkillFile, SkillVersions } from "@/types/skill";
 
-export type { SkillInfo };
+export type { SkillInfo, SkillFile, SkillVersions };
 
 export function useSkills() {
   const ws = useWs();
   const http = useHttp();
+  const connected = useAuthStore((s) => s.connected);
   const queryClient = useQueryClient();
 
-  const { data: skills = [], isLoading: loading } = useQuery({
+  const { data: skills = [], isPending: loading } = useQuery({
     queryKey: queryKeys.skills.all,
     queryFn: async () => {
-      if (!ws.isConnected) return [];
       const res = await ws.call<{ skills: SkillInfo[] }>(Methods.SKILLS_LIST);
       return res.skills ?? [];
     },
     staleTime: 60_000,
+    enabled: connected,
   });
 
   const invalidate = useCallback(
@@ -49,6 +51,15 @@ export function useSkills() {
     [http, invalidate],
   );
 
+  const updateSkill = useCallback(
+    async (id: string, updates: Record<string, unknown>) => {
+      const res = await http.put<{ ok: string }>(`/v1/skills/${id}`, updates);
+      await invalidate();
+      return res;
+    },
+    [http, invalidate],
+  );
+
   const deleteSkill = useCallback(
     async (id: string) => {
       const res = await http.delete<{ ok: string }>(`/v1/skills/${id}`);
@@ -58,5 +69,35 @@ export function useSkills() {
     [http, invalidate],
   );
 
-  return { skills, loading, refresh: invalidate, getSkill, uploadSkill, deleteSkill };
+  const getSkillVersions = useCallback(
+    async (id: string) => {
+      return http.get<SkillVersions>(`/v1/skills/${id}/versions`);
+    },
+    [http],
+  );
+
+  const getSkillFiles = useCallback(
+    async (id: string, version?: number) => {
+      const q = version != null ? `?version=${version}` : "";
+      const res = await http.get<{ files: SkillFile[] }>(`/v1/skills/${id}/files${q}`);
+      return res.files ?? [];
+    },
+    [http],
+  );
+
+  const getSkillFileContent = useCallback(
+    async (id: string, path: string, version?: number) => {
+      const q = version != null ? `?version=${version}` : "";
+      return http.get<{ content: string; path: string; size: number }>(
+        `/v1/skills/${id}/files/${encodeURIComponent(path)}${q}`,
+      );
+    },
+    [http],
+  );
+
+  return {
+    skills, loading, refresh: invalidate, getSkill,
+    uploadSkill, updateSkill, deleteSkill,
+    getSkillVersions, getSkillFiles, getSkillFileContent,
+  };
 }
