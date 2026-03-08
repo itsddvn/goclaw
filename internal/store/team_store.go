@@ -26,6 +26,7 @@ const (
 	TeamTaskStatusInProgress = "in_progress"
 	TeamTaskStatusCompleted  = "completed"
 	TeamTaskStatusBlocked    = "blocked"
+	TeamTaskStatusFailed     = "failed"
 )
 
 // Team task list filter constants (for ListTasks statusFilter parameter).
@@ -196,6 +197,15 @@ type TeamStore interface {
 	// CompleteTask marks a task as completed and unblocks dependent tasks.
 	// teamID is validated in the WHERE clause to prevent cross-team task completion.
 	CompleteTask(ctx context.Context, taskID, teamID uuid.UUID, result string) error
+
+	// CancelTask marks a non-completed task as cancelled (status=completed, result="CANCELLED: ..."),
+	// unblocks dependent tasks, and transitions blocked→pending when all blockers are resolved.
+	// Returns error if the task is already completed or not found.
+	CancelTask(ctx context.Context, taskID, teamID uuid.UUID, reason string) error
+
+	// FailTask marks an in_progress task as failed and stores the error message.
+	// Unblocks dependent tasks so they aren't stuck.
+	FailTask(ctx context.Context, taskID, teamID uuid.UUID, errMsg string) error
 
 	// Delegation history
 	SaveDelegationHistory(ctx context.Context, record *DelegationHistoryData) error

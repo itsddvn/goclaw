@@ -52,7 +52,7 @@ export function TeamsPage() {
   useEffect(() => { resetPage(); }, [search, resetPage]);
 
   return (
-    <div className="p-6">
+    <div className="p-4 sm:p-6">
       <PageHeader
         title="Teams"
         description="Manage your agent teams"
@@ -97,6 +97,7 @@ export function TeamsPage() {
                   key={team.id}
                   team={team}
                   onClick={() => navigate(`/teams/${team.id}`)}
+                  onDelete={() => setDeleteTarget({ id: team.id, name: team.name })}
                 />
               ))}
             </div>

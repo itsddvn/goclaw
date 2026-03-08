@@ -6,39 +6,41 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
+	"github.com/nextlevelbuilder/goclaw/internal/cache"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 // protectedFileSet defines files that require group file writer permission in group chats.
 // These files control the agent's identity and behavior — only allowlisted users can modify them.
 var protectedFileSet = map[string]bool{
-	bootstrap.SoulFile:     true,
-	bootstrap.IdentityFile: true,
-	bootstrap.AgentsFile:   true,
-	bootstrap.UserFile:     true,
+	bootstrap.SoulFile:           true,
+	bootstrap.IdentityFile:       true,
+	bootstrap.AgentsFile:         true,
+	bootstrap.UserFile:           true,
+	bootstrap.UserPredefinedFile: true,
 }
 
-// contextFileSet is the set of filenames routed to DB in managed mode.
-// TOOLS.md and HEARTBEAT.md excluded — only useful in standalone mode.
+// contextFileSet is the set of filenames routed to the DB store.
+// TOOLS.md excluded — not applicable.
 var contextFileSet = map[string]bool{
-	bootstrap.SoulFile:      true,
-	bootstrap.AgentsFile:    true,
-	bootstrap.IdentityFile:  true,
-	bootstrap.UserFile:      true,
-	bootstrap.BootstrapFile: true, // first-run file (deleted after completion)
+	bootstrap.SoulFile:           true,
+	bootstrap.AgentsFile:         true,
+	bootstrap.IdentityFile:       true,
+	bootstrap.UserFile:           true,
+	bootstrap.UserPredefinedFile: true,
+	bootstrap.BootstrapFile:      true, // first-run file (deleted after completion)
 }
 
 // isContextFile checks if a path refers to a workspace-root context file.
 // Handles both relative ("SOUL.md") and absolute ("/workspace/SOUL.md") paths.
 // Also matches absolute paths under per-user workspace subdirectories
 // (e.g. "/workspace/<userID>/USER.md") since context files at any depth
-// under the workspace root should be routed to DB in managed mode.
+// under the workspace root should be routed to DB.
 func isContextFile(path, workspace string) (fileName string, ok bool) {
 	base := filepath.Base(path)
 	if !contextFileSet[base] {
@@ -64,39 +66,32 @@ func isContextFile(path, workspace string) (fileName string, ok bool) {
 	return "", false
 }
 
-const (
-	defaultContextCacheMax = 200
-	defaultContextCacheTTL = 5 * time.Minute
-)
-
-// contextCacheEntry holds cached context files for one agent or user.
-type contextCacheEntry struct {
-	files    []store.AgentContextFileData
-	loadedAt time.Time
-}
+const defaultContextCacheTTL = 5 * time.Minute
 
 // ContextFileInterceptor routes context file reads/writes to the agent store.
-// Used in managed mode to keep SOUL.md, IDENTITY.md etc. in Postgres.
+// Keeps SOUL.md, IDENTITY.md etc. in Postgres.
 // Routes based on agent type: "open" → all per-user, "predefined" → only USER.md per-user.
 type ContextFileInterceptor struct {
 	agentStore       store.AgentStore
 	workspace        string // workspace root for matching absolute paths
-	mu               sync.RWMutex
-	cache            map[uuid.UUID]*contextCacheEntry // agent-level files
-	userCache        map[string]*contextCacheEntry     // "agentID:userID" → user files
-	maxEntries       int
+	agentCache       cache.Cache[[]store.AgentContextFileData] // agent-level files, keyed by agentID.String()
+	userCache        cache.Cache[[]store.AgentContextFileData] // user-level files, keyed by "agentID:userID"
 	ttl              time.Duration
 	groupWriterCache *store.GroupWriterCache // nil = use direct DB call (backward compat)
 }
 
 // NewContextFileInterceptor creates an interceptor backed by the given agent store.
-func NewContextFileInterceptor(as store.AgentStore, workspace string) *ContextFileInterceptor {
+// Cache implementations are injected (in-memory or Redis) so callers control the backend.
+func NewContextFileInterceptor(
+	as store.AgentStore,
+	workspace string,
+	agentCache, userCache cache.Cache[[]store.AgentContextFileData],
+) *ContextFileInterceptor {
 	return &ContextFileInterceptor{
 		agentStore: as,
 		workspace:  workspace,
-		cache:      make(map[uuid.UUID]*contextCacheEntry),
-		userCache:  make(map[string]*contextCacheEntry),
-		maxEntries: defaultContextCacheMax,
+		agentCache: agentCache,
+		userCache:  userCache,
 		ttl:        defaultContextCacheTTL,
 	}
 }
@@ -120,7 +115,7 @@ func (b *ContextFileInterceptor) ReadFile(ctx context.Context, path string) (str
 
 	agentID := store.AgentIDFromContext(ctx)
 	if agentID == uuid.Nil {
-		return "", false, nil // not in managed mode context
+		return "", false, nil // no agent context
 	}
 
 	userID := store.UserIDFromContext(ctx)
@@ -151,34 +146,37 @@ func (b *ContextFileInterceptor) ReadFile(ctx context.Context, path string) (str
 		return b.readAgentFile(ctx, agentID, fileName)
 	}
 
+	// Predefined agent: block reads of shared identity files (SOUL.md, IDENTITY.md, AGENTS.md).
+	// These are already injected into the system prompt — allowing read_file would let the
+	// agent echo their full contents to users, leaking persona configuration.
+	if agentType == store.AgentTypePredefined && fileName != bootstrap.UserFile && fileName != bootstrap.BootstrapFile {
+		return "", true, fmt.Errorf(
+			"this file (%s) is already loaded into your context. You don't need to read it again — refer to your system instructions instead.",
+			fileName,
+		)
+	}
+
 	// Default: agent-level
 	return b.readAgentFile(ctx, agentID, fileName)
 }
 
 func (b *ContextFileInterceptor) readAgentFile(ctx context.Context, agentID uuid.UUID, fileName string) (string, bool, error) {
-	// Check cache
-	b.mu.RLock()
-	if entry, ok := b.cache[agentID]; ok && time.Since(entry.loadedAt) < b.ttl {
-		b.mu.RUnlock()
-		for _, f := range entry.files {
+	key := agentID.String()
+	if files, ok := b.agentCache.Get(ctx, key); ok {
+		for _, f := range files {
 			if f.FileName == fileName {
 				return f.Content, true, nil
 			}
 		}
 		return "", true, nil // cached but file not found
 	}
-	b.mu.RUnlock()
 
-	// Cache miss or TTL expired → load from DB
+	// Cache miss → load from DB
 	files, err := b.agentStore.GetAgentContextFiles(ctx, agentID)
 	if err != nil {
 		return "", true, err
 	}
-
-	b.mu.Lock()
-	b.evictIfFull(b.cache)
-	b.cache[agentID] = &contextCacheEntry{files: files, loadedAt: time.Now()}
-	b.mu.Unlock()
+	b.agentCache.Set(ctx, key, files, b.ttl)
 
 	for _, f := range files {
 		if f.FileName == fileName {
@@ -189,20 +187,16 @@ func (b *ContextFileInterceptor) readAgentFile(ctx context.Context, agentID uuid
 }
 
 func (b *ContextFileInterceptor) readUserFile(ctx context.Context, agentID uuid.UUID, userID, fileName string) (string, bool, error) {
-	cacheKey := agentID.String() + ":" + userID
+	key := agentID.String() + ":" + userID
 
-	// Check cache
-	b.mu.RLock()
-	if entry, ok := b.userCache[cacheKey]; ok && time.Since(entry.loadedAt) < b.ttl {
-		b.mu.RUnlock()
-		for _, f := range entry.files {
+	if files, ok := b.userCache.Get(ctx, key); ok {
+		for _, f := range files {
 			if f.FileName == fileName {
 				return f.Content, true, nil
 			}
 		}
 		return "", true, nil
 	}
-	b.mu.RUnlock()
 
 	// Cache miss → load from DB
 	files, err := b.agentStore.GetUserContextFiles(ctx, agentID, userID)
@@ -219,10 +213,7 @@ func (b *ContextFileInterceptor) readUserFile(ctx context.Context, agentID uuid.
 			Content:  f.Content,
 		}
 	}
-
-	b.mu.Lock()
-	b.userCache[cacheKey] = &contextCacheEntry{files: cached, loadedAt: time.Now()}
-	b.mu.Unlock()
+	b.userCache.Set(ctx, key, cached, b.ttl)
 
 	for _, f := range files {
 		if f.FileName == fileName {
@@ -247,7 +238,7 @@ func (b *ContextFileInterceptor) WriteFile(ctx context.Context, path, content st
 
 	agentID := store.AgentIDFromContext(ctx)
 	if agentID == uuid.Nil {
-		return false, nil // not in managed mode context
+		return false, nil // no agent context
 	}
 
 	userID := store.UserIDFromContext(ctx)
@@ -426,24 +417,17 @@ func (b *ContextFileInterceptor) LoadContextFiles(ctx context.Context, agentID u
 
 // InvalidateAgent clears the cache for a specific agent (called from event handler).
 func (b *ContextFileInterceptor) InvalidateAgent(agentID uuid.UUID) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.cache, agentID)
+	ctx := context.Background()
+	b.agentCache.Delete(ctx, agentID.String())
 	// Also clear user caches for this agent
-	prefix := agentID.String() + ":"
-	for key := range b.userCache {
-		if strings.HasPrefix(key, prefix) {
-			delete(b.userCache, key)
-		}
-	}
+	b.userCache.DeleteByPrefix(ctx, agentID.String()+":")
 }
 
 // InvalidateAll clears all cached entries.
 func (b *ContextFileInterceptor) InvalidateAll() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.cache = make(map[uuid.UUID]*contextCacheEntry)
-	b.userCache = make(map[string]*contextCacheEntry)
+	ctx := context.Background()
+	b.agentCache.Clear(ctx)
+	b.userCache.Clear(ctx)
 }
 
 // hasBootstrapFile checks if BOOTSTRAP.md still exists in user_context_files,
@@ -455,29 +439,7 @@ func (b *ContextFileInterceptor) hasBootstrapFile(ctx context.Context, agentID u
 }
 
 func (b *ContextFileInterceptor) invalidateUser(agentID uuid.UUID, userID string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.userCache, agentID.String()+":"+userID)
-}
-
-// evictIfFull removes the oldest entry if the cache is at capacity.
-// Must be called with b.mu held for writing.
-func (b *ContextFileInterceptor) evictIfFull(cache map[uuid.UUID]*contextCacheEntry) {
-	if len(cache) < b.maxEntries {
-		return
-	}
-	// Find oldest entry
-	var oldestID uuid.UUID
-	var oldestTime time.Time
-	first := true
-	for id, entry := range cache {
-		if first || entry.loadedAt.Before(oldestTime) {
-			oldestID = id
-			oldestTime = entry.loadedAt
-			first = false
-		}
-	}
-	delete(cache, oldestID)
+	b.userCache.Delete(context.Background(), agentID.String()+":"+userID)
 }
 
 // normalizeToRelative strips the workspace prefix from an absolute path,

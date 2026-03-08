@@ -7,7 +7,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { useHttp } from "@/hooks/use-ws";
 import { useWsEvent } from "@/hooks/use-ws-event";
 
 interface SummoningModalProps {
@@ -16,11 +15,15 @@ interface SummoningModalProps {
   agentId: string;
   agentName: string;
   onCompleted: () => void;
+  onResummon: (agentId: string) => Promise<void>;
+  hideClose?: boolean;
+  onContinue?: () => void;
 }
 
 const SUMMONING_FILES = [
-  { name: "SOUL.md", label: "Soul & Personality" },
-  { name: "IDENTITY.md", label: "Identity Card" },
+  { name: "SOUL.md", label: "Soul & Personality", required: true },
+  { name: "IDENTITY.md", label: "Identity Card", required: true },
+  { name: "USER_PREDEFINED.md", label: "Default User Context", required: false },
 ];
 
 export function SummoningModal({
@@ -29,8 +32,10 @@ export function SummoningModal({
   agentId,
   agentName,
   onCompleted,
+  onResummon,
+  hideClose = false,
+  onContinue,
 }: SummoningModalProps) {
-  const http = useHttp();
   const [generatedFiles, setGeneratedFiles] = useState<string[]>([]);
   const [status, setStatus] = useState<"summoning" | "completed" | "failed">("summoning");
   const [errorMsg, setErrorMsg] = useState("");
@@ -58,7 +63,9 @@ export function SummoningModal({
         );
       }
       if (data.type === "completed") {
-        setGeneratedFiles(SUMMONING_FILES.map((f) => f.name));
+        // Mark required files as done (safety net); optional files only if actually generated
+        const required = SUMMONING_FILES.filter((f) => f.required).map((f) => f.name);
+        setGeneratedFiles((prev) => [...new Set([...prev, ...required])]);
         setStatus("completed");
         onCompleted();
       }
@@ -76,7 +83,7 @@ export function SummoningModal({
   const handleRetry = async () => {
     setRetrying(true);
     try {
-      await http.post(`/v1/agents/${agentId}/resummon`);
+      await onResummon(agentId);
       setGeneratedFiles([]);
       setStatus("summoning");
       setErrorMsg("");
@@ -89,7 +96,7 @@ export function SummoningModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md" overlayTransparent onInteractOutside={(e) => { if (status === "summoning") e.preventDefault(); }}>
+      <DialogContent className="sm:max-w-md" showCloseButton={!hideClose} overlayTransparent onInteractOutside={(e) => { if (hideClose || status === "summoning") e.preventDefault(); }}>
         <DialogHeader>
           <DialogTitle className="text-center">
             {status === "completed"
@@ -206,6 +213,12 @@ export function SummoningModal({
             <p className="text-center text-xs text-muted-foreground">
               This usually takes few minutes. Please wait...
             </p>
+          )}
+
+          {status === "completed" && onContinue && (
+            <Button size="sm" onClick={onContinue}>
+              Continue
+            </Button>
           )}
 
           {status === "failed" && (

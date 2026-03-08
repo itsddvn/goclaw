@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router";
 import { AppLayout } from "@/components/layout/app-layout";
 import { RequireAuth } from "@/components/shared/require-auth";
+import { RequireSetup } from "@/components/shared/require-setup";
 import { ROUTES } from "@/lib/constants";
 
 // Lazy-loaded pages
@@ -65,8 +66,14 @@ const BuiltinToolsPage = lazy(() =>
 const TtsPage = lazy(() =>
   import("@/pages/tts/tts-page").then((m) => ({ default: m.TtsPage })),
 );
+const EventsPage = lazy(() =>
+  import("@/pages/events/events-page").then((m) => ({ default: m.EventsPage })),
+);
 const DelegationsPage = lazy(() =>
   import("@/pages/delegations/delegations-page").then((m) => ({ default: m.DelegationsPage })),
+);
+const SetupPage = lazy(() =>
+  import("@/pages/setup/setup-page").then((m) => ({ default: m.SetupPage })),
 );
 
 function PageLoader() {
@@ -83,10 +90,23 @@ export function AppRoutes() {
       <Routes>
         <Route path={ROUTES.LOGIN} element={<LoginPage />} />
 
+        {/* Setup wizard — standalone layout, requires auth but no sidebar */}
+        <Route
+          path={ROUTES.SETUP}
+          element={
+            <RequireAuth>
+              <SetupPage />
+            </RequireAuth>
+          }
+        />
+
+        {/* Main app — requires auth + setup complete */}
         <Route
           element={
             <RequireAuth>
-              <AppLayout />
+              <RequireSetup>
+                <AppLayout />
+              </RequireSetup>
             </RequireAuth>
           }
         >
@@ -106,6 +126,7 @@ export function AppRoutes() {
           <Route path={ROUTES.CONFIG} element={<ConfigPage />} />
           <Route path={ROUTES.TRACES} element={<TracesPage key="list" />} />
           <Route path={ROUTES.TRACE_DETAIL} element={<TracesPage key="detail" />} />
+          <Route path={ROUTES.EVENTS} element={<EventsPage />} />
           <Route path={ROUTES.DELEGATIONS} element={<DelegationsPage />} />
           <Route path={ROUTES.USAGE} element={<UsagePage />} />
           <Route path={ROUTES.CHANNELS} element={<ChannelsPage key="list" />} />

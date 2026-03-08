@@ -10,7 +10,7 @@ import { ChannelCredentialsTab } from "./channel-credentials-tab";
 import { ChannelConfigTab } from "./channel-config-tab";
 import { ChannelGroupsTab } from "./channel-groups-tab";
 import { ChannelWritersTab } from "./channel-writers-tab";
-import { DeferredSpinner } from "@/components/shared/loading-skeleton";
+import { DetailPageSkeleton } from "@/components/shared/loading-skeleton";
 import { channelTypeLabels } from "../channels-status-view";
 import { useChannels } from "../hooks/use-channels";
 
@@ -34,14 +34,7 @@ export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps
   const [activeTab, setActiveTab] = useState("general");
 
   if (loading || !instance) {
-    return (
-      <div className="p-6">
-        <Button variant="ghost" onClick={onBack} className="mb-4 gap-1">
-          <ArrowLeft className="h-4 w-4" /> Back
-        </Button>
-        <DeferredSpinner />
-      </div>
-    );
+    return <DetailPageSkeleton tabs={4} />;
   }
 
   const status = channels[instance.name] ?? null;
@@ -53,7 +46,7 @@ export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps
   const isTelegram = instance.channel_type === "telegram";
 
   return (
-    <div className="p-6">
+    <div className="p-4 sm:p-6">
       {/* Header */}
       <div className="mb-6 flex items-start gap-4">
         <Button variant="ghost" size="icon" onClick={onBack} className="mt-0.5 shrink-0">
@@ -93,9 +86,9 @@ export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps
       </div>
 
       {/* Tabs */}
-      <div className="rounded-xl border bg-card p-4 shadow-sm">
+      <div className="max-w-4xl rounded-xl border bg-card p-3 shadow-sm sm:p-4">
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList>
+          <TabsList className="w-full justify-start overflow-x-auto overflow-y-hidden">
             <TabsTrigger value="general">General</TabsTrigger>
             <TabsTrigger value="credentials">Credentials</TabsTrigger>
             <TabsTrigger value="config">Config</TabsTrigger>

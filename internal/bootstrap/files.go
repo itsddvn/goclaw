@@ -8,7 +8,6 @@
 //	USER.md    — user profile
 //	IDENTITY.md— agent name, emoji, creature, vibe
 //	TOOLS.md   — local tool notes
-//	HEARTBEAT.md— periodic check tasks
 //	BOOTSTRAP.md— first-run ritual (deleted after completion)
 //	MEMORY.md  — long-term curated memory
 package bootstrap
@@ -21,13 +20,13 @@ import (
 
 // Bootstrap filenames (matching TS workspace.ts constants).
 const (
-	AgentsFile    = "AGENTS.md"
-	SoulFile      = "SOUL.md"
-	ToolsFile     = "TOOLS.md"
-	IdentityFile  = "IDENTITY.md"
-	UserFile      = "USER.md"
-	HeartbeatFile = "HEARTBEAT.md"
-	BootstrapFile = "BOOTSTRAP.md"
+	AgentsFile         = "AGENTS.md"
+	SoulFile           = "SOUL.md"
+	ToolsFile          = "TOOLS.md"
+	IdentityFile       = "IDENTITY.md"
+	UserFile           = "USER.md"
+	UserPredefinedFile = "USER_PREDEFINED.md"
+	BootstrapFile      = "BOOTSTRAP.md"
 	DelegationFile   = "DELEGATION.md"
 	TeamFile         = "TEAM.md"
 	AvailabilityFile = "AVAILABILITY.md"
@@ -43,7 +42,6 @@ var standardFiles = []string{
 	ToolsFile,
 	IdentityFile,
 	UserFile,
-	HeartbeatFile,
 	BootstrapFile,
 }
 

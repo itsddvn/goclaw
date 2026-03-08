@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+import { Circle } from "lucide-react";
 import { MessageBubble } from "@/components/chat/message-bubble";
 import { StreamingText } from "@/components/chat/streaming-text";
 import { ToolCallCard } from "@/components/chat/tool-call-card";
@@ -13,6 +15,7 @@ interface ChatThreadProps {
   toolStream: ToolStreamEntry[];
   isRunning: boolean;
   loading?: boolean;
+  scrollTrigger?: number;
 }
 
 export function ChatThread({
@@ -22,10 +25,26 @@ export function ChatThread({
   toolStream,
   isRunning,
   loading,
+  scrollTrigger = 0,
 }: ChatThreadProps) {
   const { ref, onScroll } = useAutoScroll<HTMLDivElement>(
     [messages.length, streamText, thinkingText, toolStream.length],
+    100,
+    scrollTrigger,
   );
+
+  // Build map of tool_call_id → error content for tool results that indicate errors
+  const toolCallErrors = useMemo(() => {
+    const errors = new Map<string, string>();
+    for (const msg of messages) {
+      if (msg.role !== "tool" || !msg.tool_call_id || !msg.content) continue;
+      const c = msg.content.trimStart();
+      if (c.startsWith("Error") || c.startsWith("error:") || c.includes("failed:") || c.includes("Failed:")) {
+        errors.set(msg.tool_call_id, msg.content);
+      }
+    }
+    return errors;
+  }, [messages]);
 
   // Show spinner while loading history for a different session
   if (loading) {
@@ -53,7 +72,7 @@ export function ChatThread({
     >
       <div className="mx-auto max-w-3xl space-y-4">
         {messages.map((msg, i) => (
-          <MessageBubble key={`${msg.role}-${i}`} message={msg} />
+          <MessageBubble key={`${msg.role}-${i}`} message={msg} toolCallErrors={toolCallErrors} />
         ))}
 
         {/* Tool stream during active run */}
@@ -67,18 +86,14 @@ export function ChatThread({
 
         {/* Thinking block (extended thinking / reasoning) */}
         {isRunning && thinkingText && (
-          <div className="mx-auto max-w-[80%]">
-            <ThinkingBlock text={thinkingText} isStreaming={streamText === null} />
-          </div>
+          <ThinkingBlock text={thinkingText} isStreaming={streamText === null} />
         )}
 
         {/* Streaming text */}
         {isRunning && streamText !== null && (
           <div className="flex gap-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border bg-background">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z" />
-              </svg>
+              <Circle className="h-4 w-4" />
             </div>
             <div className="max-w-[80%] rounded-lg bg-muted px-4 py-2">
               <StreamingText text={streamText} />
@@ -90,9 +105,7 @@ export function ChatThread({
         {isRunning && streamText === null && !thinkingText && toolStream.length === 0 && (
           <div className="flex gap-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border bg-background">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z" />
-              </svg>
+              <Circle className="h-4 w-4" />
             </div>
             <div className="rounded-lg bg-muted px-4 py-2">
               <ThinkingIndicator />

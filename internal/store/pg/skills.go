@@ -3,14 +3,18 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -60,7 +64,7 @@ func (s *PGSkillStore) ListSkills() []store.SkillInfo {
 
 	// Cache miss or TTL expired → query DB
 	rows, err := s.db.Query(
-		`SELECT name, slug, description, version FROM skills WHERE status = 'active' ORDER BY name`)
+		`SELECT id, name, slug, description, visibility, tags, version FROM skills WHERE status = 'active' ORDER BY name`)
 	if err != nil {
 		return nil
 	}
@@ -68,13 +72,18 @@ func (s *PGSkillStore) ListSkills() []store.SkillInfo {
 
 	var result []store.SkillInfo
 	for rows.Next() {
-		var name, slug string
+		var id uuid.UUID
+		var name, slug, visibility string
 		var desc *string
+		var tags []string
 		var version int
-		if err := rows.Scan(&name, &slug, &desc, &version); err != nil {
+		if err := rows.Scan(&id, &name, &slug, &desc, &visibility, pq.Array(&tags), &version); err != nil {
 			continue
 		}
-		result = append(result, buildSkillInfo(name, slug, desc, version, s.baseDir))
+		info := buildSkillInfo(id.String(), name, slug, desc, version, s.baseDir)
+		info.Visibility = visibility
+		info.Tags = tags
+		result = append(result, info)
 	}
 
 	s.mu.Lock()
@@ -146,16 +155,20 @@ func (s *PGSkillStore) BuildSummary(allowList []string) string {
 }
 
 func (s *PGSkillStore) GetSkill(name string) (*store.SkillInfo, bool) {
-	var skillName, slug string
+	var id uuid.UUID
+	var skillName, slug, visibility string
 	var desc *string
+	var tags []string
 	var version int
 	err := s.db.QueryRow(
-		"SELECT name, slug, description, version FROM skills WHERE slug = $1 AND status = 'active'", name,
-	).Scan(&skillName, &slug, &desc, &version)
+		"SELECT id, name, slug, description, visibility, tags, version FROM skills WHERE slug = $1 AND status = 'active'", name,
+	).Scan(&id, &skillName, &slug, &desc, &visibility, pq.Array(&tags), &version)
 	if err != nil {
 		return nil, false
 	}
-	info := buildSkillInfo(skillName, slug, desc, version, s.baseDir)
+	info := buildSkillInfo(id.String(), skillName, slug, desc, version, s.baseDir)
+	info.Visibility = visibility
+	info.Tags = tags
 	return &info, true
 }
 
@@ -180,9 +193,9 @@ func (s *PGSkillStore) FilterSkills(allowList []string) []store.SkillInfo {
 	return filtered
 }
 
-func (s *PGSkillStore) Version() int64   { return s.version.Load() }
-func (s *PGSkillStore) BumpVersion()     { s.version.Store(time.Now().UnixMilli()) }
-func (s *PGSkillStore) Dirs() []string   { return []string{s.baseDir} }
+func (s *PGSkillStore) Version() int64 { return s.version.Load() }
+func (s *PGSkillStore) BumpVersion()   { s.version.Store(time.Now().UnixMilli()) }
+func (s *PGSkillStore) Dirs() []string { return []string{s.baseDir} }
 
 // --- CRUD for managed skill upload ---
 
@@ -208,8 +221,28 @@ func (s *PGSkillStore) UpdateSkill(id uuid.UUID, updates map[string]interface{})
 }
 
 func (s *PGSkillStore) DeleteSkill(id uuid.UUID) error {
-	_, err := s.db.Exec("UPDATE skills SET status = 'archived' WHERE id = $1", id)
+	tx, err := s.db.Begin()
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Cascade: remove all agent grants for this skill
+	if _, err := tx.Exec("DELETE FROM skill_agent_grants WHERE skill_id = $1", id); err != nil {
+		return fmt.Errorf("delete skill grants: %w", err)
+	}
+
+	// Cascade: remove all user grants for this skill
+	if _, err := tx.Exec("DELETE FROM skill_user_grants WHERE skill_id = $1", id); err != nil {
+		return fmt.Errorf("delete skill user grants: %w", err)
+	}
+
+	// Soft-delete the skill itself
+	if _, err := tx.Exec("UPDATE skills SET status = 'archived' WHERE id = $1", id); err != nil {
+		return fmt.Errorf("archive skill: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.BumpVersion()
@@ -227,6 +260,7 @@ type SkillCreateParams struct {
 	FilePath    string
 	FileSize    int64
 	FileHash    *string
+	Frontmatter map[string]string // parsed YAML frontmatter from SKILL.md
 }
 
 // CreateSkillManaged creates a skill from upload parameters.
@@ -235,15 +269,25 @@ func (s *PGSkillStore) CreateSkillManaged(ctx context.Context, p SkillCreatePara
 		return uuid.Nil, err
 	}
 	id := store.GenNewID()
+	// Marshal frontmatter to JSON for DB storage
+	fmJSON := []byte("{}")
+	if len(p.Frontmatter) > 0 {
+		if b, err := json.Marshal(p.Frontmatter); err == nil {
+			fmJSON = b
+		}
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO skills (id, name, slug, description, owner_id, visibility, version, status, file_path, file_size, file_hash, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9, $10, NOW(), NOW())
+		`INSERT INTO skills (id, name, slug, description, owner_id, visibility, version, status, frontmatter, file_path, file_size, file_hash, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9, $10, $11, NOW(), NOW())
 		 ON CONFLICT (slug) DO UPDATE SET
-		   version = EXCLUDED.version, file_path = EXCLUDED.file_path,
+		   name = EXCLUDED.name, description = EXCLUDED.description,
+		   version = EXCLUDED.version, frontmatter = EXCLUDED.frontmatter,
+		   file_path = EXCLUDED.file_path,
 		   file_size = EXCLUDED.file_size, file_hash = EXCLUDED.file_hash,
-		   updated_at = NOW()`,
+		   visibility = CASE WHEN skills.status = 'archived' THEN 'private' ELSE skills.visibility END,
+		   status = 'active', updated_at = NOW()`,
 		id, p.Name, p.Slug, p.Description, p.OwnerID, p.Visibility, p.Version,
-		p.FilePath, p.FileSize, p.FileHash,
+		fmJSON, p.FilePath, p.FileSize, p.FileHash,
 	)
 	if err == nil {
 		s.BumpVersion()
@@ -255,6 +299,14 @@ func (s *PGSkillStore) CreateSkillManaged(ctx context.Context, p SkillCreatePara
 		go s.generateEmbedding(context.Background(), p.Slug, p.Name, desc)
 	}
 	return id, err
+}
+
+// GetSkillFilePath returns the filesystem path and version for a skill by UUID.
+func (s *PGSkillStore) GetSkillFilePath(id uuid.UUID) (filePath string, slug string, version int, ok bool) {
+	err := s.db.QueryRow(
+		"SELECT file_path, slug, version FROM skills WHERE id = $1 AND status = 'active'", id,
+	).Scan(&filePath, &slug, &version)
+	return filePath, slug, version, err == nil
 }
 
 // GetNextVersion returns the next version number for a skill slug.
@@ -283,6 +335,7 @@ func (s *PGSkillStore) SearchByEmbedding(ctx context.Context, embedding []float3
 				1 - (embedding <=> $1::vector) AS score
 			FROM skills
 			WHERE status = 'active' AND embedding IS NOT NULL
+			  AND visibility != 'private'
 			ORDER BY embedding <=> $2::vector
 			LIMIT $3`,
 		vecStr, vecStr, limit,
@@ -392,20 +445,25 @@ func (s *PGSkillStore) generateEmbedding(ctx context.Context, slug, name, descri
 
 // --- Helpers ---
 
-func buildSkillInfo(name, slug string, desc *string, version int, baseDir string) store.SkillInfo {
+func buildSkillInfo(id, name, slug string, desc *string, version int, baseDir string) store.SkillInfo {
 	d := ""
 	if desc != nil {
 		d = *desc
 	}
 	return store.SkillInfo{
+		ID:          id,
 		Name:        name,
 		Slug:        slug,
 		Path:        fmt.Sprintf("%s/%s/%d/SKILL.md", baseDir, slug, version),
 		BaseDir:     fmt.Sprintf("%s/%s/%d", baseDir, slug, version),
 		Source:      "managed",
 		Description: d,
+		Version:     version,
 	}
 }
+
+// skillFrontmatterRe matches YAML frontmatter (--- delimited) at the start of a file.
+var skillFrontmatterRe = regexp.MustCompile(`(?s)^---\n(.*?)\n---\n?`)
 
 func readSkillContent(baseDir, slug string, version int) (string, error) {
 	path := fmt.Sprintf("%s/%s/%d/SKILL.md", baseDir, slug, version)
@@ -413,5 +471,9 @@ func readSkillContent(baseDir, slug string, version int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	// Normalize line endings (Windows CRLF → LF) and strip frontmatter
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	content = skillFrontmatterRe.ReplaceAllString(content, "")
+	return content, nil
 }

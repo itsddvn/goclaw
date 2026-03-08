@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -150,32 +151,64 @@ func readZipFile(f *zip.File) (string, error) {
 }
 
 // parseSkillFrontmatter extracts name, description, and slug from SKILL.md YAML frontmatter.
-func parseSkillFrontmatter(content string) (name, description, slug string) {
+// Also returns the full parsed frontmatter as a map for DB storage.
+func parseSkillFrontmatter(content string) (name, description, slug string, allFields map[string]string) {
+	allFields = make(map[string]string)
 	if !strings.HasPrefix(content, "---") {
-		return "", "", ""
+		return "", "", "", allFields
 	}
 	end := strings.Index(content[3:], "---")
 	if end < 0 {
-		return "", "", ""
+		return "", "", "", allFields
 	}
 	fm := content[3 : 3+end]
 
 	for _, line := range strings.Split(fm, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "name:") {
-			name = strings.TrimSpace(strings.TrimPrefix(line, "name:"))
-			name = strings.Trim(name, `"'`)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
-		if strings.HasPrefix(line, "description:") {
-			description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
-			description = strings.Trim(description, `"'`)
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
 		}
-		if strings.HasPrefix(line, "slug:") {
-			slug = strings.TrimSpace(strings.TrimPrefix(line, "slug:"))
-			slug = strings.Trim(slug, `"'`)
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, `"'`)
+		allFields[key] = val
+
+		switch key {
+		case "name":
+			name = val
+		case "description":
+			description = val
+		case "slug":
+			slug = val
 		}
 	}
 	return
+}
+
+// isSystemArtifact returns true for OS-generated junk that should be skipped
+// during ZIP extraction and file listing (e.g. __MACOSX, .DS_Store, Thumbs.db).
+func isSystemArtifact(name string) bool {
+	base := filepath.Base(name)
+	// macOS resource fork / metadata folders and files
+	if base == "__MACOSX" || strings.HasPrefix(base, "._") {
+		return true
+	}
+	// Check if any path component is __MACOSX
+	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
+		if part == "__MACOSX" {
+			return true
+		}
+	}
+	// Common OS junk files
+	switch base {
+	case ".DS_Store", "Thumbs.db", "desktop.ini", ".Spotlight-V100", ".Trashes", ".fseventsd":
+		return true
+	}
+	return false
 }
 
 func slugify(name string) string {

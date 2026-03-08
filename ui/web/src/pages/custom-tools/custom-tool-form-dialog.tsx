@@ -90,12 +90,12 @@ export function CustomToolFormDialog({ open, onOpenChange, tool, onSubmit }: Cus
 
   return (
     <Dialog open={open} onOpenChange={(v) => !loading && onOpenChange(v)}>
-      <DialogContent className="max-h-[85vh] max-w-lg flex flex-col">
+      <DialogContent className="max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>{tool ? "Edit Tool" : "Create Custom Tool"}</DialogTitle>
         </DialogHeader>
 
-        <div className="grid gap-4 py-2 overflow-y-auto min-h-0">
+        <div className="grid gap-4 py-2 px-0.5 -mx-0.5 overflow-y-auto min-h-0">
           <div className="grid gap-1.5">
             <Label htmlFor="ct-name">Name *</Label>
             <Input id="ct-name" value={name} onChange={(e) => setName(slugify(e.target.value))} placeholder="my-tool" />
@@ -132,7 +132,7 @@ export function CustomToolFormDialog({ open, onOpenChange, tool, onSubmit }: Cus
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label htmlFor="ct-wd">Working Directory</Label>
               <Input id="ct-wd" value={workingDir} onChange={(e) => setWorkingDir(e.target.value)} placeholder="/path/to/dir" />

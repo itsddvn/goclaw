@@ -12,14 +12,14 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
-func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore store.SessionStore, cronStore store.CronStore, pairingStore store.PairingStore, cfg *config.Config, cfgPath, workspace, dataDir string, msgBus *bus.MessageBus, execApprovalMgr *tools.ExecApprovalManager, agentStore store.AgentStore, isManaged bool, skillStore store.SkillStore, configSecretsStore store.ConfigSecretsStore, teamStore store.TeamStore, contextFileInterceptor *tools.ContextFileInterceptor) *methods.PairingMethods {
+func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore store.SessionStore, cronStore store.CronStore, pairingStore store.PairingStore, cfg *config.Config, cfgPath, workspace, dataDir string, msgBus *bus.MessageBus, execApprovalMgr *tools.ExecApprovalManager, agentStore store.AgentStore, skillStore store.SkillStore, configSecretsStore store.ConfigSecretsStore, teamStore store.TeamStore, contextFileInterceptor *tools.ContextFileInterceptor, logTee *gateway.LogTee) *methods.PairingMethods {
 	router := server.Router()
 
 	// Phase 1: Core methods
-	methods.NewChatMethods(agents, sessStore, isManaged, server.RateLimiter()).Register(router)
-	methods.NewAgentsMethods(agents, cfg, cfgPath, workspace, agentStore, isManaged, contextFileInterceptor).Register(router)
+	methods.NewChatMethods(agents, sessStore, server.RateLimiter()).Register(router)
+	methods.NewAgentsMethods(agents, cfg, cfgPath, workspace, agentStore, contextFileInterceptor).Register(router)
 	methods.NewSessionsMethods(sessStore).Register(router)
-	methods.NewConfigMethods(cfg, cfgPath, isManaged, configSecretsStore).Register(router)
+	methods.NewConfigMethods(cfg, cfgPath, configSecretsStore, msgBus).Register(router)
 
 	// Phase 2: Skills (uses SkillStore interface — PG or File)
 	methods.NewSkillsMethods(skillStore).Register(router)
@@ -29,7 +29,7 @@ func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore 
 
 	// Phase 2: Pairing (store created externally, shared with channel manager).
 	// OnApprove callback is set later by the caller after channel manager is created.
-	pairingMethods := methods.NewPairingMethods(pairingStore)
+	pairingMethods := methods.NewPairingMethods(pairingStore, msgBus)
 	pairingMethods.Register(router)
 
 	// Phase 2: Usage (queries SessionStore for real token data)
@@ -41,7 +41,10 @@ func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore 
 	// Phase 2: Send (outbound message routing)
 	methods.NewSendMethods(msgBus).Register(router)
 
-	// Phase 4: Delegation history (managed mode only)
+	// Phase 3: Live log tailing
+	methods.NewLogsMethods(logTee).Register(router)
+
+	// Phase 4: Delegation history
 	if teamStore != nil {
 		methods.NewDelegationsMethods(teamStore).Register(router)
 	}

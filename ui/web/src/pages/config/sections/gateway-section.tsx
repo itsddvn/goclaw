@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { InfoLabel } from "@/components/shared/info-label";
@@ -17,6 +18,7 @@ interface GatewayData {
   rate_limit_rpm?: number;
   injection_action?: string;
   inbound_debounce_ms?: number;
+  block_reply?: boolean;
 }
 
 const DEFAULT: GatewayData = {};
@@ -63,7 +65,7 @@ export function GatewaySection({ data, onSave, saving }: Props) {
         <CardDescription>WebSocket & HTTP server settings, security</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div className="grid gap-1.5">
             <InfoLabel tip="IP address to bind the server. Use 0.0.0.0 to accept connections from any interface.">Host</InfoLabel>
             <Input
@@ -96,7 +98,7 @@ export function GatewaySection({ data, onSave, saving }: Props) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="grid gap-1.5">
             <InfoLabel tip="Sender IDs with admin privileges. These users bypass rate limits and can manage configuration.">Owner IDs</InfoLabel>
             <TagInput
@@ -115,7 +117,7 @@ export function GatewaySection({ data, onSave, saving }: Props) {
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div className="grid gap-1.5">
             <InfoLabel tip="Maximum characters per inbound message. Messages exceeding this are rejected.">Max Message Chars</InfoLabel>
             <Input
@@ -158,6 +160,12 @@ export function GatewaySection({ data, onSave, saving }: Props) {
                 <SelectItem value="block">Block</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          <div className="grid gap-1.5">
+            <InfoLabel tip="Deliver intermediate assistant text to non-streaming channels during tool iterations. Each assistant block is sent before tool execution.">Block Reply</InfoLabel>
+            <div className="flex items-center h-9">
+              <Switch checked={draft.block_reply ?? false} onCheckedChange={(v) => update({ block_reply: v })} />
+            </div>
           </div>
         </div>
 

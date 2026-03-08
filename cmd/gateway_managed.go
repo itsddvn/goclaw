@@ -11,6 +11,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/hooks"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
+	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
@@ -21,13 +22,13 @@ import (
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
-// wireManagedExtras wires managed-mode components that require PG stores:
+// wireExtras wires components that require PG stores:
 // agent resolver (lazy-creates Loops from DB), virtual FS interceptors, memory tools,
 // and cache invalidation event subscribers.
 // PG store creation and tracing are handled in gateway.go before this is called.
 // Returns the ContextFileInterceptor so callers can pass it to AgentsMethods
 // for immediate cache invalidation on agents.files.set.
-func wireManagedExtras(
+func wireExtras(
 	stores *store.Stores,
 	agentRouter *agent.Router,
 	providerReg *providers.Registry,
@@ -43,17 +44,22 @@ func wireManagedExtras(
 	appCfg *config.Config,
 	sandboxMgr sandbox.Manager,
 	dynamicLoader *tools.DynamicToolLoader,
-) *tools.ContextFileInterceptor {
-	// 1. Context file interceptor (created before resolver so callbacks can reference it)
+	redisClient any, // nil when built without -tags redis or when Redis is unconfigured
+) (*tools.ContextFileInterceptor, *tools.DelegateManager, *mcpbridge.Pool) {
+	// 1. Build cache instances (in-memory or Redis depending on build tags)
+	agentCtxCache, userCtxCache, gwCache := makeCaches(redisClient)
+
+	// 1a. Context file interceptor (created before resolver so callbacks can reference it)
 	var contextFileInterceptor *tools.ContextFileInterceptor
+	var delegateMgr *tools.DelegateManager
 	if stores.Agents != nil {
-		contextFileInterceptor = tools.NewContextFileInterceptor(stores.Agents, workspace)
+		contextFileInterceptor = tools.NewContextFileInterceptor(stores.Agents, workspace, agentCtxCache, userCtxCache)
 	}
 
 	// 1b. Group writer cache (wraps ListGroupFileWriters with TTL cache)
 	var groupWriterCache *store.GroupWriterCache
 	if stores.Agents != nil {
-		groupWriterCache = store.NewGroupWriterCache(stores.Agents)
+		groupWriterCache = store.NewGroupWriterCache(stores.Agents, gwCache)
 	}
 
 	// 2. User seeding callback: seeds per-user context files on first chat
@@ -81,21 +87,33 @@ func wireManagedExtras(
 		}
 	}
 
-	// 5. Set up agent resolver: lazy-creates Loops from DB
+	// 5. Shared MCP connection pool (eliminates duplicate connections across agents)
+	var mcpPool *mcpbridge.Pool
+	if stores.MCP != nil {
+		mcpPool = mcpbridge.NewPool()
+	}
+
+	// 6. Set up agent resolver: lazy-creates Loops from DB
+	var skillAccessStore store.SkillAccessStore
+	if sas, ok := stores.Skills.(store.SkillAccessStore); ok {
+		skillAccessStore = sas
+	}
+
 	resolver := agent.NewManagedResolver(agent.ResolverDeps{
-		AgentStore:        stores.Agents,
-		ProviderReg:       providerReg,
-		Bus:               msgBus,
-		Sessions:          sessStore,
-		Tools:             toolsReg,
-		ToolPolicy:        toolPE,
-		Skills:            skillsLoader,
-		HasMemory:         hasMemory,
-		TraceCollector:    traceCollector,
-		EnsureUserFiles:   ensureUserFiles,
-		ContextFileLoader: contextFileLoader,
-		BootstrapCleanup:  buildBootstrapCleanup(stores.Agents),
-		InjectionAction:   injectionAction,
+		AgentStore:             stores.Agents,
+		ProviderReg:            providerReg,
+		Bus:                    msgBus,
+		Sessions:               sessStore,
+		Tools:                  toolsReg,
+		ToolPolicy:             toolPE,
+		Skills:                 skillsLoader,
+		SkillAccessStore:       skillAccessStore,
+		HasMemory:              hasMemory,
+		TraceCollector:         traceCollector,
+		EnsureUserFiles:        ensureUserFiles,
+		ContextFileLoader:      contextFileLoader,
+		BootstrapCleanup:       buildBootstrapCleanup(stores.Agents),
+		InjectionAction:        injectionAction,
 		MaxMessageChars:        appCfg.Gateway.MaxMessageChars,
 		CompactionCfg:          appCfg.Agents.Defaults.Compaction,
 		ContextPruningCfg:      appCfg.Agents.Defaults.ContextPruning,
@@ -106,6 +124,8 @@ func wireManagedExtras(
 		AgentLinkStore:         stores.AgentLinks,
 		TeamStore:              stores.Teams,
 		BuiltinToolStore:       stores.BuiltinTools,
+		MCPStore:               stores.MCP,
+		MCPPool:                mcpPool,
 		GroupWriterCache:       groupWriterCache,
 		OnEvent: func(event agent.AgentEvent) {
 			msgBus.Broadcast(bus.Event{
@@ -149,8 +169,15 @@ func wireManagedExtras(
 			}
 		}
 	}
+	if listTool, ok := toolsReg.Get("list_files"); ok {
+		if ia, ok := listTool.(tools.InterceptorAware); ok {
+			if stores.Memory != nil {
+				ia.SetMemoryInterceptor(tools.NewMemoryInterceptor(stores.Memory, workspace))
+			}
+		}
+	}
 
-	// Wire group writer cache for permission checks (managed mode only)
+	// Wire group writer cache for permission checks
 	if groupWriterCache != nil {
 		for _, toolName := range []string{"read_file", "write_file", "edit", "cron"} {
 			if t, ok := toolsReg.Get(toolName); ok {
@@ -244,6 +271,18 @@ func wireManagedExtras(
 		agentRouter.InvalidateAll()
 	})
 
+	// MCP cache: invalidate all agent caches when MCP servers/grants change
+	msgBus.Subscribe(bus.TopicCacheMCP, func(event bus.Event) {
+		if event.Name != protocol.EventCacheInvalidate {
+			return
+		}
+		payload, ok := event.Payload.(bus.CacheInvalidatePayload)
+		if !ok || payload.Kind != bus.CacheKindMCP {
+			return
+		}
+		agentRouter.InvalidateAll()
+	})
+
 	// Cron cache: invalidate job cache on cron changes
 	if ci, ok := stores.Cron.(store.CacheInvalidatable); ok {
 		msgBus.Subscribe(bus.TopicCacheCron, func(event bus.Event) {
@@ -309,6 +348,11 @@ func wireManagedExtras(
 				Stream:            req.Stream,
 				ExtraSystemPrompt: req.ExtraSystemPrompt,
 				MaxIterations:     req.MaxIterations,
+				RunKind:           "delegation",
+				DelegationID:      req.DelegationID,
+				TeamID:            req.TeamID,
+				TeamTaskID:        req.TeamTaskID,
+				ParentAgentID:     req.ParentAgentID,
 			})
 			if err != nil {
 				return nil, err
@@ -323,7 +367,7 @@ func wireManagedExtras(
 			}
 			return dr, nil
 		}
-		delegateMgr := tools.NewDelegateManager(runAgentFn, stores.AgentLinks, stores.Agents, msgBus)
+		delegateMgr = tools.NewDelegateManager(runAgentFn, stores.AgentLinks, stores.Agents, msgBus)
 		if stores.Teams != nil {
 			delegateMgr.SetTeamStore(stores.Teams)
 		}
@@ -365,7 +409,7 @@ func wireManagedExtras(
 			if embProvider := resolveEmbeddingProvider(appCfg, memCfg); embProvider != nil {
 				agentStore.SetEmbeddingProvider(embProvider)
 				delegateEmbProvider = embProvider
-				slog.Info("managed mode: agent embeddings enabled")
+				slog.Info("agent embeddings enabled")
 
 				// Backfill embeddings for existing agents with frontmatter
 				go func() {
@@ -379,12 +423,15 @@ func wireManagedExtras(
 			}
 		}
 		toolsReg.Register(tools.NewDelegateSearchTool(stores.AgentLinks, delegateEmbProvider))
-		slog.Info("managed mode: delegate + delegate_search tools registered")
+		slog.Info("delegate + delegate_search tools registered")
 	}
 
 	// Register team tools (team_tasks + team_message) if team store is available.
 	if stores.Teams != nil && stores.Agents != nil {
 		teamMgr := tools.NewTeamToolManager(stores.Teams, stores.Agents, msgBus)
+		if delegateMgr != nil {
+			teamMgr.SetDelegateManager(delegateMgr)
+		}
 		toolsReg.Register(tools.NewTeamTasksTool(teamMgr))
 		toolsReg.Register(tools.NewTeamMessageTool(teamMgr))
 
@@ -399,7 +446,7 @@ func wireManagedExtras(
 			}
 			teamMgr.InvalidateTeam()
 		})
-		slog.Info("managed mode: team tools registered")
+		slog.Info("team tools registered")
 	}
 
 	// User workspace cache: invalidate per-user workspace path on profile changes
@@ -434,12 +481,12 @@ func wireManagedExtras(
 		})
 	}
 
-	slog.Info("managed mode: resolver + interceptors + cache subscribers wired")
-	return contextFileInterceptor
+	slog.Info("resolver + interceptors + cache subscribers wired")
+	return contextFileInterceptor, delegateMgr, mcpPool
 }
 
-// wireManagedHTTP creates managed-mode HTTP handlers (agents + skills + traces + MCP + custom tools + channel instances + providers + delegations + builtin tools).
-func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus, toolsReg *tools.Registry, providerReg *providers.Registry, isOwner func(string) bool) (*httpapi.AgentsHandler, *httpapi.SkillsHandler, *httpapi.TracesHandler, *httpapi.MCPHandler, *httpapi.CustomToolsHandler, *httpapi.ChannelInstancesHandler, *httpapi.ProvidersHandler, *httpapi.DelegationsHandler, *httpapi.BuiltinToolsHandler) {
+// wireHTTP creates HTTP handlers (agents + skills + traces + MCP + custom tools + channel instances + providers + delegations + builtin tools).
+func wireHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus, toolsReg *tools.Registry, providerReg *providers.Registry, isOwner func(string) bool, gatewayAddr string, mcpToolLister httpapi.MCPToolLister) (*httpapi.AgentsHandler, *httpapi.SkillsHandler, *httpapi.TracesHandler, *httpapi.MCPHandler, *httpapi.CustomToolsHandler, *httpapi.ChannelInstancesHandler, *httpapi.ProvidersHandler, *httpapi.DelegationsHandler, *httpapi.BuiltinToolsHandler) {
 	var agentsH *httpapi.AgentsHandler
 	var skillsH *httpapi.SkillsHandler
 	var tracesH *httpapi.TracesHandler
@@ -472,7 +519,7 @@ func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus,
 	}
 
 	if stores != nil && stores.MCP != nil {
-		mcpH = httpapi.NewMCPHandler(stores.MCP, token)
+		mcpH = httpapi.NewMCPHandler(stores.MCP, token, msgBus, mcpToolLister)
 	}
 
 	if stores != nil && stores.CustomTools != nil {
@@ -484,7 +531,7 @@ func wireManagedHTTP(stores *store.Stores, token string, msgBus *bus.MessageBus,
 	}
 
 	if stores != nil && stores.Providers != nil {
-		providersH = httpapi.NewProvidersHandler(stores.Providers, token, providerReg)
+		providersH = httpapi.NewProvidersHandler(stores.Providers, stores.ConfigSecrets, token, providerReg, gatewayAddr)
 	}
 
 	if stores != nil && stores.Teams != nil {

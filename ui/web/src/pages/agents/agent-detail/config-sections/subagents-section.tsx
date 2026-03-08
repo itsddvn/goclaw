@@ -24,11 +24,11 @@ export function SubagentsSection({ enabled, value, onToggle, onChange }: Subagen
   const { providers } = useProviders();
   const enabledProviders = providers.filter((p) => p.enabled);
   // Use the first enabled provider for model list suggestions
-  const defaultProviderId = useMemo(
-    () => enabledProviders[0]?.id,
+  const defaultProvider = useMemo(
+    () => enabledProviders[0],
     [enabledProviders],
   );
-  const { models, loading: modelsLoading } = useProviderModels(defaultProviderId);
+  const { models, loading: modelsLoading } = useProviderModels(defaultProvider?.id, defaultProvider?.provider_type);
 
   return (
     <ConfigSection
@@ -37,7 +37,7 @@ export function SubagentsSection({ enabled, value, onToggle, onChange }: Subagen
       enabled={enabled}
       onToggle={onToggle}
     >
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <InfoLabel tip="Maximum number of sub-agents that can run simultaneously for this agent.">Max Concurrent</InfoLabel>
           <Input
@@ -62,7 +62,7 @@ export function SubagentsSection({ enabled, value, onToggle, onChange }: Subagen
           </Select>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <InfoLabel tip="Maximum number of sub-agents a single parent agent can spawn in one session.">Max Children Per Agent</InfoLabel>
           <Input

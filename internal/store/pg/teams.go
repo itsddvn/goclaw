@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,10 +24,6 @@ func NewPGTeamStore(db *sql.DB) *PGTeamStore {
 // --- Column constants ---
 
 const teamSelectCols = `id, name, lead_agent_id, description, status, settings, created_by, created_at, updated_at`
-
-const taskSelectCols = `id, team_id, subject, description, status, owner_agent_id, blocked_by, priority, result, created_at, updated_at`
-
-const messageSelectCols = `id, team_id, from_agent_id, to_agent_id, content, message_type, read, task_id, metadata, created_at`
 
 // ============================================================
 // Team CRUD
@@ -160,7 +157,7 @@ func (s *PGTeamStore) GetTeamForAgent(ctx context.Context, agentID uuid.UUID) (*
 		 LIMIT 1`, agentID, store.TeamStatusActive)
 
 	d, err := scanTeamRow(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return d, err
@@ -224,7 +221,7 @@ func (s *PGTeamStore) GetHandoffRoute(ctx context.Context, channel, chatID strin
 		&d.ID, &d.Channel, &d.ChatID, &d.FromAgentKey, &d.ToAgentKey,
 		&d.Reason, &d.CreatedBy, &d.CreatedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

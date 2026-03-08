@@ -13,6 +13,7 @@ export const ROUTES = {
   CONFIG: "/config",
   TRACES: "/traces",
   TRACE_DETAIL: "/traces/:id",
+  EVENTS: "/events",
   DELEGATIONS: "/delegations",
   USAGE: "/usage",
   CHANNELS: "/channels",
@@ -27,6 +28,7 @@ export const ROUTES = {
   BUILTIN_TOOLS: "/builtin-tools",
   MCP: "/mcp",
   TTS: "/tts",
+  SETUP: "/setup",
 } as const;
 
 export const LOCAL_STORAGE_KEYS = {

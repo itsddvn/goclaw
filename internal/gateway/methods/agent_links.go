@@ -41,7 +41,7 @@ type linksListParams struct {
 
 func (m *AgentLinksMethods) handleList(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	if m.linkStore == nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not available (standalone mode)"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not configured"))
 		return
 	}
 
@@ -106,7 +106,7 @@ type linksCreateParams struct {
 
 func (m *AgentLinksMethods) handleCreate(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	if m.linkStore == nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not available (standalone mode)"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not configured"))
 		return
 	}
 
@@ -184,6 +184,26 @@ func (m *AgentLinksMethods) handleCreate(_ context.Context, client *gateway.Clie
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
 		"link": link,
 	}))
+
+	// Emit agent_link.created event
+	if m.msgBus != nil {
+		payload := protocol.AgentLinkCreatedPayload{
+			LinkID:         link.ID.String(),
+			SourceAgentID:  sourceAgent.ID.String(),
+			SourceAgentKey: sourceAgent.AgentKey,
+			TargetAgentID:  targetAgent.ID.String(),
+			TargetAgentKey: targetAgent.AgentKey,
+			Direction:      direction,
+			Status:         store.LinkStatusActive,
+		}
+		if link.TeamID != nil {
+			payload.TeamID = link.TeamID.String()
+		}
+		m.msgBus.Broadcast(bus.Event{
+			Name:    protocol.EventAgentLinkCreated,
+			Payload: payload,
+		})
+	}
 }
 
 // --- Update ---
@@ -199,7 +219,7 @@ type linksUpdateParams struct {
 
 func (m *AgentLinksMethods) handleUpdate(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	if m.linkStore == nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not available (standalone mode)"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not configured"))
 		return
 	}
 
@@ -261,6 +281,28 @@ func (m *AgentLinksMethods) handleUpdate(_ context.Context, client *gateway.Clie
 	m.emitTeamCacheInvalidate()
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{"ok": true}))
+
+	// Emit agent_link.updated event
+	if m.msgBus != nil {
+		updatedLink, linkErr := m.linkStore.GetLink(ctx, linkID)
+		if linkErr == nil && updatedLink != nil {
+			changes := make([]string, 0, len(updates))
+			for k := range updates {
+				changes = append(changes, k)
+			}
+			m.msgBus.Broadcast(bus.Event{
+				Name: protocol.EventAgentLinkUpdated,
+				Payload: protocol.AgentLinkUpdatedPayload{
+					LinkID:         linkID.String(),
+					SourceAgentKey: updatedLink.SourceAgentKey,
+					TargetAgentKey: updatedLink.TargetAgentKey,
+					Direction:      updatedLink.Direction,
+					Status:         updatedLink.Status,
+					Changes:        changes,
+				},
+			})
+		}
+	}
 }
 
 // --- Delete ---
@@ -271,7 +313,7 @@ type linksDeleteParams struct {
 
 func (m *AgentLinksMethods) handleDelete(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	if m.linkStore == nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not available (standalone mode)"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "agent links not configured"))
 		return
 	}
 
@@ -309,6 +351,18 @@ func (m *AgentLinksMethods) handleDelete(_ context.Context, client *gateway.Clie
 	m.emitTeamCacheInvalidate()
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{"ok": true}))
+
+	// Emit agent_link.deleted event
+	if m.msgBus != nil && link != nil {
+		m.msgBus.Broadcast(bus.Event{
+			Name: protocol.EventAgentLinkDeleted,
+			Payload: protocol.AgentLinkDeletedPayload{
+				LinkID:         linkID.String(),
+				SourceAgentKey: link.SourceAgentKey,
+				TargetAgentKey: link.TargetAgentKey,
+			},
+		})
+	}
 }
 
 // emitTeamCacheInvalidate broadcasts a cache invalidation event for team data.

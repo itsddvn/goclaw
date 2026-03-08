@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { SearchInput } from "@/components/shared/search-input";
 import { Pagination } from "@/components/shared/pagination";
 import { TableSkeleton } from "@/components/shared/loading-skeleton";
-import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { ConfirmDeleteDialog } from "@/components/shared/confirm-delete-dialog";
 import { useProviders, type ProviderData, type ProviderInput } from "./hooks/use-providers";
 import { ProviderFormDialog } from "./provider-form-dialog";
 import { useMinLoading } from "@/hooks/use-min-loading";
@@ -26,6 +26,7 @@ const typeBadge: Record<string, { label: string; variant: "default" | "secondary
   minimax_native: { label: "MiniMax", variant: "secondary" },
   cohere: { label: "Cohere", variant: "secondary" },
   perplexity: { label: "Perplexity", variant: "secondary" },
+  chatgpt_oauth: { label: "ChatGPT (OAuth)", variant: "default" },
 };
 
 export function ProvidersPage() {
@@ -72,7 +73,7 @@ export function ProvidersPage() {
   };
 
   return (
-    <div className="p-6">
+    <div className="p-4 sm:p-6">
       <PageHeader
         title="Providers"
         description="Manage LLM providers"
@@ -107,8 +108,8 @@ export function ProvidersPage() {
             description={search ? "Try a different search term." : "Add your first LLM provider to get started."}
           />
         ) : (
-          <div className="rounded-md border">
-            <table className="w-full text-sm">
+          <div className="rounded-md border overflow-x-auto">
+            <table className="w-full min-w-[700px] text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
                   <th className="px-4 py-3 text-left font-medium">Name</th>
@@ -142,7 +143,9 @@ export function ProvidersPage() {
                         {p.api_base || "-"}
                       </td>
                       <td className="px-4 py-3">
-                        {p.api_key === "***" ? (
+                        {p.provider_type === "chatgpt_oauth" ? (
+                          <Badge variant="outline" className="text-xs">OAuth Token</Badge>
+                        ) : p.api_key === "***" ? (
                           <Badge variant="outline" className="font-mono text-xs">***</Badge>
                         ) : (
                           <span className="text-xs text-muted-foreground">Not set</span>
@@ -154,23 +157,25 @@ export function ProvidersPage() {
                         </Badge>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => { setEditProvider(p); setFormOpen(true); }}
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setDeleteTarget(p)}
-                            className="text-destructive hover:text-destructive"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
+                        {p.provider_type !== "chatgpt_oauth" && (
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => { setEditProvider(p); setFormOpen(true); }}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setDeleteTarget(p)}
+                              className="text-destructive hover:text-destructive"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -194,15 +199,16 @@ export function ProvidersPage() {
         onOpenChange={setFormOpen}
         provider={editProvider}
         onSubmit={editProvider ? handleEdit : handleCreate}
+        existingProviders={providers}
       />
 
-      <ConfirmDialog
+      <ConfirmDeleteDialog
         open={!!deleteTarget}
         onOpenChange={(v) => !v && setDeleteTarget(null)}
         title="Delete Provider"
-        description={`Are you sure you want to delete "${deleteTarget?.display_name || deleteTarget?.name}"?`}
+        description={`Are you sure you want to delete "${deleteTarget?.display_name || deleteTarget?.name}"? This action cannot be undone.`}
+        confirmValue={deleteTarget?.display_name || deleteTarget?.name || ""}
         confirmLabel="Delete"
-        variant="destructive"
         onConfirm={handleDelete}
         loading={deleteLoading}
       />

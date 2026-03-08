@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
-import { Activity, Bot, History, Zap, AlertTriangle } from "lucide-react";
+import { useEffect, useCallback } from "react";
+import { Activity, Bot, Hash, Radio, AlertTriangle } from "lucide-react";
 import { Link } from "react-router";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatusBadge } from "@/components/shared/status-badge";
@@ -8,127 +8,199 @@ import { useAuthStore } from "@/stores/use-auth-store";
 import { useWsCall } from "@/hooks/use-ws-call";
 import { useWsEvent } from "@/hooks/use-ws-event";
 import { useProviders } from "@/pages/providers/hooks/use-providers";
+import { useTraces } from "@/pages/traces/hooks/use-traces";
 import { Methods, Events } from "@/api/protocol";
 import { ROUTES } from "@/lib/constants";
+import { formatTokens } from "@/lib/format";
 
-interface HealthPayload {
-  status?: string;
-  uptime?: number;
-}
+import type {
+  HealthPayload,
+  StatusPayload,
+  QuotaUsageResult,
+  CronListPayload,
+  ChannelStatusPayload,
+} from "./types";
+import { useLiveUptime } from "./hooks/use-live-uptime";
+import { StatCard } from "./stat-card";
+import { SystemHealthCard } from "./system-health-card";
+import { ConnectedClientsCard } from "./connected-clients-card";
+import { CronJobsCard } from "./cron-jobs-card";
+import { RecentRequestsCard } from "./recent-requests-card";
+import { QuotaUsageCard } from "./quota-usage-card";
 
-interface AgentInfo {
-  id: string;
-  model: string;
-  isRunning: boolean;
-}
-
-interface StatusPayload {
-  agents?: AgentInfo[];
-  sessions?: number;
-  clients?: number;
-}
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: React.ElementType;
-  label: string;
-  value: string | number;
-}) {
-  return (
-    <div className="rounded-lg border bg-card p-6">
-      <div className="flex items-center gap-3">
-        <div className="rounded-md bg-muted p-2">
-          <Icon className="h-4 w-4 text-muted-foreground" />
-        </div>
-        <div>
-          <p className="text-sm text-muted-foreground">{label}</p>
-          <p className="text-2xl font-semibold">{value}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
+const REFRESH_INTERVAL = 30_000;
 
 export function OverviewPage() {
   const connected = useAuthStore((s) => s.connected);
-  const { call: fetchHealth, data: health } = useWsCall<HealthPayload>(Methods.HEALTH);
-  const { call: fetchStatus, data: status } = useWsCall<StatusPayload>(Methods.STATUS);
+  const { call: fetchHealth, data: health } =
+    useWsCall<HealthPayload>(Methods.HEALTH);
+  const { call: fetchStatus, data: status } =
+    useWsCall<StatusPayload>(Methods.STATUS);
+  const { call: fetchQuota, data: quota } =
+    useWsCall<QuotaUsageResult>(Methods.QUOTA_USAGE);
+  const { call: fetchCron, data: cronData } =
+    useWsCall<CronListPayload>(Methods.CRON_LIST);
+  const { call: fetchChannels, data: channelStatusData } =
+    useWsCall<ChannelStatusPayload>(Methods.CHANNELS_STATUS);
   const { providers, loading: providersLoading } = useProviders();
-  const [, setLastUpdate] = useState(0);
+  const { traces } = useTraces({ limit: 8 });
 
   const hasNoProviders = !providersLoading && providers.length === 0;
-  const hasNoEnabledProviders = !providersLoading && providers.length > 0 && !providers.some((p) => p.enabled);
+  const hasNoEnabledProviders =
+    !providersLoading &&
+    providers.length > 0 &&
+    !providers.some((p) => p.enabled);
+
+  const fetchAll = useCallback(() => {
+    fetchHealth();
+    fetchStatus();
+    fetchQuota();
+    fetchCron({ includeDisabled: true });
+    fetchChannels();
+  }, [fetchHealth, fetchStatus, fetchQuota, fetchCron, fetchChannels]);
 
   useEffect(() => {
-    if (connected) {
-      fetchHealth();
-      fetchStatus();
-    }
-  }, [connected, fetchHealth, fetchStatus]);
+    if (!connected) return;
+    fetchAll();
+    const id = setInterval(fetchAll, REFRESH_INTERVAL);
+    return () => clearInterval(id);
+  }, [connected, fetchAll]);
 
-  // Re-fetch on health events
-  const handleHealth = useCallback(() => {
-    setLastUpdate(Date.now());
+  const handleHealthEvent = useCallback(() => {
     fetchHealth();
-  }, [fetchHealth]);
+    fetchStatus();
+  }, [fetchHealth, fetchStatus]);
+  useWsEvent(Events.HEALTH, handleHealthEvent);
 
-  useWsEvent(Events.HEALTH, handleHealth);
+  const liveUptime = useLiveUptime(health?.uptime);
+
+  // Computed
+  const agents = status?.agents ?? [];
+  const runningAgents = agents.filter((a) => a.isRunning).length;
+  const agentTotal = status?.agentTotal ?? agents.length;
+  const channelEntries = channelStatusData?.channels
+    ? Object.entries(channelStatusData.channels)
+    : [];
+  const channelsOnline = channelEntries.filter(([, c]) => c.running).length;
+  const enabledProviders = providers.filter((p) => p.enabled);
+  const clientList = health?.clients ?? [];
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 sm:p-6">
+      {/* Header */}
       <PageHeader
-        title="Overview"
-        description="Gateway status and health"
+        title="Dashboard"
+        description="Gateway overview and quota usage"
         actions={
-          <StatusBadge
-            status={connected ? "success" : "error"}
-            label={connected ? "Connected" : "Disconnected"}
-          />
+          <div className="flex items-center gap-2">
+            {health?.version && (
+              <span className="text-xs text-muted-foreground">
+                v{health.version}
+              </span>
+            )}
+            <StatusBadge
+              status={connected ? "success" : "error"}
+              label={connected ? "Connected" : "Disconnected"}
+            />
+          </div>
         }
       />
 
+      {/* Provider warning */}
       {(hasNoProviders || hasNoEnabledProviders) && (
         <Alert>
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>
-            {hasNoProviders ? "No LLM providers configured" : "No LLM providers enabled"}
+            {hasNoProviders
+              ? "No LLM providers configured"
+              : "No LLM providers enabled"}
           </AlertTitle>
           <AlertDescription>
             {hasNoProviders
               ? "You need to add at least one LLM provider before agents can work. "
               : "All providers are currently disabled. Enable at least one to start using agents. "}
-            <Link to={ROUTES.PROVIDERS} className="font-medium underline underline-offset-4 hover:text-foreground">
+            <Link
+              to={ROUTES.PROVIDERS}
+              className="font-medium underline underline-offset-4 hover:text-foreground"
+            >
               Go to Provider Settings
             </Link>
           </AlertDescription>
         </Alert>
       )}
 
+      {/* Summary cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           icon={Activity}
-          label="Status"
-          value={health?.status ?? "unknown"}
+          label="Requests Today"
+          value={quota?.requestsToday ?? 0}
+          sub={
+            quota?.uniqueUsersToday
+              ? `${quota.uniqueUsersToday} users`
+              : undefined
+          }
+        />
+        <StatCard
+          icon={Hash}
+          label="Tokens Today"
+          value={formatTokens(
+            (quota?.inputTokensToday ?? 0) + (quota?.outputTokensToday ?? 0),
+          )}
+          sub={
+            quota
+              ? `${formatTokens(quota.inputTokensToday)} in / ${formatTokens(quota.outputTokensToday)} out`
+              : undefined
+          }
         />
         <StatCard
           icon={Bot}
           label="Agents"
-          value={status?.agents?.length ?? 0}
+          value={
+            agentTotal > 0
+              ? `${runningAgents} / ${agentTotal}`
+              : "0"
+          }
+          sub={agentTotal > 0 ? "running" : undefined}
         />
         <StatCard
-          icon={History}
-          label="Sessions"
-          value={status?.sessions ?? 0}
-        />
-        <StatCard
-          icon={Zap}
-          label="Connected Clients"
-          value={status?.clients ?? 0}
+          icon={Radio}
+          label="Channels"
+          value={
+            channelEntries.length > 0
+              ? `${channelsOnline} / ${channelEntries.length}`
+              : "0"
+          }
+          sub={channelEntries.length > 0 ? "online" : undefined}
         />
       </div>
+
+      {/* System Health */}
+      <SystemHealthCard
+        health={health}
+        liveUptime={liveUptime}
+        enabledProviderCount={enabledProviders.length}
+        sessions={status?.sessions ?? 0}
+        clientCount={clientList.length}
+        channelEntries={channelEntries}
+      />
+
+      {/* Connected Clients + Cron Jobs */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <ConnectedClientsCard
+          clients={clientList}
+          currentId={health?.currentId}
+        />
+        <CronJobsCard jobs={cronData?.jobs ?? []} />
+      </div>
+
+      {/* Recent Requests */}
+      <RecentRequestsCard traces={traces} />
+
+      {/* Quota Usage */}
+      {quota?.enabled && quota.entries.length > 0 && (
+        <QuotaUsageCard quota={quota} />
+      )}
     </div>
   );
 }

@@ -66,11 +66,11 @@ export function CronFormDialog({ open, onOpenChange, onSubmit }: CronFormDialogP
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-lg flex flex-col">
+      <DialogContent className="max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Create Cron Job</DialogTitle>
         </DialogHeader>
-        <div className="space-y-4 overflow-y-auto min-h-0">
+        <div className="space-y-4 px-0.5 -mx-0.5 overflow-y-auto min-h-0">
           <div className="space-y-2">
             <Label>Name</Label>
             <Input value={name} onChange={(e) => setName(slugify(e.target.value))} placeholder="my-daily-task" />

@@ -12,6 +12,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -19,20 +20,20 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
 )
 
-// ResolverDeps holds shared dependencies for the managed-mode agent resolver.
+// ResolverDeps holds shared dependencies for the agent resolver.
 type ResolverDeps struct {
-	AgentStore  store.AgentStore
-	ProviderReg *providers.Registry
-	Bus         bus.EventPublisher
-	Sessions    store.SessionStore
-	Tools       *tools.Registry
-	ToolPolicy  *tools.PolicyEngine
-	Skills      *skills.Loader
+	AgentStore     store.AgentStore
+	ProviderReg    *providers.Registry
+	Bus            bus.EventPublisher
+	Sessions       store.SessionStore
+	Tools          *tools.Registry
+	ToolPolicy     *tools.PolicyEngine
+	Skills         *skills.Loader
 	HasMemory      bool
 	OnEvent        func(AgentEvent)
 	TraceCollector *tracing.Collector
 
-	// Per-user file seeding + dynamic context loading (managed mode)
+	// Per-user file seeding + dynamic context loading
 	EnsureUserFiles   EnsureUserFilesFunc
 	ContextFileLoader ContextFileLoaderFunc
 	BootstrapCleanup  BootstrapCleanupFunc
@@ -48,24 +49,33 @@ type ResolverDeps struct {
 	SandboxContainerDir    string
 	SandboxWorkspaceAccess string
 
-	// Dynamic custom tools (managed mode)
-	DynamicLoader *tools.DynamicToolLoader // nil if not managed
+	// Dynamic custom tools
+	DynamicLoader *tools.DynamicToolLoader
 
-	// Inter-agent delegation (managed mode)
-	AgentLinkStore store.AgentLinkStore // nil if not managed or no links
+	// Inter-agent delegation
+	AgentLinkStore store.AgentLinkStore
 
-	// Agent teams (managed mode)
-	TeamStore store.TeamStore // nil if not managed or no teams
+	// Agent teams
+	TeamStore store.TeamStore
 
-	// Builtin tool settings (managed mode)
-	BuiltinToolStore store.BuiltinToolStore // nil if not managed
+	// Builtin tool settings
+	BuiltinToolStore store.BuiltinToolStore
 
-	// Group file writer cache (managed mode)
+	// MCP server store — for per-agent MCP tool loading
+	MCPStore store.MCPServerStore
+
+	// Shared MCP connection pool — eliminates duplicate connections across agents
+	MCPPool *mcpbridge.Pool
+
+	// Skill access store — for per-agent skill visibility filtering
+	SkillAccessStore store.SkillAccessStore
+
+	// Group file writer cache
 	GroupWriterCache *store.GroupWriterCache
 }
 
 // NewManagedResolver creates a ResolverFunc that builds Loops from DB agent data.
-// This is the core of managed mode: agents are defined in Postgres, not config.json.
+// Agents are defined in Postgres, not config.json.
 func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 	return func(agentKey string) (Agent, error) {
 		ctx := context.Background()
@@ -80,6 +90,10 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("agent not found: %s", agentKey)
+		}
+
+		if ag.Status != store.AgentStatusActive {
+			return nil, fmt.Errorf("agent %s is inactive", agentKey)
 		}
 
 		// Resolve provider
@@ -149,6 +163,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 		// Inject TEAM.md for all team members (lead + members) so every agent
 		// knows the team workflow: create/claim/complete tasks via team_tasks tool.
 		hasTeam := false
+		isTeamLead := false
 		if deps.TeamStore != nil {
 			hasTeamMD := false
 			for _, cf := range contextFiles {
@@ -165,6 +180,13 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 							Path:    bootstrap.TeamFile,
 							Content: buildTeamMD(team, members, ag.ID),
 						})
+						// Detect lead role for tool policy
+						for _, m := range members {
+							if m.AgentID == ag.ID && m.Role == store.TeamRoleLead {
+								isTeamLead = true
+								break
+							}
+						}
 					}
 				}
 			} else {
@@ -239,6 +261,42 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			}
 		}
 
+		// Per-agent MCP servers: connect to granted MCP servers and register their tools.
+		// Uses a per-agent MCP Manager that queries the MCPServerStore for accessible servers.
+		//
+		// IMPORTANT: Always clone the registry before MCP registration to prevent
+		// cross-agent tool leaks. Without cloning, MCP BridgeTools registered for
+		// one agent pollute the shared deps. Tools and become visible to ALL agents
+		// (even those without MCP grants), because FilterTools reads from registry.List().
+		hasMCPTools := false
+		if deps.MCPStore != nil {
+			if toolsReg == deps.Tools {
+				toolsReg = deps.Tools.Clone()
+			}
+			var mcpOpts []mcpbridge.ManagerOption
+		mcpOpts = append(mcpOpts, mcpbridge.WithStore(deps.MCPStore))
+		if deps.MCPPool != nil {
+			mcpOpts = append(mcpOpts, mcpbridge.WithPool(deps.MCPPool))
+		}
+		mcpMgr := mcpbridge.NewManager(toolsReg, mcpOpts...)
+			if err := mcpMgr.LoadForAgent(ctx, ag.ID, ""); err != nil {
+				slog.Warn("failed to load MCP servers for agent", "agent", agentKey, "error", err)
+			} else if mcpMgr.IsSearchMode() {
+				// Search mode: too many tools — register mcp_tool_search meta-tool
+				searchTool := mcpbridge.NewMCPToolSearchTool(mcpMgr)
+				toolsReg.Register(searchTool)
+				hasMCPTools = true
+				slog.Info("mcp.agent.search_mode", "agent", agentKey,
+					"deferred_tools", len(mcpMgr.DeferredToolInfos()))
+			} else {
+				toolNames := mcpMgr.ToolNames()
+				if len(toolNames) > 0 {
+					hasMCPTools = true
+					slog.Info("mcp.agent.tools_loaded", "agent", agentKey, "tools", len(toolNames))
+				}
+			}
+		}
+
 		// Per-agent memory: enabled if global memory manager exists AND
 		// per-agent config doesn't explicitly disable it.
 		hasMemory := deps.HasMemory
@@ -261,33 +319,46 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			}
 		}
 
-		// Managed mode: SkillAllowList is nil (all filesystem skills available).
-		// Per-agent DB skill filtering is handled by skill_search tool via SkillAccessStore.
+		// Managed mode: filter skills by visibility + agent grants.
+		// Only public skills and explicitly granted internal skills appear in the system prompt.
+		var skillAllowList []string
+		if deps.SkillAccessStore != nil {
+			if accessible, err := deps.SkillAccessStore.ListAccessible(ctx, ag.ID, ""); err == nil {
+				skillAllowList = make([]string, 0, len(accessible))
+				for _, sk := range accessible {
+					skillAllowList = append(skillAllowList, sk.Slug)
+				}
+				slog.Debug("skill visibility filter", "agent", agentKey, "accessible", len(skillAllowList))
+			} else {
+				slog.Warn("failed to load accessible skills, falling back to all", "agent", agentKey, "error", err)
+				// nil = fallback to all (better than blocking all skills)
+			}
+		}
 
 		loop := NewLoop(LoopConfig{
-			ID:                ag.AgentKey,
-			AgentUUID:         ag.ID,
-			AgentType:         ag.AgentType,
-			Provider:          provider,
-			Model:             ag.Model,
-			ContextWindow:     contextWindow,
-			MaxIterations:     maxIter,
-			Workspace:         workspace,
-			Bus:               deps.Bus,
-			Sessions:          deps.Sessions,
-			Tools:             toolsReg,
-			ToolPolicy:        deps.ToolPolicy,
-			AgentToolPolicy:   ag.ParseToolsConfig(),
-			SkillsLoader:      deps.Skills,
-			// SkillAllowList: nil = all filesystem skills (managed DB skill filtering via skill_search)
-			HasMemory:         hasMemory,
-			ContextFiles:      contextFiles,
-			EnsureUserFiles:   deps.EnsureUserFiles,
-			ContextFileLoader: deps.ContextFileLoader,
-			BootstrapCleanup:  deps.BootstrapCleanup,
-			OnEvent:           deps.OnEvent,
-			TraceCollector:    deps.TraceCollector,
-			InjectionAction:   deps.InjectionAction,
+			ID:                     ag.AgentKey,
+			AgentUUID:              ag.ID,
+			AgentType:              ag.AgentType,
+			Provider:               provider,
+			Model:                  ag.Model,
+			ContextWindow:          contextWindow,
+			MaxIterations:          maxIter,
+			Workspace:              workspace,
+			Bus:                    deps.Bus,
+			Sessions:               deps.Sessions,
+			Tools:                  toolsReg,
+			ToolPolicy:             deps.ToolPolicy,
+			AgentToolPolicy:        agentToolPolicyForTeam(agentToolPolicyWithMCP(ag.ParseToolsConfig(), hasMCPTools), isTeamLead),
+			SkillsLoader:           deps.Skills,
+			SkillAllowList:         skillAllowList,
+			HasMemory:              hasMemory,
+			ContextFiles:           contextFiles,
+			EnsureUserFiles:        deps.EnsureUserFiles,
+			ContextFileLoader:      deps.ContextFileLoader,
+			BootstrapCleanup:       deps.BootstrapCleanup,
+			OnEvent:                deps.OnEvent,
+			TraceCollector:         deps.TraceCollector,
+			InjectionAction:        deps.InjectionAction,
 			MaxMessageChars:        deps.MaxMessageChars,
 			CompactionCfg:          compactionCfg,
 			ContextPruningCfg:      contextPruningCfg,
@@ -295,9 +366,9 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			SandboxContainerDir:    sandboxContainerDir,
 			SandboxWorkspaceAccess: sandboxWorkspaceAccess,
 			BuiltinToolSettings:    builtinSettings,
-			ThinkingLevel:         ag.ParseThinkingLevel(),
-			GroupWriterCache:      deps.GroupWriterCache,
-			TeamStore:             deps.TeamStore,
+			ThinkingLevel:          ag.ParseThinkingLevel(),
+			GroupWriterCache:       deps.GroupWriterCache,
+			TeamStore:              deps.TeamStore,
 		})
 
 		slog.Info("resolved agent from DB", "agent", agentKey, "model", ag.Model, "provider", ag.Provider)
@@ -323,159 +394,3 @@ func (r *Router) InvalidateAll() {
 	slog.Debug("invalidated all agent caches")
 }
 
-// filterManualLinks removes auto-created team links from delegation targets.
-// Team members coordinate via team_tasks/team_message, not delegate.
-func filterManualLinks(targets []store.AgentLinkData) []store.AgentLinkData {
-	var filtered []store.AgentLinkData
-	for _, t := range targets {
-		if t.TeamID == nil {
-			filtered = append(filtered, t)
-		}
-	}
-	return filtered
-}
-
-// buildDelegateAgentsMD generates DELEGATION.md content listing available delegation targets.
-func buildDelegateAgentsMD(targets []store.AgentLinkData) string {
-	var sb strings.Builder
-	sb.WriteString("# Agent Delegation\n\n")
-	sb.WriteString("Use `spawn` with the `agent` parameter to delegate tasks to other specialized agents.\n")
-	sb.WriteString("The agent list below is complete and authoritative — answer questions about available agents directly from it.\n")
-	sb.WriteString("Only delegate when you need to actually assign work, not to check who is available.\n\n")
-	sb.WriteString("## Available Agents\n")
-
-	for _, t := range targets {
-		sb.WriteString(fmt.Sprintf("\n### %s", t.TargetAgentKey))
-		if t.TargetDisplayName != "" {
-			sb.WriteString(fmt.Sprintf(" (%s)", t.TargetDisplayName))
-		}
-		if t.TargetIsTeamLead && t.TargetTeamName != "" {
-			sb.WriteString(fmt.Sprintf(" [Team Lead: %s]", t.TargetTeamName))
-		}
-		sb.WriteString("\n")
-		if t.TargetDescription != "" {
-			sb.WriteString(t.TargetDescription + "\n")
-		}
-		sb.WriteString(fmt.Sprintf("→ `spawn(agent=\"%s\", task=\"describe the task\")`\n", t.TargetAgentKey))
-	}
-
-	sb.WriteString("\n## When to Delegate\n\n")
-	sb.WriteString("- The task clearly falls under another agent's expertise\n")
-	sb.WriteString("- You lack the tools or knowledge to handle it well\n")
-	sb.WriteString("- The user explicitly asks to involve another agent\n")
-
-	return sb.String()
-}
-
-// buildDelegateSearchInstruction generates DELEGATION.md content that instructs the agent
-// to use delegate_search tool instead of listing all targets (used when >15 targets).
-func buildDelegateSearchInstruction(targetCount int) string {
-	return fmt.Sprintf(`# Agent Delegation
-
-You have the `+"`spawn`"+` tool (with `+"`agent`"+` parameter) and `+"`delegate_search`"+` tool available.
-Do NOT look for delegation info on disk — it is provided here.
-
-You have access to %d specialized agents. To find the right one:
-
-1. `+"`delegate_search(query=\"your keywords\")`"+` — search agents by expertise
-2. `+"`spawn(agent=\"agent-key\", task=\"describe the task\")`"+` — delegate the task
-
-Example:
-- User asks about billing → `+"`delegate_search(query=\"billing payment\")`"+` → `+"`spawn(agent=\"billing-agent\", task=\"...\")`"+`
-
-Do NOT guess agent keys. Always search first.
-`, targetCount)
-}
-
-// buildTeamMD generates compact TEAM.md content for an agent that is part of a team.
-// Kept minimal — tool descriptions already live in tool Parameters()/Description().
-func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uuid.UUID) string {
-	var sb strings.Builder
-	sb.WriteString("# Team: " + team.Name + "\n")
-	if team.Description != "" {
-		sb.WriteString(team.Description + "\n")
-	}
-
-	// Determine self role
-	selfRole := store.TeamRoleMember
-	for _, m := range members {
-		if m.AgentID == selfID {
-			selfRole = m.Role
-			break
-		}
-	}
-	sb.WriteString(fmt.Sprintf("Role: %s\n\n", selfRole))
-
-	// Members (including self)
-	sb.WriteString("## Members\n")
-	sb.WriteString("This is the complete and authoritative list of your team. Do NOT use tools to verify this.\n\n")
-	for _, m := range members {
-		if m.AgentID == selfID {
-			sb.WriteString(fmt.Sprintf("- **you** (%s)", m.Role))
-		} else if m.DisplayName != "" {
-			sb.WriteString(fmt.Sprintf("- **%s** `%s` (%s)", m.DisplayName, m.AgentKey, m.Role))
-		} else {
-			sb.WriteString(fmt.Sprintf("- **%s** (%s)", m.AgentKey, m.Role))
-		}
-		if m.Frontmatter != "" {
-			sb.WriteString(": " + m.Frontmatter)
-		}
-		sb.WriteString("\n")
-	}
-
-	// Workflow guidance
-	sb.WriteString("\n## Workflow\n\n")
-	if selfRole == store.TeamRoleLead {
-		sb.WriteString("**MANDATORY**: ALWAYS use `team_tasks` to track work. NEVER delegate without a task.\n\n")
-		sb.WriteString("**ONE task per ONE delegation.** Each task tracks one unit of work for one agent.\n")
-		sb.WriteString("When delegating to multiple agents, create a SEPARATE task for each.\n\n")
-		sb.WriteString("Every delegation MUST follow these 2 steps:\n")
-		sb.WriteString("1. `team_tasks` action=create, subject=<brief title> → returns task_id\n")
-		sb.WriteString("2. `spawn` agent=<member>, task=<instructions>, team_task_id=<the task_id from step 1>\n\n")
-		sb.WriteString("Example (2 agents):\n")
-		sb.WriteString("```\n")
-		sb.WriteString("team_tasks action=create, subject=\"Create illustration\" → task_id=A\n")
-		sb.WriteString("team_tasks action=create, subject=\"Write caption\" → task_id=B\n")
-		sb.WriteString("spawn agent=artist, task=\"...\", team_task_id=A\n")
-		sb.WriteString("spawn agent=writer, task=\"...\", team_task_id=B\n")
-		sb.WriteString("```\n\n")
-		sb.WriteString("The system ENFORCES this — spawn with agent but without team_task_id will be rejected.\n")
-		sb.WriteString("⚠️ `team_tasks create` alone does NOTHING — the task stays pending forever until you `spawn`.\n")
-		sb.WriteString("You MUST call `spawn` in the SAME turn. Do NOT respond with text before spawning.\n")
-		sb.WriteString("Each task auto-completes when its delegation finishes.\n\n")
-		sb.WriteString("When multiple delegations run in parallel, the system collects ALL results and delivers\n")
-		sb.WriteString("them to you in a single combined notification. Do NOT present partial results.\n\n")
-		sb.WriteString("## Orchestration Patterns\n\n")
-		sb.WriteString("You can orchestrate multiple rounds — not just one-shot parallel delegation:\n")
-		sb.WriteString("- **Sequential**: A finishes → review result → delegate to B with A's output as context\n")
-		sb.WriteString("- **Iterative**: A produces draft → delegate to B for review → delegate back to A with feedback\n")
-		sb.WriteString("- **Mixed**: A+B in parallel → review both → delegate to C combining their outputs\n\n")
-		sb.WriteString("After receiving delegation results, decide: present to user (if done) or continue orchestrating.\n\n")
-		sb.WriteString("**Communication**: When updating the user, distinguish between:\n")
-		sb.WriteString("- First delegation round → \"assigning to team\" / notifying who is working on what\n")
-		sb.WriteString("- Follow-up rounds (after receiving results) → \"updating tasks\" / sharing progress and next steps\n")
-		sb.WriteString("Never repeat the same announcement phrasing for follow-up delegations.\n\n")
-		sb.WriteString("`team_tasks` actions:\n")
-		sb.WriteString("- action=list → active tasks (pending/in_progress/blocked), no results shown\n")
-		sb.WriteString("- action=list, status=all → all tasks including completed\n")
-		sb.WriteString("- action=get, task_id=<id> → full task detail with result\n")
-		sb.WriteString("- action=search, query=<text> → search tasks by subject/description\n")
-		sb.WriteString("- action=complete, task_id=<id>, result=<summary> → manually complete a task\n")
-		sb.WriteString("- action=cancel, task_id=<id>, reason=<why> → cancel a pending task that is no longer needed\n\n")
-		sb.WriteString("Use `team_message` to send updates to team members.\n\n")
-		sb.WriteString("For simple questions about team composition, answer directly from the member list above.\n")
-	} else {
-		sb.WriteString("As a member, when you receive a delegated task, just do the work.\n")
-		sb.WriteString("Task completion is handled automatically by the system.\n\n")
-		sb.WriteString("For long-running tasks, send progress updates to your lead:\n")
-		sb.WriteString("`team_message` action=send, to=<lead_key>, text=<progress update>\n\n")
-		sb.WriteString("`team_tasks` actions:\n")
-		sb.WriteString("- action=list → check team task board (active tasks)\n")
-		sb.WriteString("- action=get, task_id=<id> → read a completed task's full result\n")
-		sb.WriteString("- action=search, query=<text> → search tasks\n\n")
-		sb.WriteString("Use `team_message` to send updates to your team lead.\n\n")
-		sb.WriteString("For simple questions about team composition, answer directly from the member list above.\n")
-	}
-
-	return sb.String()
-}

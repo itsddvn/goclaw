@@ -7,6 +7,7 @@ import (
 
 	"github.com/titanous/json5"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -18,12 +19,12 @@ import (
 type ConfigMethods struct {
 	cfg          *config.Config
 	cfgPath      string
-	managedMode  bool
-	secretsStore store.ConfigSecretsStore // nil in standalone mode
+	secretsStore store.ConfigSecretsStore
+	eventBus     bus.EventPublisher // nil-safe; broadcasts config change events
 }
 
-func NewConfigMethods(cfg *config.Config, cfgPath string, managedMode bool, secretsStore store.ConfigSecretsStore) *ConfigMethods {
-	return &ConfigMethods{cfg: cfg, cfgPath: cfgPath, managedMode: managedMode, secretsStore: secretsStore}
+func NewConfigMethods(cfg *config.Config, cfgPath string, secretsStore store.ConfigSecretsStore, eventBus bus.EventPublisher) *ConfigMethods {
+	return &ConfigMethods{cfg: cfg, cfgPath: cfgPath, secretsStore: secretsStore, eventBus: eventBus}
 }
 
 func (m *ConfigMethods) Register(router *gateway.MethodRouter) {
@@ -70,15 +71,9 @@ func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client,
 		return
 	}
 
-	// Branch on mode for secrets handling
-	if m.managedMode {
-		// Managed mode: extract secrets → save to config_secrets table, strip all from file
-		m.saveSecretsToStore(ctx, newCfg)
-		newCfg.StripSecrets()
-	} else {
-		// Standalone mode: only strip masked values, keep real values
-		newCfg.StripMaskedSecrets()
-	}
+	// Extract secrets → save to config_secrets table, strip all from file
+	m.saveSecretsToStore(ctx, newCfg)
+	newCfg.StripSecrets()
 
 	// Save to disk
 	if err := config.Save(m.cfgPath, newCfg); err != nil {
@@ -88,12 +83,13 @@ func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client,
 
 	// Update in-memory config and restore secrets
 	m.cfg.ReplaceFrom(newCfg)
-	if m.managedMode && m.secretsStore != nil {
+	if m.secretsStore != nil {
 		if secrets, err := m.secretsStore.GetAll(ctx); err == nil {
 			m.cfg.ApplyDBSecrets(secrets)
 		}
 	}
 	m.cfg.ApplyEnvOverrides()
+	m.broadcastChanged()
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
 		"ok":      true,
@@ -146,13 +142,9 @@ func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client,
 		return
 	}
 
-	// Branch on mode for secrets handling
-	if m.managedMode {
-		m.saveSecretsToStore(ctx, merged)
-		merged.StripSecrets()
-	} else {
-		merged.StripMaskedSecrets()
-	}
+	// Extract secrets → save to config_secrets table, strip all from file
+	m.saveSecretsToStore(ctx, merged)
+	merged.StripSecrets()
 
 	// Save to disk
 	if err := config.Save(m.cfgPath, merged); err != nil {
@@ -162,12 +154,13 @@ func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client,
 
 	// Update in-memory config and restore secrets
 	m.cfg.ReplaceFrom(merged)
-	if m.managedMode && m.secretsStore != nil {
+	if m.secretsStore != nil {
 		if secrets, err := m.secretsStore.GetAll(ctx); err == nil {
 			m.cfg.ApplyDBSecrets(secrets)
 		}
 	}
 	m.cfg.ApplyEnvOverrides()
+	m.broadcastChanged()
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
 		"ok":      true,
@@ -176,6 +169,13 @@ func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client,
 		"hash":    m.cfg.Hash(),
 		"restart": false,
 	}))
+}
+
+// broadcastChanged notifies subscribers that config has been updated.
+func (m *ConfigMethods) broadcastChanged() {
+	if m.eventBus != nil {
+		m.eventBus.Broadcast(bus.Event{Name: bus.TopicConfigChanged, Payload: m.cfg})
+	}
 }
 
 // handleSchema returns the config JSON schema for UI form generation.
@@ -217,7 +217,7 @@ func (m *ConfigMethods) handleSchema(_ context.Context, client *gateway.Client, 
 }
 
 // saveSecretsToStore extracts non-LLM/non-channel secrets from the config
-// and persists them to the config_secrets table (managed mode only).
+// and persists them to the config_secrets table.
 func (m *ConfigMethods) saveSecretsToStore(ctx context.Context, cfg *config.Config) {
 	if m.secretsStore == nil {
 		return

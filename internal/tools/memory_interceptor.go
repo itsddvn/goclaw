@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,20 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+// isMemoryDir checks if a path refers to the memory directory itself.
+// Handles "memory", "./memory", "/workspace/memory" etc.
+func isMemoryDir(path, workspace string) bool {
+	clean := filepath.Clean(path)
+	if clean == "memory" {
+		return true
+	}
+	if workspace != "" && filepath.IsAbs(clean) {
+		expected := filepath.Join(filepath.Clean(workspace), "memory")
+		return clean == expected
+	}
+	return false
+}
 
 // isMemoryPath checks if a path refers to a memory file (MEMORY.md, memory.md, memory/*).
 // Handles both relative and absolute paths (when workspace is provided).
@@ -45,7 +60,7 @@ func isMemoryPath(path, workspace string) bool {
 }
 
 // MemoryInterceptor routes memory file reads/writes to the MemoryStore.
-// Used in managed mode to keep MEMORY.md and memory/* in Postgres.
+// Keeps MEMORY.md and memory/* in Postgres.
 type MemoryInterceptor struct {
 	memStore  store.MemoryStore
 	workspace string
@@ -65,7 +80,7 @@ func (m *MemoryInterceptor) ReadFile(ctx context.Context, path string) (string, 
 
 	agentID := store.AgentIDFromContext(ctx)
 	if agentID == uuid.Nil {
-		return "", false, nil // not in managed mode context
+		return "", false, nil // no agent context
 	}
 
 	// Normalize absolute path to workspace-relative for DB storage
@@ -89,7 +104,7 @@ func (m *MemoryInterceptor) ReadFile(ctx context.Context, path string) (string, 
 }
 
 // WriteFile attempts to write a memory file to the DB (+ re-index chunks for .md files).
-// Non-.md files (e.g. heartbeat-state.json) are stored but NOT indexed/chunked/embedded,
+// Non-.md files are stored but NOT indexed/chunked/embedded,
 // matching TS behavior where only .md files are indexed.
 // Returns (true, nil) if handled, or (false, nil) if not a memory path.
 func (m *MemoryInterceptor) WriteFile(ctx context.Context, path, content string) (bool, error) {
@@ -99,7 +114,7 @@ func (m *MemoryInterceptor) WriteFile(ctx context.Context, path, content string)
 
 	agentID := store.AgentIDFromContext(ctx)
 	if agentID == uuid.Nil {
-		return false, nil // not in managed mode context
+		return false, nil // no agent context
 	}
 
 	// Normalize absolute path to workspace-relative for DB storage
@@ -123,4 +138,33 @@ func (m *MemoryInterceptor) WriteFile(ctx context.Context, path, content string)
 	}
 
 	return true, nil
+}
+
+// ListFiles lists memory documents from the DB when path is the memory directory.
+// Returns (listing, true, nil) if handled, or ("", false, nil) if not a memory path.
+func (m *MemoryInterceptor) ListFiles(ctx context.Context, path string) (string, bool, error) {
+	if !isMemoryDir(path, m.workspace) {
+		return "", false, nil
+	}
+
+	agentID := store.AgentIDFromContext(ctx)
+	if agentID == uuid.Nil {
+		return "", false, nil
+	}
+
+	userID := store.UserIDFromContext(ctx)
+	docs, err := m.memStore.ListDocuments(ctx, agentID.String(), userID)
+	if err != nil {
+		return "", true, err
+	}
+
+	if len(docs) == 0 {
+		return "", true, nil
+	}
+
+	var sb strings.Builder
+	for _, doc := range docs {
+		fmt.Fprintf(&sb, "[FILE] %s\n", doc.Path)
+	}
+	return sb.String(), true, nil
 }

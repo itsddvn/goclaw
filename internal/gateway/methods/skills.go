@@ -12,7 +12,6 @@ import (
 )
 
 // SkillsMethods handles skills.list, skills.get, skills.update.
-// Uses store.SkillStore interface — PGSkillStore in managed mode, FileSkillStore in standalone.
 type SkillsMethods struct {
 	store store.SkillStore
 }
@@ -32,11 +31,23 @@ func (m *SkillsMethods) handleList(_ context.Context, client *gateway.Client, re
 
 	result := make([]map[string]interface{}, 0, len(allSkills))
 	for _, s := range allSkills {
-		result = append(result, map[string]interface{}{
+		entry := map[string]interface{}{
 			"name":        s.Name,
+			"slug":        s.Slug,
 			"description": s.Description,
 			"source":      s.Source,
-		})
+			"version":     s.Version,
+		}
+		if s.ID != "" {
+			entry["id"] = s.ID
+		}
+		if s.Visibility != "" {
+			entry["visibility"] = s.Visibility
+		}
+		if len(s.Tags) > 0 {
+			entry["tags"] = s.Tags
+		}
+		result = append(result, entry)
 	}
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
@@ -64,12 +75,24 @@ func (m *SkillsMethods) handleGet(_ context.Context, client *gateway.Client, req
 
 	content, _ := m.store.LoadSkill(params.Name)
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	resp := map[string]interface{}{
 		"name":        info.Name,
+		"slug":        info.Slug,
 		"description": info.Description,
 		"source":      info.Source,
 		"content":     content,
-	}))
+		"version":     info.Version,
+	}
+	if info.ID != "" {
+		resp["id"] = info.ID
+	}
+	if info.Visibility != "" {
+		resp["visibility"] = info.Visibility
+	}
+	if len(info.Tags) > 0 {
+		resp["tags"] = info.Tags
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, resp))
 }
 
 // skillUpdater is an optional interface for stores that support skill updates (e.g. PGSkillStore).
@@ -94,7 +117,7 @@ func (m *SkillsMethods) handleUpdate(_ context.Context, client *gateway.Client, 
 	// Check if the store supports updates (PGSkillStore does, FileSkillStore doesn't)
 	updater, ok := m.store.(skillUpdater)
 	if !ok {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, "skills.update not supported in standalone mode"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, "skills.update not supported for file-based skills"))
 		return
 	}
 

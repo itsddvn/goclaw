@@ -51,13 +51,15 @@ type SubagentTask struct {
 	Result          string `json:"result,omitempty"`
 	Depth           int    `json:"depth"`
 	Model           string `json:"model,omitempty"`           // model override for this subagent
-	OriginChannel   string `json:"originChannel,omitempty"`
-	OriginChatID    string `json:"originChatId,omitempty"`
-	OriginPeerKind  string `json:"originPeerKind,omitempty"`  // "direct" or "group" (for session key building)
-	OriginLocalKey  string `json:"originLocalKey,omitempty"`  // composite key with topic/thread suffix for routing
-	OriginUserID    string `json:"originUserId,omitempty"`    // parent's userID for per-user scoping propagation
+	OriginChannel    string `json:"originChannel,omitempty"`
+	OriginChatID     string `json:"originChatId,omitempty"`
+	OriginPeerKind   string `json:"originPeerKind,omitempty"`  // "direct" or "group" (for session key building)
+	OriginLocalKey   string `json:"originLocalKey,omitempty"`  // composite key with topic/thread suffix for routing
+	OriginUserID     string `json:"originUserId,omitempty"`    // parent's userID for per-user scoping propagation
+	OriginSessionKey string `json:"originSessionKey,omitempty"` // exact parent session key for announce routing (WS uses non-standard format)
 	CreatedAt        int64  `json:"createdAt"`
 	CompletedAt      int64  `json:"completedAt,omitempty"`
+	Media            []string  `json:"-"` // media file paths from tool results
 	OriginTraceID    uuid.UUID `json:"-"` // parent trace for announce linking
 	OriginRootSpanID uuid.UUID `json:"-"` // parent agent's root span ID
 	cancelFunc       context.CancelFunc `json:"-"` // per-task context cancel
@@ -193,11 +195,12 @@ func (sm *SubagentManager) Spawn(
 		OriginChannel:    channel,
 		OriginChatID:     chatID,
 		OriginPeerKind:   peerKind,
-		OriginLocalKey:   ToolLocalKeyFromCtx(ctx),
-		OriginUserID:     store.UserIDFromContext(ctx),
-		OriginTraceID:    tracing.TraceIDFromContext(ctx),
-		OriginRootSpanID: tracing.ParentSpanIDFromContext(ctx),
-		CreatedAt:        time.Now().UnixMilli(),
+		OriginLocalKey:    ToolLocalKeyFromCtx(ctx),
+		OriginUserID:      store.UserIDFromContext(ctx),
+		OriginSessionKey:  ToolSessionKeyFromCtx(ctx),
+		OriginTraceID:     tracing.TraceIDFromContext(ctx),
+		OriginRootSpanID:  tracing.ParentSpanIDFromContext(ctx),
+		CreatedAt:         time.Now().UnixMilli(),
 	}
 	// Create per-task context for real goroutine cancellation
 	taskCtx, taskCancel := context.WithCancel(ctx)

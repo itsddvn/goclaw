@@ -12,10 +12,20 @@ import (
 
 // ListFilesTool lists files in a directory, optionally through a sandbox container.
 type ListFilesTool struct {
-	workspace      string
-	restrict       bool
-	deniedPrefixes []string // path prefixes to deny access to (e.g. .goclaw)
-	sandboxMgr     sandbox.Manager
+	workspace       string
+	restrict        bool
+	deniedPrefixes  []string // path prefixes to deny access to (e.g. .goclaw)
+	sandboxMgr      sandbox.Manager
+	contextFileIntc *ContextFileInterceptor // unused, satisfies InterceptorAware
+	memIntc         *MemoryInterceptor      // nil = no memory routing
+}
+
+func (t *ListFilesTool) SetContextFileInterceptor(intc *ContextFileInterceptor) {
+	t.contextFileIntc = intc
+}
+
+func (t *ListFilesTool) SetMemoryInterceptor(intc *MemoryInterceptor) {
+	t.memIntc = intc
 }
 
 // DenyPaths adds path prefixes that list_files must reject/filter.
@@ -54,13 +64,26 @@ func (t *ListFilesTool) Execute(ctx context.Context, args map[string]interface{}
 		path = "."
 	}
 
+	// Virtual FS: route memory directory listing to DB
+	if t.memIntc != nil {
+		if listing, handled, err := t.memIntc.ListFiles(ctx, path); handled {
+			if err != nil {
+				return ErrorResult(fmt.Sprintf("failed to list memory files: %v", err))
+			}
+			if listing == "" {
+				return SilentResult("No memory files stored yet")
+			}
+			return SilentResult(listing)
+		}
+	}
+
 	// Sandbox routing (sandboxKey from ctx — thread-safe)
 	sandboxKey := ToolSandboxKeyFromCtx(ctx)
 	if t.sandboxMgr != nil && sandboxKey != "" {
 		return t.executeInSandbox(ctx, path, sandboxKey)
 	}
 
-	// Host execution — use per-user workspace from context if available (managed mode)
+	// Host execution — use per-user workspace from context if available
 	workspace := ToolWorkspaceFromCtx(ctx)
 	if workspace == "" {
 		workspace = t.workspace

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
+	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -33,21 +35,29 @@ type Server struct {
 
 	policyEngine   *permissions.PolicyEngine
 	pairingService store.PairingStore
-	agentsHandler  *httpapi.AgentsHandler // managed mode: agent CRUD API
-	skillsHandler  *httpapi.SkillsHandler // managed mode: skill management API
-	tracesHandler  *httpapi.TracesHandler // managed mode: LLM trace listing API
-	mcpHandler         *httpapi.MCPHandler         // managed mode: MCP server management API
-	customToolsHandler      *httpapi.CustomToolsHandler      // managed mode: custom tool CRUD API
-	channelInstancesHandler *httpapi.ChannelInstancesHandler // managed mode: channel instance CRUD API
-	providersHandler        *httpapi.ProvidersHandler        // managed mode: provider CRUD API
-	delegationsHandler      *httpapi.DelegationsHandler      // managed mode: delegation history API
-	builtinToolsHandler     *httpapi.BuiltinToolsHandler     // managed mode: builtin tool management API
-	agentStore         store.AgentStore             // managed mode: for context injection in tools_invoke
+	agentsHandler  *httpapi.AgentsHandler // agent CRUD API
+	skillsHandler  *httpapi.SkillsHandler // skill management API
+	tracesHandler  *httpapi.TracesHandler // LLM trace listing API
+	mcpHandler         *httpapi.MCPHandler         // MCP server management API
+	customToolsHandler      *httpapi.CustomToolsHandler      // custom tool CRUD API
+	channelInstancesHandler *httpapi.ChannelInstancesHandler // channel instance CRUD API
+	providersHandler        *httpapi.ProvidersHandler        // provider CRUD API
+	delegationsHandler      *httpapi.DelegationsHandler      // delegation history API
+	builtinToolsHandler     *httpapi.BuiltinToolsHandler     // builtin tool management API
+	oauthHandler            *httpapi.OAuthHandler            // OAuth endpoints
+	filesHandler            *httpapi.FilesHandler            // workspace file serving
+	agentStore         store.AgentStore             // for context injection in tools_invoke
 
 	upgrader    websocket.Upgrader
 	rateLimiter *RateLimiter
 	clients     map[string]*Client
 	mu          sync.RWMutex
+
+	startedAt time.Time
+	version   string
+	db        interface{ PingContext(context.Context) error } // for health check DB ping
+
+	logTee *LogTee // optional; auto-unsubscribes clients on disconnect
 
 	httpServer *http.Server
 	mux        *http.ServeMux
@@ -56,11 +66,12 @@ type Server struct {
 // NewServer creates a new gateway server.
 func NewServer(cfg *config.Config, eventPub bus.EventPublisher, agents *agent.Router, sess store.SessionStore, toolsReg ...*tools.Registry) *Server {
 	s := &Server{
-		cfg:      cfg,
-		eventPub: eventPub,
-		agents:   agents,
-		sessions: sess,
-		clients:  make(map[string]*Client),
+		cfg:       cfg,
+		eventPub:  eventPub,
+		agents:    agents,
+		sessions:  sess,
+		clients:   make(map[string]*Client),
+		startedAt: time.Now(),
 	}
 
 	s.upgrader = websocket.Upgrader{
@@ -185,8 +196,43 @@ func (s *Server) BuildMux() *http.ServeMux {
 		s.builtinToolsHandler.RegisterRoutes(mux)
 	}
 
+	// Workspace file serving (available in all modes)
+	if s.filesHandler != nil {
+		s.filesHandler.RegisterRoutes(mux)
+	}
+
+	// OAuth endpoints (available in all modes)
+	if s.oauthHandler != nil {
+		s.oauthHandler.RegisterRoutes(mux)
+	}
+
+	// MCP bridge: expose GoClaw tools to Claude CLI via streamable-http.
+	// Only listens on localhost (CLI runs on the same machine).
+	// Protected by gateway token when configured.
+	if s.tools != nil {
+		bridgeHandler := mcpbridge.NewBridgeServer(s.tools, "1.0.0")
+		if s.cfg.Gateway.Token != "" {
+			mux.Handle("/mcp/bridge", tokenAuthMiddleware(s.cfg.Gateway.Token, bridgeHandler))
+		} else {
+			slog.Warn("security.mcp_bridge: no gateway token configured, MCP bridge tools are unauthenticated")
+			mux.Handle("/mcp/bridge", bridgeHandler)
+		}
+	}
+
 	s.mux = mux
 	return mux
+}
+
+// tokenAuthMiddleware wraps an http.Handler with Bearer token authentication.
+func tokenAuthMiddleware(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != token {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start begins listening for WebSocket and HTTP connections.
@@ -208,7 +254,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.httpServer.Shutdown(shutdownCtx)
 	}()
 
-	if err := s.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+	if err := s.httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("gateway server: %w", err)
 	}
 	return nil
@@ -222,7 +268,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := NewClient(conn, s)
+	client := NewClient(conn, s, clientIP(r))
 	s.registerClient(client)
 
 	defer func() {
@@ -240,6 +286,21 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status":"ok","protocol":%d}`, protocol.ProtocolVersion)
 }
 
+// clientIP extracts the real client IP from the request, checking proxy headers first.
+func clientIP(r *http.Request) string {
+	if ip := r.Header.Get("X-Real-IP"); ip != "" {
+		return ip
+	}
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		if i := strings.IndexByte(fwd, ','); i > 0 {
+			return strings.TrimSpace(fwd[:i])
+		}
+		return strings.TrimSpace(fwd)
+	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return host
+}
+
 // Router returns the method router for registering additional handlers.
 func (s *Server) Router() *MethodRouter { return s.router }
 
@@ -249,39 +310,68 @@ func (s *Server) SetPolicyEngine(pe *permissions.PolicyEngine) { s.policyEngine 
 // SetPairingService sets the pairing service for channel authentication.
 func (s *Server) SetPairingService(ps store.PairingStore) { s.pairingService = ps }
 
-// SetAgentsHandler sets the managed-mode agent CRUD handler.
+// SetAgentsHandler sets the agent CRUD handler.
 func (s *Server) SetAgentsHandler(h *httpapi.AgentsHandler) { s.agentsHandler = h }
 
-// SetSkillsHandler sets the managed-mode skill management handler.
+// SetSkillsHandler sets the skill management handler.
 func (s *Server) SetSkillsHandler(h *httpapi.SkillsHandler) { s.skillsHandler = h }
 
-// SetTracesHandler sets the managed-mode LLM trace listing handler.
+// SetTracesHandler sets the LLM trace listing handler.
 func (s *Server) SetTracesHandler(h *httpapi.TracesHandler) { s.tracesHandler = h }
 
-// SetMCPHandler sets the managed-mode MCP server management handler.
+// SetMCPHandler sets the MCP server management handler.
 func (s *Server) SetMCPHandler(h *httpapi.MCPHandler) { s.mcpHandler = h }
 
-// SetCustomToolsHandler sets the managed-mode custom tool CRUD handler.
+// SetCustomToolsHandler sets the custom tool CRUD handler.
 func (s *Server) SetCustomToolsHandler(h *httpapi.CustomToolsHandler) { s.customToolsHandler = h }
 
-// SetChannelInstancesHandler sets the managed-mode channel instance CRUD handler.
+// SetChannelInstancesHandler sets the channel instance CRUD handler.
 func (s *Server) SetChannelInstancesHandler(h *httpapi.ChannelInstancesHandler) {
 	s.channelInstancesHandler = h
 }
 
-// SetProvidersHandler sets the managed-mode provider CRUD handler.
+// SetProvidersHandler sets the provider CRUD handler.
 func (s *Server) SetProvidersHandler(h *httpapi.ProvidersHandler) { s.providersHandler = h }
 
-// SetDelegationsHandler sets the managed-mode delegation history handler.
+// SetDelegationsHandler sets the delegation history handler.
 func (s *Server) SetDelegationsHandler(h *httpapi.DelegationsHandler) { s.delegationsHandler = h }
 
-// SetBuiltinToolsHandler sets the managed-mode builtin tool management handler.
+// SetBuiltinToolsHandler sets the builtin tool management handler.
 func (s *Server) SetBuiltinToolsHandler(h *httpapi.BuiltinToolsHandler) {
 	s.builtinToolsHandler = h
 }
 
+// SetOAuthHandler sets the OAuth handler (available in all modes).
+func (s *Server) SetOAuthHandler(h *httpapi.OAuthHandler) { s.oauthHandler = h }
+
+// SetFilesHandler sets the workspace file serving handler.
+func (s *Server) SetFilesHandler(h *httpapi.FilesHandler) { s.filesHandler = h }
+
 // SetAgentStore sets the agent store for context injection in tools_invoke.
 func (s *Server) SetAgentStore(as store.AgentStore) { s.agentStore = as }
+
+// SetVersion sets the server version for health responses.
+func (s *Server) SetVersion(v string) { s.version = v }
+
+// SetDB sets the database connection for health check pings.
+func (s *Server) SetDB(db interface{ PingContext(context.Context) error }) { s.db = db }
+
+// StartedAt returns the server start time.
+func (s *Server) StartedAt() time.Time { return s.startedAt }
+
+// Version returns the server version string.
+func (s *Server) Version() string { return s.version }
+
+// ClientList returns a snapshot of all connected clients.
+func (s *Server) ClientList() []*Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*Client, 0, len(s.clients))
+	for _, c := range s.clients {
+		list = append(list, c)
+	}
+	return list
+}
 
 // BroadcastEvent sends an event to all connected clients.
 func (s *Server) BroadcastEvent(event protocol.EventFrame) {
@@ -289,6 +379,25 @@ func (s *Server) BroadcastEvent(event protocol.EventFrame) {
 	defer s.mu.RUnlock()
 	for _, client := range s.clients {
 		client.SendEvent(event)
+	}
+}
+
+// DisconnectByPairing force-closes WebSocket connections authenticated via the
+// given pairing senderID and channel. Called after revoking a paired device so
+// that the revoked client cannot continue operating with its old role.
+func (s *Server) DisconnectByPairing(senderID, channel string) {
+	s.mu.RLock()
+	var targets []*Client
+	for _, c := range s.clients {
+		if c.pairedSenderID == senderID && c.pairedChannel == channel {
+			targets = append(targets, c)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, c := range targets {
+		slog.Info("disconnecting revoked paired device", "client", c.id, "sender_id", senderID, "channel", channel)
+		c.conn.Close()
 	}
 }
 
@@ -313,7 +422,15 @@ func (s *Server) unregisterClient(c *Client) {
 	defer s.mu.Unlock()
 	delete(s.clients, c.id)
 	s.eventPub.Unsubscribe(c.id)
+	if s.logTee != nil {
+		s.logTee.Unsubscribe(c.id)
+	}
 	slog.Info("client disconnected", "id", c.id)
+}
+
+// SetLogTee attaches a LogTee so that disconnecting clients are auto-unsubscribed.
+func (s *Server) SetLogTee(lt *LogTee) {
+	s.logTee = lt
 }
 
 // StartTestServer creates a listener on :0 (random port) and returns the
