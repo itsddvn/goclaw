@@ -17,7 +17,7 @@ import (
 // Chat runs the CLI synchronously and returns the final response.
 func (p *ClaudeCLIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	systemPrompt, userMsg, images := extractFromMessages(req.Messages)
-	sessionKey := extractSessionKey(req.Options)
+	sessionKey := extractStringOpt(req.Options, OptSessionKey)
 	model := req.Model
 	if model == "" {
 		model = p.defaultModel
@@ -35,8 +35,10 @@ func (p *ClaudeCLIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRes
 	}
 
 	cliSessionID := deriveSessionUUID(sessionKey)
-	disableTools := extractDisableTools(req.Options)
-	args := p.buildArgs(model, workDir, cliSessionID, "json", len(images) > 0, disableTools)
+	disableTools := extractBoolOpt(req.Options, OptDisableTools)
+	bc := bridgeContextFromOpts(req.Options)
+	mcpPath := p.resolveMCPConfigPath(ctx, sessionKey, bc)
+	args := p.buildArgs(model, workDir, mcpPath, cliSessionID, "json", len(images) > 0, disableTools)
 
 	var stdin *bytes.Reader
 	if len(images) > 0 {
@@ -67,7 +69,7 @@ func (p *ClaudeCLIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRes
 // ChatStream runs the CLI with stream-json output, calling onChunk for each text delta.
 func (p *ClaudeCLIProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk func(StreamChunk)) (*ChatResponse, error) {
 	systemPrompt, userMsg, images := extractFromMessages(req.Messages)
-	sessionKey := extractSessionKey(req.Options)
+	sessionKey := extractStringOpt(req.Options, OptSessionKey)
 	model := req.Model
 	if model == "" {
 		model = p.defaultModel
@@ -90,8 +92,10 @@ func (p *ClaudeCLIProvider) ChatStream(ctx context.Context, req ChatRequest, onC
 	}
 
 	cliSessionID := deriveSessionUUID(sessionKey)
-	disableToolsStream := extractDisableTools(req.Options)
-	args := p.buildArgs(model, workDir, cliSessionID, "stream-json", len(images) > 0, disableToolsStream)
+	disableTools := extractBoolOpt(req.Options, OptDisableTools)
+	bc := bridgeContextFromOpts(req.Options)
+	mcpPath := p.resolveMCPConfigPath(ctx, sessionKey, bc)
+	args := p.buildArgs(model, workDir, mcpPath, cliSessionID, "stream-json", len(images) > 0, disableTools)
 
 	var stdin *bytes.Reader
 	if len(images) > 0 {
@@ -134,7 +138,7 @@ func (p *ClaudeCLIProvider) ChatStream(ctx context.Context, req ChatRequest, onC
 
 	// Parse stream-json line-by-line
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024) // 256KB initial, 1MB max
+	scanner.Buffer(make([]byte, 0, 256*1024), 10*1024*1024) // 256KB initial, 10MB max
 
 	var finalResp ChatResponse
 	var contentBuf strings.Builder
@@ -188,6 +192,10 @@ func (p *ClaudeCLIProvider) ChatStream(ctx context.Context, req ChatRequest, onC
 				}
 			}
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("claude-cli: stream read error: %w", err)
 	}
 
 	if err := cmd.Wait(); err != nil {
