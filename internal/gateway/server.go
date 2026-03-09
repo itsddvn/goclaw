@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
@@ -19,6 +20,7 @@ import (
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
@@ -45,12 +47,15 @@ type Server struct {
 	delegationsHandler      *httpapi.DelegationsHandler      // delegation history API
 	builtinToolsHandler     *httpapi.BuiltinToolsHandler     // builtin tool management API
 	pendingMessagesHandler  *httpapi.PendingMessagesHandler  // pending messages API
+	memoryHandler           *httpapi.MemoryHandler           // memory management API
+	kgHandler               *httpapi.KnowledgeGraphHandler   // knowledge graph API
 	oauthHandler            *httpapi.OAuthHandler            // OAuth endpoints
 	filesHandler            *httpapi.FilesHandler            // workspace file serving
 	storageHandler          *httpapi.StorageHandler          // storage file management
 	mediaUploadHandler      *httpapi.MediaUploadHandler      // media upload endpoint
 	mediaServeHandler       *httpapi.MediaServeHandler       // media serve endpoint
 	agentStore         store.AgentStore             // for context injection in tools_invoke
+	msgBus             *bus.MessageBus              // for MCP bridge media delivery
 
 	upgrader    websocket.Upgrader
 	rateLimiter *RateLimiter
@@ -205,6 +210,16 @@ func (s *Server) BuildMux() *http.ServeMux {
 		s.pendingMessagesHandler.RegisterRoutes(mux)
 	}
 
+	// Memory management API
+	if s.memoryHandler != nil {
+		s.memoryHandler.RegisterRoutes(mux)
+	}
+
+	// Knowledge graph API
+	if s.kgHandler != nil {
+		s.kgHandler.RegisterRoutes(mux)
+	}
+
 	// Workspace file serving (available in all modes)
 	if s.filesHandler != nil {
 		s.filesHandler.RegisterRoutes(mux)
@@ -233,18 +248,70 @@ func (s *Server) BuildMux() *http.ServeMux {
 	// MCP bridge: expose GoClaw tools to Claude CLI via streamable-http.
 	// Only listens on localhost (CLI runs on the same machine).
 	// Protected by gateway token when configured.
+	// Agent context (X-Agent-ID, X-User-ID) is injected from request headers.
 	if s.tools != nil {
-		bridgeHandler := mcpbridge.NewBridgeServer(s.tools, "1.0.0")
+		bridgeHandler := mcpbridge.NewBridgeServer(s.tools, "1.0.0", s.msgBus)
+		var handler http.Handler = bridgeContextMiddleware(s.cfg.Gateway.Token, bridgeHandler)
 		if s.cfg.Gateway.Token != "" {
-			mux.Handle("/mcp/bridge", tokenAuthMiddleware(s.cfg.Gateway.Token, bridgeHandler))
+			handler = tokenAuthMiddleware(s.cfg.Gateway.Token, handler)
 		} else {
 			slog.Warn("security.mcp_bridge: no gateway token configured, MCP bridge tools are unauthenticated")
-			mux.Handle("/mcp/bridge", bridgeHandler)
 		}
+		mux.Handle("/mcp/bridge", handler)
 	}
 
 	s.mux = mux
 	return mux
+}
+
+// bridgeContextMiddleware extracts X-Agent-ID and X-User-ID headers from the
+// MCP bridge request and injects them into the context so bridge tools can
+// access agent/user scope. When a gateway token is configured, the context
+// headers must be accompanied by a valid X-Bridge-Sig HMAC to prevent forgery.
+func bridgeContextMiddleware(gatewayToken string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		agentIDStr := r.Header.Get("X-Agent-ID")
+		userID := r.Header.Get("X-User-ID")
+		channel := r.Header.Get("X-Channel")
+		chatID := r.Header.Get("X-Chat-ID")
+		peerKind := r.Header.Get("X-Peer-Kind")
+
+		if agentIDStr != "" || userID != "" {
+			// Verify HMAC signature over all context fields when gateway token is configured
+			if gatewayToken != "" {
+				sig := r.Header.Get("X-Bridge-Sig")
+				if !providers.VerifyBridgeContext(gatewayToken, agentIDStr, userID, channel, chatID, peerKind, sig) {
+					slog.Warn("security.mcp_bridge: invalid bridge context signature",
+						"agent_id", agentIDStr, "user_id", userID)
+					http.Error(w, `{"error":"invalid bridge context signature"}`, http.StatusForbidden)
+					return
+				}
+			}
+
+			if agentIDStr != "" {
+				if id, err := uuid.Parse(agentIDStr); err == nil {
+					ctx = store.WithAgentID(ctx, id)
+				}
+			}
+			if userID != "" {
+				ctx = store.WithUserID(ctx, userID)
+			}
+		}
+
+		// Inject channel routing context for tools like message, cron, etc.
+		if channel != "" {
+			ctx = tools.WithToolChannel(ctx, channel)
+		}
+		if chatID != "" {
+			ctx = tools.WithToolChatID(ctx, chatID)
+		}
+		if peerKind != "" {
+			ctx = tools.WithToolPeerKind(ctx, peerKind)
+		}
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // tokenAuthMiddleware wraps an http.Handler with Bearer token authentication.
@@ -385,8 +452,17 @@ func (s *Server) SetMediaUploadHandler(h *httpapi.MediaUploadHandler) { s.mediaU
 // SetMediaServeHandler sets the media serve handler.
 func (s *Server) SetMediaServeHandler(h *httpapi.MediaServeHandler) { s.mediaServeHandler = h }
 
+// SetMemoryHandler sets the memory management handler.
+func (s *Server) SetMemoryHandler(h *httpapi.MemoryHandler) { s.memoryHandler = h }
+
+// SetKnowledgeGraphHandler sets the knowledge graph handler.
+func (s *Server) SetKnowledgeGraphHandler(h *httpapi.KnowledgeGraphHandler) { s.kgHandler = h }
+
 // SetAgentStore sets the agent store for context injection in tools_invoke.
 func (s *Server) SetAgentStore(as store.AgentStore) { s.agentStore = as }
+
+// SetMessageBus sets the message bus for MCP bridge media delivery.
+func (s *Server) SetMessageBus(mb *bus.MessageBus) { s.msgBus = mb }
 
 // SetVersion sets the server version for health responses.
 func (s *Server) SetVersion(v string) { s.version = v }

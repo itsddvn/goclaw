@@ -118,7 +118,8 @@ func runGateway() {
 	// Memory tools — PG-backed; always registered (PG memory is always available)
 	toolsReg.Register(tools.NewMemorySearchTool())
 	toolsReg.Register(tools.NewMemoryGetTool())
-	slog.Info("memory tools registered (PG-backed)")
+	toolsReg.Register(tools.NewKnowledgeGraphSearchTool())
+	slog.Info("memory + knowledge graph tools registered (PG-backed)")
 
 	// Browser automation tool
 	var browserMgr *browser.Manager
@@ -364,7 +365,7 @@ func runGateway() {
 	// Register providers from DB (overrides config providers).
 	if pgStores.Providers != nil {
 		dbGatewayAddr := loopbackAddr(cfg.Gateway.Host, cfg.Gateway.Port)
-		registerProvidersFromDB(providerRegistry, pgStores.Providers, pgStores.ConfigSecrets, dbGatewayAddr, cfg.Gateway.Token)
+		registerProvidersFromDB(providerRegistry, pgStores.Providers, pgStores.ConfigSecrets, dbGatewayAddr, cfg.Gateway.Token, pgStores.MCP)
 	}
 
 	// Wire embedding provider to PGMemoryStore so IndexDocument generates vectors.
@@ -552,6 +553,7 @@ func runGateway() {
 	server.SetDB(pgStores.DB)
 	server.SetPolicyEngine(permPE)
 	server.SetPairingService(pgStores.Pairing)
+	server.SetMessageBus(msgBus)
 	server.SetOAuthHandler(httpapi.NewOAuthHandler(cfg.Gateway.Token, pgStores.Providers, pgStores.ConfigSecrets, providerRegistry))
 
 	// contextFileInterceptor is created inside wireExtras.
@@ -615,6 +617,16 @@ func runGateway() {
 	}
 	if pendingMessagesH != nil {
 		server.SetPendingMessagesHandler(pendingMessagesH)
+	}
+
+	// Memory management API (wired directly, only needs MemoryStore + token)
+	if pgStores != nil && pgStores.Memory != nil {
+		server.SetMemoryHandler(httpapi.NewMemoryHandler(pgStores.Memory, cfg.Gateway.Token))
+	}
+
+	// Knowledge graph API
+	if pgStores != nil && pgStores.KnowledgeGraph != nil {
+		server.SetKnowledgeGraphHandler(httpapi.NewKnowledgeGraphHandler(pgStores.KnowledgeGraph, providerRegistry, cfg.Gateway.Token))
 	}
 
 	// Workspace file serving endpoint — serves files by absolute path, auth-token protected.
