@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Save, Check, AlertCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import { useTranslation } from "react-i18next";
+import { ConfigGroupHeader } from "@/components/shared/config-group-header";
+import { StickySaveBar } from "@/components/shared/sticky-save-bar";
 import type {
   AgentData,
   SubagentsConfig,
@@ -30,6 +30,8 @@ interface AgentConfigTabProps {
 }
 
 export function AgentConfigTab({ agent, onUpdate }: AgentConfigTabProps) {
+  const { t } = useTranslation("agents");
+
   const [subEnabled, setSubEnabled] = useState(agent.subagents_config != null);
   const [sub, setSub] = useState<SubagentsConfig>(agent.subagents_config ?? {});
 
@@ -48,7 +50,6 @@ export function AgentConfigTab({ agent, onUpdate }: AgentConfigTabProps) {
   const [memEnabled, setMemEnabled] = useState(agent.memory_config != null);
   const [mem, setMem] = useState<MemoryConfig>(agent.memory_config ?? {});
 
-  // Extract managed keys from other_config, manage separately
   const otherObj = (agent.other_config ?? {}) as Record<string, unknown>;
   const initialGates = (Array.isArray(otherObj.quality_gates) ? otherObj.quality_gates : []) as QualityGateConfig[];
   const initialThinkingLevel = (typeof otherObj.thinking_level === "string" ? otherObj.thinking_level : "off");
@@ -83,7 +84,6 @@ export function AgentConfigTab({ agent, onUpdate }: AgentConfigTabProps) {
         sandbox_config: sbEnabled ? sb : null,
         memory_config: memEnabled ? mem : null,
       };
-      // Merge quality_gates back into other_config
       let otherBase: Record<string, unknown> = {};
       if (otherEnabled) {
         try { otherBase = JSON.parse(otherJson); } catch { /* keep empty */ }
@@ -99,92 +99,101 @@ export function AgentConfigTab({ agent, onUpdate }: AgentConfigTabProps) {
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Failed to save");
+      setSaveError(err instanceof Error ? err.message : t("config.failedToSave"));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="max-w-4xl space-y-6">
-      <SubagentsSection
-        enabled={subEnabled}
-        value={sub}
-        onToggle={(v: boolean) => { setSubEnabled(v); if (!v) setSub({}); }}
-        onChange={setSub}
-      />
-      <Separator />
-      <ToolPolicySection
-        enabled={toolsEnabled}
-        value={tools}
-        onToggle={(v: boolean) => { setToolsEnabled(v); if (!v) setTools({}); }}
-        onChange={setTools}
-      />
-      <Separator />
-      <CompactionSection
-        enabled={compEnabled}
-        value={comp}
-        onToggle={(v: boolean) => { setCompEnabled(v); if (!v) setComp({}); }}
-        onChange={setComp}
-      />
-      <Separator />
-      <ContextPruningSection
-        enabled={pruneEnabled}
-        value={prune}
-        onToggle={(v: boolean) => { setPruneEnabled(v); if (!v) setPrune({}); }}
-        onChange={setPrune}
-      />
-      <Separator />
-      <SandboxSection
-        enabled={sbEnabled}
-        value={sb}
-        onToggle={(v: boolean) => { setSbEnabled(v); if (!v) setSb({}); }}
-        onChange={setSb}
-      />
-      <Separator />
-      <MemorySection
-        enabled={memEnabled}
-        value={mem}
-        onToggle={(v: boolean) => { setMemEnabled(v); if (!v) setMem({}); }}
-        onChange={setMem}
-      />
-      <Separator />
+    <div className="max-w-4xl space-y-4">
+      {/* Core */}
       <ThinkingSection
         value={thinkingLevel}
         onChange={setThinkingLevel}
       />
-      <Separator />
-      <QualityGatesSection
-        enabled={qgEnabled}
-        value={qualityGates}
-        onToggle={(v: boolean) => { setQgEnabled(v); if (!v) setQualityGates([]); }}
-        onChange={setQualityGates}
-      />
-      <Separator />
-      <OtherConfigSection
-        enabled={otherEnabled}
-        value={otherJson}
-        onToggle={(v: boolean) => { setOtherEnabled(v); if (!v) setOtherJson("{}"); }}
-        onChange={setOtherJson}
-      />
 
-      {saveError && (
-        <div className="flex items-center gap-2 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          <AlertCircle className="h-4 w-4 shrink-0" />
-          {saveError}
-        </div>
-      )}
-      <div className="flex items-center justify-end gap-2 pt-2">
-        {saved && (
-          <span className="flex items-center gap-1 text-sm text-success">
-            <Check className="h-3.5 w-3.5" /> Saved
-          </span>
-        )}
-        <Button onClick={handleSave} disabled={saving}>
-          {!saving && <Save className="h-4 w-4" />}
-          {saving ? "Saving..." : "Save Config"}
-        </Button>
+      {/* Capabilities */}
+      <ConfigGroupHeader
+        title={t("configGroups.capabilities")}
+        description={t("configGroups.capabilitiesDesc")}
+      />
+      <div className="space-y-4">
+        <MemorySection
+          enabled={memEnabled}
+          value={mem}
+          onToggle={(v: boolean) => { setMemEnabled(v); if (!v) setMem({}); }}
+          onChange={setMem}
+        />
+        <SubagentsSection
+          enabled={subEnabled}
+          value={sub}
+          onToggle={(v: boolean) => { setSubEnabled(v); if (!v) setSub({}); }}
+          onChange={setSub}
+        />
+        <ToolPolicySection
+          enabled={toolsEnabled}
+          value={tools}
+          onToggle={(v: boolean) => { setToolsEnabled(v); if (!v) setTools({}); }}
+          onChange={setTools}
+        />
       </div>
+
+      {/* Performance */}
+      <ConfigGroupHeader
+        title={t("configGroups.performance")}
+        description={t("configGroups.performanceDesc")}
+      />
+      <div className="space-y-4">
+        <CompactionSection
+          enabled={compEnabled}
+          value={comp}
+          onToggle={(v: boolean) => { setCompEnabled(v); if (!v) setComp({}); }}
+          onChange={setComp}
+        />
+        <ContextPruningSection
+          enabled={pruneEnabled}
+          value={prune}
+          onToggle={(v: boolean) => { setPruneEnabled(v); if (!v) setPrune({}); }}
+          onChange={setPrune}
+        />
+        <SandboxSection
+          enabled={sbEnabled}
+          value={sb}
+          onToggle={(v: boolean) => { setSbEnabled(v); if (!v) setSb({}); }}
+          onChange={setSb}
+        />
+      </div>
+
+      {/* Quality & Advanced */}
+      <ConfigGroupHeader
+        title={t("configGroups.advanced")}
+        description={t("configGroups.advancedDesc")}
+      />
+      <div className="space-y-4">
+        <QualityGatesSection
+          enabled={qgEnabled}
+          value={qualityGates}
+          onToggle={(v: boolean) => { setQgEnabled(v); if (!v) setQualityGates([]); }}
+          onChange={setQualityGates}
+        />
+        <OtherConfigSection
+          enabled={otherEnabled}
+          value={otherJson}
+          onToggle={(v: boolean) => { setOtherEnabled(v); if (!v) setOtherJson("{}"); }}
+          onChange={setOtherJson}
+        />
+      </div>
+
+      <StickySaveBar
+        onSave={handleSave}
+        saving={saving}
+        saved={saved}
+        error={saveError}
+        label={t("config.saveConfig")}
+        savingLabel={t("config.saving")}
+        savedLabel={t("config.saved")}
+      />
     </div>
   );
 }

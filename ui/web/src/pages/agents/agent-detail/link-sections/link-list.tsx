@@ -1,10 +1,11 @@
+import { useTranslation } from "react-i18next";
 import { Link2, Pencil, Trash2, Users } from "lucide-react";
 import { Link } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import type { AgentLinkData } from "@/types/agent";
-import { directionBadgeVariant, linkTargetName } from "./link-utils";
+import { directionBadgeVariant, effectiveDirection, linkTargetName } from "./link-utils";
 
 interface LinkListProps {
   links: AgentLinkData[];
@@ -23,10 +24,12 @@ export function LinkList({
   onEdit,
   onDelete,
 }: LinkListProps) {
+  const { t } = useTranslation("agents");
+
   if (loading && links.length === 0) {
     return (
       <div className="py-8 text-center text-sm text-muted-foreground">
-        Loading links...
+        {t("links.loadingLinks")}
       </div>
     );
   }
@@ -35,9 +38,9 @@ export function LinkList({
     return (
       <div className="flex flex-col items-center gap-2 py-8 text-center">
         <Link2 className="h-8 w-8 text-muted-foreground/50" />
-        <p className="text-sm text-muted-foreground">No agent links yet</p>
+        <p className="text-sm text-muted-foreground">{t("links.noLinks")}</p>
         <p className="text-xs text-muted-foreground">
-          Create links to allow agents to delegate tasks to each other.
+          {t("links.noLinksDesc")}
         </p>
       </div>
     );
@@ -46,10 +49,10 @@ export function LinkList({
   return (
     <div className="overflow-x-auto rounded-lg border">
       <div className="grid min-w-[500px] grid-cols-[1fr_100px_60px_60px_80px] items-center gap-2 border-b bg-muted/50 px-4 py-2.5 text-xs font-medium text-muted-foreground">
-        <span>Target</span>
-        <span>Direction</span>
-        <span>Status</span>
-        <span>Limit</span>
+        <span>{t("links.columns.target")}</span>
+        <span>{t("links.columns.direction")}</span>
+        <span>{t("links.columns.status")}</span>
+        <span>{t("links.columns.limit")}</span>
         <span />
       </div>
       {links.map((link) => (
@@ -82,8 +85,8 @@ export function LinkList({
               </p>
             )}
           </div>
-          <Badge variant={directionBadgeVariant(link.direction)}>
-            {link.direction}
+          <Badge variant={directionBadgeVariant(effectiveDirection(link, agentId))}>
+            {effectiveDirection(link, agentId)}
           </Badge>
           <Switch
             checked={link.status === "active"}

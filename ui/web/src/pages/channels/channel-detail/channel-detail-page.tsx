@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,7 +10,7 @@ import { ChannelGeneralTab } from "./channel-general-tab";
 import { ChannelCredentialsTab } from "./channel-credentials-tab";
 import { ChannelConfigTab } from "./channel-config-tab";
 import { ChannelGroupsTab } from "./channel-groups-tab";
-import { ChannelWritersTab } from "./channel-writers-tab";
+import { ChannelManagersTab } from "./channel-managers-tab";
 import { DetailPageSkeleton } from "@/components/shared/loading-skeleton";
 import { channelTypeLabels } from "../channels-status-view";
 import { useChannels } from "../hooks/use-channels";
@@ -20,14 +21,16 @@ interface ChannelDetailPageProps {
 }
 
 export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps) {
+  const { t } = useTranslation("channels");
   const {
     instance,
     loading,
     updateInstance,
-    listWriterGroups,
-    listWriters,
-    addWriter,
-    removeWriter,
+    listManagerGroups,
+    listManagers,
+    addManager,
+    removeManager,
+    listContacts,
   } = useChannelDetail(instanceId);
   const { agents } = useAgents();
   const { channels } = useChannels();
@@ -61,11 +64,11 @@ export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps
               {instance.display_name || instance.name}
             </h2>
             <Badge variant={instance.enabled ? "success" : "secondary"}>
-              {instance.enabled ? "Enabled" : "Disabled"}
+              {instance.enabled ? t("enabled") : t("disabled")}
             </Badge>
             {status && (
               <Badge variant={status.running ? "success" : "secondary"}>
-                {status.running ? "Running" : "Stopped"}
+                {status.running ? t("status.running") : t("status.stopped")}
               </Badge>
             )}
           </div>
@@ -80,7 +83,7 @@ export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps
               {channelTypeLabels[instance.channel_type] || instance.channel_type}
             </Badge>
             <span className="text-border">|</span>
-            <span>Agent: {agentName}</span>
+            <span>{t("detail.agent", { name: agentName })}</span>
           </div>
         </div>
       </div>
@@ -89,11 +92,11 @@ export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps
       <div className="max-w-4xl rounded-xl border bg-card p-3 shadow-sm sm:p-4">
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList className="w-full justify-start overflow-x-auto overflow-y-hidden">
-            <TabsTrigger value="general">General</TabsTrigger>
-            <TabsTrigger value="credentials">Credentials</TabsTrigger>
-            <TabsTrigger value="config">Config</TabsTrigger>
-            {isTelegram && <TabsTrigger value="groups">Groups</TabsTrigger>}
-            <TabsTrigger value="writers">Writers</TabsTrigger>
+            <TabsTrigger value="general">{t("detail.tabs.general")}</TabsTrigger>
+            <TabsTrigger value="credentials">{t("detail.tabs.credentials")}</TabsTrigger>
+            <TabsTrigger value="config">{t("detail.tabs.config")}</TabsTrigger>
+            {isTelegram && <TabsTrigger value="groups">{t("detail.tabs.groups")}</TabsTrigger>}
+            <TabsTrigger value="managers">{t("detail.tabs.managers")}</TabsTrigger>
           </TabsList>
 
           <TabsContent value="general" className="mt-4">
@@ -127,12 +130,13 @@ export function ChannelDetailPage({ instanceId, onBack }: ChannelDetailPageProps
             </TabsContent>
           )}
 
-          <TabsContent value="writers" className="mt-4">
-            <ChannelWritersTab
-              listWriterGroups={listWriterGroups}
-              listWriters={listWriters}
-              addWriter={addWriter}
-              removeWriter={removeWriter}
+          <TabsContent value="managers" className="mt-4">
+            <ChannelManagersTab
+              listManagerGroups={listManagerGroups}
+              listManagers={listManagers}
+              addManager={addManager}
+              removeManager={removeManager}
+              listContacts={listContacts}
             />
           </TabsContent>
         </Tabs>

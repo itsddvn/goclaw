@@ -56,23 +56,23 @@ func (t *EditTool) Description() string {
 	return "Edit a file by replacing exact text matches. Use old_string/new_string for precise edits without rewriting the entire file."
 }
 
-func (t *EditTool) Parameters() map[string]interface{} {
-	return map[string]interface{}{
+func (t *EditTool) Parameters() map[string]any {
+	return map[string]any{
 		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
+		"properties": map[string]any{
+			"path": map[string]any{
 				"type":        "string",
 				"description": "Path to the file to edit",
 			},
-			"old_string": map[string]interface{}{
+			"old_string": map[string]any{
 				"type":        "string",
 				"description": "Exact text to find (must match uniquely unless replace_all is true)",
 			},
-			"new_string": map[string]interface{}{
+			"new_string": map[string]any{
 				"type":        "string",
 				"description": "Replacement text",
 			},
-			"replace_all": map[string]interface{}{
+			"replace_all": map[string]any{
 				"type":        "boolean",
 				"description": "Replace all occurrences (default: false, requires unique match)",
 			},
@@ -81,7 +81,7 @@ func (t *EditTool) Parameters() map[string]interface{} {
 	}
 }
 
-func (t *EditTool) Execute(ctx context.Context, args map[string]interface{}) *Result {
+func (t *EditTool) Execute(ctx context.Context, args map[string]any) *Result {
 	path, _ := args["path"].(string)
 	oldStr, _ := args["old_string"].(string)
 	newStr, _ := args["new_string"].(string)
@@ -137,10 +137,15 @@ func (t *EditTool) Execute(ctx context.Context, args map[string]interface{}) *Re
 			if result != nil {
 				return result
 			}
-			if _, err := t.memIntc.WriteFile(ctx, path, newContent); err != nil {
+			mwr, err := t.memIntc.WriteFile(ctx, path, newContent)
+			if err != nil {
 				return ErrorResult(fmt.Sprintf("failed to write memory file: %v", err))
 			}
-			return SilentResult(fmt.Sprintf("Memory file edited: %s", path))
+			msg := fmt.Sprintf("Memory file edited: %s", path)
+			if mwr.KGTriggered {
+				msg += "\n\n[Knowledge graph extraction triggered in background. The knowledge system may take a moment to fully update with new entities and relationships.]"
+			}
+			return SilentResult(msg)
 		}
 	}
 

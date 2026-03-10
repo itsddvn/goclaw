@@ -36,12 +36,16 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		Type:    protocol.AgentEventRunStarted,
 		AgentID: l.id,
 		RunID:   req.RunID,
-		Payload: map[string]interface{}{"message": req.Message},
+		Payload: map[string]any{"message": req.Message},
 	})
 
 	// Create trace
 	var traceID uuid.UUID
 	isChildTrace := req.ParentTraceID != uuid.Nil && l.traceCollector != nil
+
+	// agentSpanID holds the pre-generated root agent span ID.
+	// Used by emitAgentSpanEnd in the deferred finalizer below.
+	var agentSpanID uuid.UUID
 
 	if isChildTrace {
 		// Announce run: reuse parent trace, don't create new trace record.
@@ -49,7 +53,8 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		traceID = req.ParentTraceID
 		ctx = tracing.WithTraceID(ctx, traceID)
 		ctx = tracing.WithCollector(ctx, l.traceCollector)
-		ctx = tracing.WithParentSpanID(ctx, store.GenNewID())
+		agentSpanID = store.GenNewID()
+		ctx = tracing.WithParentSpanID(ctx, agentSpanID)
 		if req.ParentRootSpanID != uuid.Nil {
 			ctx = tracing.WithAnnounceParentSpanID(ctx, req.ParentRootSpanID)
 		}
@@ -87,8 +92,8 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 			ctx = tracing.WithCollector(ctx, l.traceCollector)
 
 			// Pre-generate root "agent" span ID so LLM/tool spans can reference it as parent.
-			// The span itself is emitted after runLoop completes (with full timing data).
-			ctx = tracing.WithParentSpanID(ctx, store.GenNewID())
+			agentSpanID = store.GenNewID()
+			ctx = tracing.WithParentSpanID(ctx, agentSpanID)
 		}
 	}
 
@@ -99,11 +104,35 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	}
 
 	runStart := time.Now().UTC()
+
+	// Emit running agent span immediately so it's visible in the trace UI.
+	if agentSpanID != uuid.Nil {
+		l.emitAgentSpanStart(ctx, agentSpanID, runStart, req.Message)
+	}
+
+	// Child trace (announce run): set parent trace back to "running" while
+	// this run is active so the trace UI doesn't show "completed" with a
+	// "running" child span.
+	if isChildTrace && l.traceCollector != nil && traceID != uuid.Nil {
+		l.traceCollector.SetTraceStatus(ctx, traceID, store.TraceStatusRunning)
+	}
+
 	result, err := l.runLoop(ctx, req)
 
-	// Emit root "agent" span with full timing (parent for all LLM/tool spans).
-	if l.traceCollector != nil && traceID != uuid.Nil {
-		l.emitAgentSpan(ctx, runStart, result, err)
+	// Finalize the root agent span. Uses EmitSpanUpdate (channel send) so it
+	// succeeds even if ctx is cancelled. Must run before FinishTrace so
+	// aggregates include this span.
+	if agentSpanID != uuid.Nil {
+		l.emitAgentSpanEnd(ctx, agentSpanID, runStart, result, err)
+	}
+
+	// Child trace: restore trace status now that this run is done.
+	if isChildTrace && l.traceCollector != nil && traceID != uuid.Nil {
+		status := store.TraceStatusCompleted
+		if err != nil {
+			status = store.TraceStatusError
+		}
+		l.traceCollector.SetTraceStatus(ctx, traceID, status)
 	}
 
 	if err != nil {
@@ -132,7 +161,7 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		Type:    protocol.AgentEventRunCompleted,
 		AgentID: l.id,
 		RunID:   req.RunID,
-		Payload: map[string]interface{}{"content": result.Content},
+		Payload: map[string]any{"content": result.Content},
 	})
 	if !isChildTrace && l.traceCollector != nil && traceID != uuid.Nil {
 		l.traceCollector.FinishTrace(ctx, traceID, store.TraceStatusCompleted, "", truncateStr(result.Content, 500))

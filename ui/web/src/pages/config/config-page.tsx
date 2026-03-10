@@ -1,4 +1,5 @@
 import { Settings, RefreshCw, ShieldAlert } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,17 +10,20 @@ import { useConfig } from "./hooks/use-config";
 import { useMinLoading } from "@/hooks/use-min-loading";
 import { useDeferredLoading } from "@/hooks/use-deferred-loading";
 import { useIsMobile } from "@/hooks/use-media-query";
-import { GatewaySection } from "./sections/gateway-section";
-import { AgentsDefaultsSection } from "./sections/agents-defaults-section";
-import { ToolsSection } from "./sections/tools-section";
-import { SessionsSection } from "./sections/sessions-section";
+import { ServerSection } from "./sections/server-section";
+import { BehaviorSection } from "./sections/behavior-section";
+import { AiDefaultsSection } from "./sections/ai-defaults-section";
+import { QuotaSection } from "./sections/quota-section";
+import { ToolsProfileSection } from "./sections/tools-profile-section";
+import { ToolsExecSection } from "./sections/tools-exec-section";
+import { ToolsWebSection } from "./sections/tools-web-section";
 import { TtsSection } from "./sections/tts-section";
 import { CronSection } from "./sections/cron-section";
 import { TelemetrySection } from "./sections/telemetry-section";
 import { BindingsSection } from "./sections/bindings-section";
-import { QuotaSection } from "./sections/quota-section";
 
 export function ConfigPage() {
+  const { t } = useTranslation("config");
   const { config, hash, loading, saving, refresh, patch } = useConfig();
   const isMobile = useIsMobile();
   const spinning = useMinLoading(loading);
@@ -28,7 +32,7 @@ export function ConfigPage() {
   if (showSkeleton) {
     return (
       <div className="p-4 sm:p-6">
-        <PageHeader title="Config" description="Gateway configuration" />
+        <PageHeader title={t("title")} description={t("description")} />
         <div className="mt-6">
           <DetailSkeleton />
         </div>
@@ -39,15 +43,15 @@ export function ConfigPage() {
   if (!config) {
     return (
       <div className="p-4 sm:p-6">
-        <PageHeader title="Config" description="Gateway configuration" />
+        <PageHeader title={t("title")} description={t("description")} />
         <div className="mt-6">
           <EmptyState
             icon={Settings}
-            title="No configuration"
-            description="Could not load gateway configuration."
+            title={t("noConfig")}
+            description={t("noConfigDescription")}
             action={
               <Button variant="outline" size="sm" onClick={refresh}>
-                Retry
+                {t("retry")}
               </Button>
             }
           />
@@ -59,8 +63,8 @@ export function ConfigPage() {
   return (
     <div className="p-4 sm:p-6">
       <PageHeader
-        title="Config"
-        description="Gateway configuration"
+        title={t("title")}
+        description={t("description")}
         actions={
           <div className="flex items-center gap-2">
             {hash && (
@@ -69,7 +73,7 @@ export function ConfigPage() {
               </Badge>
             )}
             <Button variant="outline" size="sm" onClick={refresh} disabled={spinning} className="gap-1">
-              <RefreshCw className={"h-3.5 w-3.5" + (spinning ? " animate-spin" : "")} /> Refresh
+              <RefreshCw className={"h-3.5 w-3.5" + (spinning ? " animate-spin" : "")} /> {t("common:refresh", "Refresh")}
             </Button>
           </div>
         }
@@ -77,14 +81,10 @@ export function ConfigPage() {
 
       <div className="mt-4 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-sm text-amber-700 dark:text-amber-400">
         <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
-        <span>
-          This page manages gateway-level defaults. LLM providers and channels are managed on their
-          dedicated pages. Secrets shown as <code className="rounded bg-muted px-1 font-mono text-xs">***</code> are
-          stored encrypted in the database. Environment variables (if set) take highest precedence.
-        </span>
+        <span>{t("warning")}</span>
       </div>
 
-      <Tabs orientation={isMobile ? "horizontal" : "vertical"} defaultValue="general" className="mt-4 items-start">
+      <Tabs orientation={isMobile ? "horizontal" : "vertical"} defaultValue="server" className="mt-4 items-start">
         <TabsList
           variant={isMobile ? "default" : "line"}
           className={isMobile
@@ -92,18 +92,34 @@ export function ConfigPage() {
             : "w-44 shrink-0 sticky top-6 rounded-lg border bg-card p-3 shadow-sm"
           }
         >
-          <TabsTrigger value="general">General</TabsTrigger>
-          <TabsTrigger value="quota">Quota</TabsTrigger>
-          <TabsTrigger value="agents">Agents</TabsTrigger>
-          <TabsTrigger value="sessions">Sessions</TabsTrigger>
-          <TabsTrigger value="tools">Tools</TabsTrigger>
-          <TabsTrigger value="advanced">Advanced</TabsTrigger>
+          <TabsTrigger value="server">{t("tabs.server")}</TabsTrigger>
+          <TabsTrigger value="behavior">{t("tabs.behavior")}</TabsTrigger>
+          <TabsTrigger value="aiDefaults">{t("tabs.aiDefaults")}</TabsTrigger>
+          <TabsTrigger value="quota">{t("tabs.quota")}</TabsTrigger>
+          <TabsTrigger value="tools">{t("tabs.tools")}</TabsTrigger>
+          <TabsTrigger value="integrations">{t("tabs.integrations")}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="general" className="space-y-4">
-          <GatewaySection
+        <TabsContent value="server" className="space-y-4">
+          <ServerSection
             data={config.gateway as any}
             onSave={(v) => patch({ gateway: v })}
+            saving={saving}
+          />
+        </TabsContent>
+
+        <TabsContent value="behavior" className="space-y-4">
+          <BehaviorSection
+            config={config as any}
+            onPatch={patch}
+            saving={saving}
+          />
+        </TabsContent>
+
+        <TabsContent value="aiDefaults" className="space-y-4">
+          <AiDefaultsSection
+            data={config.agents as any}
+            onSave={(v) => patch({ agents: v })}
             saving={saving}
           />
         </TabsContent>
@@ -116,31 +132,25 @@ export function ConfigPage() {
           />
         </TabsContent>
 
-        <TabsContent value="agents" className="space-y-4">
-          <AgentsDefaultsSection
-            data={config.agents as any}
-            onSave={(v) => patch({ agents: v })}
-            saving={saving}
-          />
-        </TabsContent>
-
-        <TabsContent value="sessions" className="space-y-4">
-          <SessionsSection
-            data={config.sessions as any}
-            onSave={(v) => patch({ sessions: v })}
-            saving={saving}
-          />
-        </TabsContent>
-
         <TabsContent value="tools" className="space-y-4">
-          <ToolsSection
+          <ToolsProfileSection
+            data={config.tools as any}
+            onSave={(v) => patch({ tools: v })}
+            saving={saving}
+          />
+          <ToolsExecSection
+            data={config.tools as any}
+            onSave={(v) => patch({ tools: v })}
+            saving={saving}
+          />
+          <ToolsWebSection
             data={config.tools as any}
             onSave={(v) => patch({ tools: v })}
             saving={saving}
           />
         </TabsContent>
 
-        <TabsContent value="advanced" className="space-y-4">
+        <TabsContent value="integrations" className="space-y-4">
           <TtsSection data={config.tts as any} />
           <CronSection
             data={config.cron as any}
