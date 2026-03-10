@@ -1,19 +1,23 @@
 import { useMemo, useEffect, useCallback, useRef } from "react";
 import {
   ReactFlow,
+  ReactFlowProvider,
   useNodesState,
   useEdgesState,
+  useReactFlow,
   Background,
   Controls,
   MiniMap,
   type Node,
   type Edge,
+  type ColorMode,
   Handle,
   Position,
 } from "@xyflow/react";
 import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide, forceX, forceY, type SimulationNodeDatum } from "d3-force";
 import "@xyflow/react/dist/style.css";
 import { useTranslation } from "react-i18next";
+import { useUiStore } from "@/stores/use-ui-store";
 import type { KGEntity, KGRelation } from "@/types/knowledge-graph";
 
 // Color mapping for entity types
@@ -88,6 +92,7 @@ function applyForceLayout(
   nodes: Node[],
   edges: Edge[],
   onUpdate: (positioned: Node[]) => void,
+  onSettled?: () => void,
 ) {
   if (nodes.length === 0) return () => {};
 
@@ -113,6 +118,8 @@ function applyForceLayout(
     onUpdate(positioned);
   });
 
+  simulation.on("end", () => onSettled?.());
+
   // Run fast to settle
   simulation.alpha(1).restart();
 
@@ -125,8 +132,19 @@ interface KGGraphViewProps {
   onEntityClick?: (entity: KGEntity) => void;
 }
 
-export function KGGraphView({ entities, relations, onEntityClick }: KGGraphViewProps) {
+export function KGGraphView(props: KGGraphViewProps) {
+  return (
+    <ReactFlowProvider>
+      <KGGraphViewInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function KGGraphViewInner({ entities, relations, onEntityClick }: KGGraphViewProps) {
   const { t } = useTranslation("memory");
+  const { fitView } = useReactFlow();
+  const theme = useUiStore((s) => s.theme);
+  const colorMode: ColorMode = theme === "system" ? "system" : theme;
   const { nodes: initialNodes, edges: initialEdges } = useMemo(
     () => buildGraph(entities, relations),
     [entities, relations],
@@ -136,13 +154,18 @@ export function KGGraphView({ entities, relations, onEntityClick }: KGGraphViewP
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const simRef = useRef<(() => void) | null>(null);
 
+  // Fit view after simulation settles so the graph covers the viewport
+  const handleSettled = useCallback(() => {
+    requestAnimationFrame(() => fitView({ padding: 0.15, duration: 300 }));
+  }, [fitView]);
+
   // Run force layout when data changes
   useEffect(() => {
     setEdges(initialEdges);
     simRef.current?.();
-    simRef.current = applyForceLayout(initialNodes, initialEdges, setNodes);
+    simRef.current = applyForceLayout(initialNodes, initialEdges, setNodes, handleSettled);
     return () => simRef.current?.();
-  }, [initialNodes, initialEdges, setNodes, setEdges]);
+  }, [initialNodes, initialEdges, setNodes, setEdges, handleSettled]);
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
@@ -155,36 +178,40 @@ export function KGGraphView({ entities, relations, onEntityClick }: KGGraphViewP
 
   if (entities.length === 0) {
     return (
-      <div className="flex items-center justify-center h-[400px] text-sm text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
         {t("kg.graphView.empty")}
       </div>
     );
   }
 
   return (
-    <div className="h-[500px] rounded-md border bg-background">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onNodeClick={handleNodeClick}
-        nodeTypes={nodeTypes}
-        fitView
-        minZoom={0.2}
-        maxZoom={2}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={20} size={1} />
-        <Controls showInteractive={false} />
-        <MiniMap
-          nodeColor={(n) => {
-            const type = (n.data as any)?.type as string;
-            return (TYPE_COLORS[type] || DEFAULT_COLOR).border;
-          }}
-          maskColor="rgba(0,0,0,0.1)"
-        />
-      </ReactFlow>
+    <div className="flex h-full flex-col rounded-md border bg-background">
+      <div className="min-h-0 flex-1">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onNodeClick={handleNodeClick}
+          nodeTypes={nodeTypes}
+          colorMode={colorMode}
+          fitView
+          minZoom={0.1}
+          maxZoom={3}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background gap={20} size={1} />
+          <Controls showInteractive={false} />
+          <MiniMap
+            nodeColor={(n) => {
+              const type = (n.data as any)?.type as string;
+              return (TYPE_COLORS[type] || DEFAULT_COLOR).border;
+            }}
+            maskColor="rgba(0,0,0,0.1)"
+            style={{ width: 100, height: 75 }}
+          />
+        </ReactFlow>
+      </div>
 
       {/* Legend */}
       <div className="flex flex-wrap gap-2 px-3 py-2 border-t text-[10px]">

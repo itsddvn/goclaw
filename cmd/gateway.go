@@ -295,11 +295,14 @@ func runGateway() {
 	redisClient := initRedisClient(cfg)
 	defer shutdownRedis(redisClient)
 
-	// Wire cron retry config from config.json
+	// Wire cron config from config.json
 	cronRetryCfg := cfg.Cron.ToRetryConfig()
 	// Apply retry config via type assertion on the concrete cron store.
 	pgStores.Cron.SetOnJob(nil) // ensure initialized; actual handler set below
 	_ = cronRetryCfg            // config available; pg cron store reads it internally
+	if cfg.Cron.DefaultTimezone != "" {
+		pgStores.Cron.SetDefaultTimezone(cfg.Cron.DefaultTimezone)
+	}
 
 	// Load secrets from config_secrets table before env overrides.
 	// Precedence: config.json → DB secrets → env vars (highest).
@@ -507,14 +510,16 @@ func runGateway() {
 	toolsReg.Register(tools.NewMessageTool())
 	slog.Info("session + message tools registered")
 
-	// Allow read_file to access skills directories (outside workspace).
+	// Allow read_file to access skills directories and CLI workspaces (outside workspace).
 	// Skills can live in ~/.goclaw/skills/, ~/.agents/skills/, ~/.goclaw/skills-store/, etc.
+	// CLI workspaces live in ~/.goclaw/cli-workspaces/ (agent working files).
 	homeDir, _ := os.UserHomeDir()
 	if readTool, ok := toolsReg.Get("read_file"); ok {
 		if pa, ok := readTool.(tools.PathAllowable); ok {
 			pa.AllowPaths(globalSkillsDir)
 			if homeDir != "" {
 				pa.AllowPaths(filepath.Join(homeDir, ".agents", "skills"))
+				pa.AllowPaths(filepath.Join(homeDir, ".goclaw", "cli-workspaces"))
 			}
 			// Also allow the skills store directory (uploaded skill content).
 			if pgStores.Skills != nil {
@@ -843,6 +848,18 @@ func runGateway() {
 		})
 	}
 
+	// Reload cron default timezone on config changes via pub/sub.
+	msgBus.Subscribe("cron-config-reload", func(evt bus.Event) {
+		if evt.Name != bus.TopicConfigChanged {
+			return
+		}
+		updatedCfg, ok := evt.Payload.(*config.Config)
+		if !ok {
+			return
+		}
+		pgStores.Cron.SetDefaultTimezone(updatedCfg.Cron.DefaultTimezone)
+	})
+
 	// Reload web_fetch domain policy on config changes via pub/sub.
 	msgBus.Subscribe("webfetch-config-reload", func(evt bus.Event) {
 		if evt.Name != bus.TopicConfigChanged {
@@ -859,6 +876,7 @@ func runGateway() {
 	var contactCollector *store.ContactCollector
 	if pgStores.Contacts != nil {
 		contactCollector = store.NewContactCollector(pgStores.Contacts, cache.NewInMemoryCache[bool]())
+		channelMgr.SetContactCollector(contactCollector) // propagate to all channel handlers
 	}
 
 	go consumeInboundMessages(ctx, msgBus, agentRouter, cfg, sched, channelMgr, consumerTeamStore, quotaChecker, delegateMgr, pgStores.Sessions, pgStores.Agents, contactCollector)
