@@ -10,6 +10,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -35,7 +36,7 @@ func (m *ConfigMethods) Register(router *gateway.MethodRouter) {
 }
 
 func (m *ConfigMethods) handleGet(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"config": m.cfg.MaskedCopy(),
 		"hash":   m.cfg.Hash(),
 		"path":   m.cfgPath,
@@ -45,6 +46,7 @@ func (m *ConfigMethods) handleGet(_ context.Context, client *gateway.Client, req
 // handleApply replaces the entire config with the provided JSON5 raw content.
 // Matching TS config.apply (src/gateway/server-methods/config.ts:435-486).
 func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		Raw      string `json:"raw"`
 		BaseHash string `json:"baseHash"`
@@ -54,20 +56,20 @@ func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client,
 	}
 
 	if params.Raw == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "raw config is required"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRawConfigRequired)))
 		return
 	}
 
 	// Optimistic concurrency: validate hash if provided
 	if params.BaseHash != "" && params.BaseHash != m.cfg.Hash() {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "config has changed (hash mismatch)"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgConfigHashMismatch)))
 		return
 	}
 
 	// Parse the new config
 	newCfg := config.Default()
 	if err := json5.Unmarshal([]byte(params.Raw), newCfg); err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid config: "+err.Error()))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidRequest, err.Error())))
 		return
 	}
 
@@ -77,7 +79,7 @@ func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client,
 
 	// Save to disk
 	if err := config.Save(m.cfgPath, newCfg); err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to save config: "+err.Error()))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToSave, "config", err.Error())))
 		return
 	}
 
@@ -91,7 +93,7 @@ func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client,
 	m.cfg.ApplyEnvOverrides()
 	m.broadcastChanged()
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"ok":      true,
 		"path":    m.cfgPath,
 		"config":  m.cfg.MaskedCopy(),
@@ -103,6 +105,7 @@ func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client,
 // handlePatch merges a partial config update into the current config.
 // Matching TS config.patch (src/gateway/server-methods/config.ts:321-434).
 func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		Raw      string `json:"raw"`
 		BaseHash string `json:"baseHash"`
@@ -112,33 +115,33 @@ func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client,
 	}
 
 	if params.Raw == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "raw patch is required"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRawPatchRequired)))
 		return
 	}
 
 	// Optimistic concurrency
 	if params.BaseHash != "" && params.BaseHash != m.cfg.Hash() {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "config has changed (hash mismatch)"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgConfigHashMismatch)))
 		return
 	}
 
 	// Merge strategy: serialize current -> deserialize patch on top -> save
 	currentJSON, err := json.Marshal(m.cfg)
 	if err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to serialize current config"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgInternalError, "failed to serialize current config")))
 		return
 	}
 
 	// Start from current config as base
 	merged := config.Default()
 	if err := json.Unmarshal(currentJSON, merged); err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to clone config"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgInternalError, "failed to clone config")))
 		return
 	}
 
 	// Apply patch on top
 	if err := json5.Unmarshal([]byte(params.Raw), merged); err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid patch: "+err.Error()))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidRequest, err.Error())))
 		return
 	}
 
@@ -148,7 +151,7 @@ func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client,
 
 	// Save to disk
 	if err := config.Save(m.cfgPath, merged); err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to save config: "+err.Error()))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToSave, "config", err.Error())))
 		return
 	}
 
@@ -162,7 +165,7 @@ func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client,
 	m.cfg.ApplyEnvOverrides()
 	m.broadcastChanged()
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"ok":      true,
 		"path":    m.cfgPath,
 		"config":  m.cfg.MaskedCopy(),
@@ -181,37 +184,37 @@ func (m *ConfigMethods) broadcastChanged() {
 // handleSchema returns the config JSON schema for UI form generation.
 // Matching TS config.schema (src/gateway/server-methods/config.ts:276-289).
 func (m *ConfigMethods) handleSchema(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
-	schema := map[string]interface{}{
+	schema := map[string]any{
 		"type": "object",
-		"properties": map[string]interface{}{
-			"agents": map[string]interface{}{
+		"properties": map[string]any{
+			"agents": map[string]any{
 				"type":        "object",
 				"description": "Agent configuration (defaults + per-agent overrides)",
 			},
-			"channels": map[string]interface{}{
+			"channels": map[string]any{
 				"type":        "object",
 				"description": "Channel configuration (telegram, discord, slack, etc.)",
 			},
-			"providers": map[string]interface{}{
+			"providers": map[string]any{
 				"type":        "object",
 				"description": "AI provider API keys and settings",
 			},
-			"gateway": map[string]interface{}{
+			"gateway": map[string]any{
 				"type":        "object",
 				"description": "Gateway server settings (host, port, token)",
 			},
-			"tools": map[string]interface{}{
+			"tools": map[string]any{
 				"type":        "object",
 				"description": "Tool configuration (browser, exec, web search)",
 			},
-			"sessions": map[string]interface{}{
+			"sessions": map[string]any{
 				"type":        "object",
 				"description": "Session storage configuration",
 			},
 		},
 	}
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"json": schema,
 	}))
 }

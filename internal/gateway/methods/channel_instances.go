@@ -9,6 +9,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -44,25 +45,27 @@ func (m *ChannelInstancesMethods) emitCacheInvalidate() {
 }
 
 func (m *ChannelInstancesMethods) handleList(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	instances, err := m.store.ListAll(ctx)
 	if err != nil {
 		slog.Error("channels.instances.list", "error", err)
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to list channel instances"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToList, "channel instances")))
 		return
 	}
 
 	// Mask credentials in response — never expose secrets via WS.
-	result := make([]map[string]interface{}, 0, len(instances))
+	result := make([]map[string]any, 0, len(instances))
 	for _, inst := range instances {
 		result = append(result, maskInstance(inst))
 	}
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"instances": result,
 	}))
 }
 
 func (m *ChannelInstancesMethods) handleGet(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		ID string `json:"id"`
 	}
@@ -72,13 +75,13 @@ func (m *ChannelInstancesMethods) handleGet(ctx context.Context, client *gateway
 
 	id, err := uuid.Parse(params.ID)
 	if err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid instance ID"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidID, "instance")))
 		return
 	}
 
 	inst, err := m.store.Get(ctx, id)
 	if err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, "instance not found"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, i18n.T(locale, i18n.MsgInstanceNotFound)))
 		return
 	}
 
@@ -86,6 +89,7 @@ func (m *ChannelInstancesMethods) handleGet(ctx context.Context, client *gateway
 }
 
 func (m *ChannelInstancesMethods) handleCreate(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		Name        string          `json:"name"`
 		DisplayName string          `json:"display_name"`
@@ -100,18 +104,18 @@ func (m *ChannelInstancesMethods) handleCreate(ctx context.Context, client *gate
 	}
 
 	if params.Name == "" || params.ChannelType == "" || params.AgentID == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "name, channel_type, and agent_id are required"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "name, channel_type, and agent_id")))
 		return
 	}
 
 	if !isValidChannelType(params.ChannelType) {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid channel_type"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidChannelType)))
 		return
 	}
 
 	agentID, err := uuid.Parse(params.AgentID)
 	if err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid agent_id"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidID, "agent_id")))
 		return
 	}
 
@@ -132,7 +136,7 @@ func (m *ChannelInstancesMethods) handleCreate(ctx context.Context, client *gate
 
 	if err := m.store.Create(ctx, inst); err != nil {
 		slog.Error("channels.instances.create", "error", err)
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to create instance: "+err.Error()))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToCreate, "instance", err.Error())))
 		return
 	}
 
@@ -141,6 +145,7 @@ func (m *ChannelInstancesMethods) handleCreate(ctx context.Context, client *gate
 }
 
 func (m *ChannelInstancesMethods) handleUpdate(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		ID      string          `json:"id"`
 		Updates json.RawMessage `json:"updates"`
@@ -151,27 +156,28 @@ func (m *ChannelInstancesMethods) handleUpdate(ctx context.Context, client *gate
 
 	id, err := uuid.Parse(params.ID)
 	if err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid instance ID"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidID, "instance")))
 		return
 	}
 
-	var updates map[string]interface{}
+	var updates map[string]any
 	if err := json.Unmarshal(params.Updates, &updates); err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid updates"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidUpdates)))
 		return
 	}
 
 	if err := m.store.Update(ctx, id, updates); err != nil {
 		slog.Error("channels.instances.update", "error", err)
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to update instance: "+err.Error()))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToUpdate, "instance", err.Error())))
 		return
 	}
 
 	m.emitCacheInvalidate()
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{"status": "updated"}))
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"status": "updated"}))
 }
 
 func (m *ChannelInstancesMethods) handleDelete(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		ID string `json:"id"`
 	}
@@ -181,53 +187,53 @@ func (m *ChannelInstancesMethods) handleDelete(ctx context.Context, client *gate
 
 	id, err := uuid.Parse(params.ID)
 	if err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid instance ID"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidID, "instance")))
 		return
 	}
 
 	// Look up instance to check if it's a default (seeded) instance.
 	inst, err := m.store.Get(ctx, id)
 	if err != nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "instance not found"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInstanceNotFound)))
 		return
 	}
 	if store.IsDefaultChannelInstance(inst.Name) {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "cannot delete default channel instance"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgCannotDeleteDefaultInst)))
 		return
 	}
 
 	if err := m.store.Delete(ctx, id); err != nil {
 		slog.Error("channels.instances.delete", "error", err)
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, "failed to delete instance: "+err.Error()))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToDelete, "instance", err.Error())))
 		return
 	}
 
 	m.emitCacheInvalidate()
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{"status": "deleted"}))
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"status": "deleted"}))
 }
 
 // maskInstance returns a map representation with credentials masked.
-func maskInstance(inst store.ChannelInstanceData) map[string]interface{} {
-	result := map[string]interface{}{
-		"id":           inst.ID,
-		"name":         inst.Name,
-		"display_name": inst.DisplayName,
-		"channel_type": inst.ChannelType,
-		"agent_id":     inst.AgentID,
-		"config":       inst.Config,
-		"enabled":      inst.Enabled,
-		"is_default":       store.IsDefaultChannelInstance(inst.Name),
-		"has_credentials":  len(inst.Credentials) > 0,
-		"created_by":       inst.CreatedBy,
-		"created_at":       inst.CreatedAt,
-		"updated_at":       inst.UpdatedAt,
+func maskInstance(inst store.ChannelInstanceData) map[string]any {
+	result := map[string]any{
+		"id":              inst.ID,
+		"name":            inst.Name,
+		"display_name":    inst.DisplayName,
+		"channel_type":    inst.ChannelType,
+		"agent_id":        inst.AgentID,
+		"config":          inst.Config,
+		"enabled":         inst.Enabled,
+		"is_default":      store.IsDefaultChannelInstance(inst.Name),
+		"has_credentials": len(inst.Credentials) > 0,
+		"created_by":      inst.CreatedBy,
+		"created_at":      inst.CreatedAt,
+		"updated_at":      inst.UpdatedAt,
 	}
 
 	// Mask credentials: show keys with "***" values
 	if len(inst.Credentials) > 0 {
-		var raw map[string]interface{}
+		var raw map[string]any
 		if json.Unmarshal(inst.Credentials, &raw) == nil {
-			masked := make(map[string]interface{}, len(raw))
+			masked := make(map[string]any, len(raw))
 			for k := range raw {
 				masked[k] = "***"
 			}

@@ -1,20 +1,44 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 // PendingMessagesHandler handles pending message HTTP endpoints.
 type PendingMessagesHandler struct {
-	store store.PendingMessageStore
-	token string
+	store       store.PendingMessageStore
+	agentStore  store.AgentStore
+	token       string
+	providerReg *providers.Registry
+	keepRecent    int    // global keepRecent from config (0 = use default 15)
+	maxTokens     int    // max output tokens for LLM summarization (0 = use default)
+	cfgProvider   string // config-level provider override (empty = resolve from agent)
+	cfgModel      string // config-level model override (empty = resolve from agent)
 }
 
-func NewPendingMessagesHandler(s store.PendingMessageStore, token string) *PendingMessagesHandler {
-	return &PendingMessagesHandler{store: s, token: token}
+func NewPendingMessagesHandler(s store.PendingMessageStore, agentStore store.AgentStore, token string, providerReg *providers.Registry) *PendingMessagesHandler {
+	return &PendingMessagesHandler{store: s, agentStore: agentStore, token: token, providerReg: providerReg}
+}
+
+// SetKeepRecent sets the global keepRecent value from config.
+func (h *PendingMessagesHandler) SetKeepRecent(n int) { h.keepRecent = n }
+
+// SetMaxTokens sets the global maxTokens value from config.
+func (h *PendingMessagesHandler) SetMaxTokens(n int) { h.maxTokens = n }
+
+// SetProviderModel sets explicit provider/model from config.
+func (h *PendingMessagesHandler) SetProviderModel(provider, model string) {
+	h.cfgProvider = provider
+	h.cfgModel = model
 }
 
 func (h *PendingMessagesHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -28,10 +52,14 @@ func (h *PendingMessagesHandler) authMiddleware(next http.HandlerFunc) http.Hand
 	return func(w http.ResponseWriter, r *http.Request) {
 		if h.token != "" {
 			if extractBearerToken(r) != h.token {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				locale := extractLocale(r)
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": i18n.T(locale, i18n.MsgUnauthorized)})
 				return
 			}
 		}
+		locale := extractLocale(r)
+		ctx := store.WithLocale(r.Context(), locale)
+		r = r.WithContext(ctx)
 		next(w, r)
 	}
 }
@@ -58,10 +86,11 @@ func (h *PendingMessagesHandler) handleListGroups(w http.ResponseWriter, r *http
 
 // GET /v1/pending-messages/messages?channel=X&key=Y — list messages for a group
 func (h *PendingMessagesHandler) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	locale := store.LocaleFromContext(r.Context())
 	channel := r.URL.Query().Get("channel")
 	key := r.URL.Query().Get("key")
 	if channel == "" || key == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "channel and key are required"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgChannelKeyReq)})
 		return
 	}
 
@@ -75,10 +104,11 @@ func (h *PendingMessagesHandler) handleListMessages(w http.ResponseWriter, r *ht
 
 // DELETE /v1/pending-messages?channel=X&key=Y — clear a group
 func (h *PendingMessagesHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	locale := store.LocaleFromContext(r.Context())
 	channel := r.URL.Query().Get("channel")
 	key := r.URL.Query().Get("key")
 	if channel == "" || key == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "channel and key are required"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgChannelKeyReq)})
 		return
 	}
 
@@ -94,21 +124,93 @@ type compactRequest struct {
 	HistoryKey  string `json:"history_key"`
 }
 
-// POST /v1/pending-messages/compact — MVP: clear group and return success
+// POST /v1/pending-messages/compact — LLM-based summarization of old messages, keeping recent ones.
+// Falls back to hard delete if no LLM provider is available.
 func (h *PendingMessagesHandler) handleCompact(w http.ResponseWriter, r *http.Request) {
+	locale := store.LocaleFromContext(r.Context())
 	var req compactRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidJSON)})
 		return
 	}
 	if req.ChannelName == "" || req.HistoryKey == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "channel_name and history_key are required"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "channel_name and history_key")})
 		return
 	}
 
-	if err := h.store.DeleteByKey(r.Context(), req.ChannelName, req.HistoryKey); err != nil {
+	// Resolve an LLM provider for summarization using the default agent's config
+	provider, model := h.resolveProviderAndModel()
+	if provider == nil {
+		// Fallback: hard delete if no provider available
+		slog.Warn("compact.no_provider", "channel", req.ChannelName, "key", req.HistoryKey)
+		if err := h.store.DeleteByKey(r.Context(), req.ChannelName, req.HistoryKey); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "method": "deleted"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+	defer cancel()
+
+	keepRecent := h.keepRecent
+	if keepRecent <= 0 {
+		keepRecent = 15
+	}
+	remaining, err := channels.CompactGroup(ctx, h.store, req.ChannelName, req.HistoryKey, provider, model, keepRecent, h.maxTokens)
+	if err != nil {
+		slog.Warn("compact.failed", "channel", req.ChannelName, "key", req.HistoryKey, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "method": "summarized", "remaining": remaining})
+}
+
+// resolveProviderAndModel resolves the LLM provider+model for pending message compaction.
+// Priority: config provider/model > default agent's provider/model > first available provider.
+func (h *PendingMessagesHandler) resolveProviderAndModel() (providers.Provider, string) {
+	if h.providerReg == nil {
+		return nil, ""
+	}
+
+	// Config-level provider/model override.
+	if h.cfgProvider != "" {
+		if p, err := h.providerReg.Get(h.cfgProvider); err == nil {
+			model := h.cfgModel
+			if model == "" {
+				model = p.DefaultModel()
+			}
+			if model != "" {
+				return p, model
+			}
+		}
+	}
+
+	// Fallback: default agent's provider+model.
+	if h.agentStore != nil {
+		if ag, err := h.agentStore.GetDefault(context.Background()); err == nil && ag.Provider != "" {
+			if p, err := h.providerReg.Get(ag.Provider); err == nil {
+				model := ag.Model
+				if model == "" {
+					model = p.DefaultModel()
+				}
+				if model != "" {
+					return p, model
+				}
+			}
+		}
+	}
+
+	// Fallback: first provider with a valid default model
+	for _, name := range h.providerReg.List() {
+		p, err := h.providerReg.Get(name)
+		if err != nil {
+			continue
+		}
+		if p.DefaultModel() != "" {
+			return p, p.DefaultModel()
+		}
+	}
+	return nil, ""
 }

@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -38,10 +40,11 @@ func (r *MethodRouter) Handle(ctx context.Context, client *Client, req *protocol
 	handler, ok := r.handlers[req.Method]
 	if !ok {
 		slog.Warn("unknown method", "method", req.Method, "client", client.id)
+		locale := i18n.Normalize(client.locale)
 		client.SendResponse(protocol.NewErrorResponse(
 			req.ID,
 			protocol.ErrInvalidRequest,
-			"unknown method: "+req.Method,
+			i18n.T(locale, i18n.MsgUnknownMethod, req.Method),
 		))
 		return
 	}
@@ -51,15 +54,19 @@ func (r *MethodRouter) Handle(ctx context.Context, client *Client, req *protocol
 		if pe := r.server.policyEngine; pe != nil {
 			if !pe.CanAccess(client.role, req.Method) {
 				slog.Warn("permission denied", "method", req.Method, "role", client.role, "client", client.id)
+				locale := i18n.Normalize(client.locale)
 				client.SendResponse(protocol.NewErrorResponse(
 					req.ID,
 					protocol.ErrUnauthorized,
-					"permission denied: insufficient role for "+req.Method,
+					i18n.T(locale, i18n.MsgPermissionDenied, req.Method),
 				))
 				return
 			}
 		}
 	}
+
+	// Inject locale into context for i18n support
+	ctx = store.WithLocale(ctx, i18n.Normalize(client.locale))
 
 	slog.Debug("handling method", "method", req.Method, "client", client.id, "req_id", req.ID)
 	handler(ctx, client, req)
@@ -81,10 +88,14 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 		Token    string `json:"token"`
 		UserID   string `json:"user_id"`
 		SenderID string `json:"sender_id"` // browser pairing: stored sender ID for reconnect
+		Locale   string `json:"locale"`    // user's preferred locale (en, vi, zh)
 	}
 	if req.Params != nil {
 		json.Unmarshal(req.Params, &params)
 	}
+
+	// Set locale on client (persists across all requests for this connection)
+	client.locale = i18n.Normalize(params.Locale)
 
 	configToken := r.server.cfg.Gateway.Token
 
@@ -131,12 +142,12 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 			client.pairingCode = code
 			client.pairingPending = true
 			// Not authenticated — can only call browser.pairing.status
-			client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+			client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 				"protocol":     protocol.ProtocolVersion,
 				"status":       "pending_pairing",
 				"pairing_code": code,
 				"sender_id":    client.id,
-				"server": map[string]interface{}{
+				"server": map[string]any{
 					"name":    "goclaw",
 					"version": "0.2.0",
 				},
@@ -153,11 +164,11 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 }
 
 func (r *MethodRouter) sendConnectResponse(client *Client, reqID string) {
-	client.SendResponse(protocol.NewOKResponse(reqID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(reqID, map[string]any{
 		"protocol": protocol.ProtocolVersion,
 		"role":     string(client.role),
 		"user_id":  client.userID,
-		"server": map[string]interface{}{
+		"server": map[string]any{
 			"name":    "goclaw",
 			"version": "0.2.0",
 		},
@@ -208,14 +219,14 @@ func (r *MethodRouter) handleHealth(ctx context.Context, client *Client, req *pr
 		toolCount = s.tools.Count()
 	}
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
-		"status":   "ok",
-		"version":  s.version,
-		"uptime":   uptimeMs,
-		"mode":     mode,
-		"database": dbStatus,
-		"tools":    toolCount,
-		"clients":  clientList,
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"status":    "ok",
+		"version":   s.version,
+		"uptime":    uptimeMs,
+		"mode":      mode,
+		"database":  dbStatus,
+		"tools":     toolCount,
+		"clients":   clientList,
 		"currentId": client.ID(),
 	}))
 }
@@ -237,11 +248,10 @@ func (r *MethodRouter) handleStatus(ctx context.Context, client *Client, req *pr
 		}
 	}
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"agents":     agents,
 		"agentTotal": agentTotal,
 		"clients":    len(r.server.clients),
 		"sessions":   sessionCount,
 	}))
 }
-

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -26,7 +28,7 @@ func (m *ExecApprovalMethods) Register(router *gateway.MethodRouter) {
 
 func (m *ExecApprovalMethods) handleList(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	if m.manager == nil {
-		client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+		client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 			"pending": []any{},
 		}))
 		return
@@ -50,27 +52,28 @@ func (m *ExecApprovalMethods) handleList(_ context.Context, client *gateway.Clie
 		})
 	}
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"pending": items,
 	}))
 }
 
-func (m *ExecApprovalMethods) handleApprove(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+func (m *ExecApprovalMethods) handleApprove(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	if m.manager == nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "exec approval is not enabled"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgExecApprovalDisabled)))
 		return
 	}
 
 	var params struct {
-		ID    string `json:"id"`
-		Always bool  `json:"always"` // true = allow-always, false = allow-once
+		ID     string `json:"id"`
+		Always bool   `json:"always"` // true = allow-always, false = allow-once
 	}
 	if req.Params != nil {
 		json.Unmarshal(req.Params, &params)
 	}
 
 	if params.ID == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "id is required"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "id")))
 		return
 	}
 
@@ -84,15 +87,16 @@ func (m *ExecApprovalMethods) handleApprove(_ context.Context, client *gateway.C
 		return
 	}
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"resolved": true,
 		"decision": string(decision),
 	}))
 }
 
-func (m *ExecApprovalMethods) handleDeny(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+func (m *ExecApprovalMethods) handleDeny(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	if m.manager == nil {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "exec approval is not enabled"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgExecApprovalDisabled)))
 		return
 	}
 
@@ -104,7 +108,7 @@ func (m *ExecApprovalMethods) handleDeny(_ context.Context, client *gateway.Clie
 	}
 
 	if params.ID == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "id is required"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "id")))
 		return
 	}
 
@@ -113,7 +117,7 @@ func (m *ExecApprovalMethods) handleDeny(_ context.Context, client *gateway.Clie
 		return
 	}
 
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]interface{}{
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"resolved": true,
 		"decision": "deny",
 	}))

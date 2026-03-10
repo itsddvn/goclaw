@@ -40,7 +40,7 @@ type Channel struct {
 	dedup           sync.Map // message_id → struct{}
 	pairingDebounce sync.Map // senderID → time.Time
 	reactions       sync.Map // chatID → *reactionState
-	approvedGroups sync.Map // chatID → true (in-memory cache for paired groups)
+	approvedGroups  sync.Map // chatID → true (in-memory cache for paired groups)
 	groupAllowList  []string
 	groupHistory    *channels.PendingHistory
 	historyLimit    int
@@ -120,6 +120,11 @@ func (c *Channel) Start(ctx context.Context) error {
 
 // BlockReplyEnabled returns the per-channel block_reply override (nil = inherit gateway default).
 func (c *Channel) BlockReplyEnabled() *bool { return c.cfg.BlockReply }
+
+// SetPendingCompaction configures LLM-based auto-compaction for pending messages.
+func (c *Channel) SetPendingCompaction(cfg *channels.CompactionConfig) {
+	c.groupHistory.SetCompactionConfig(cfg)
+}
 
 // Stop shuts down the Feishu channel.
 func (c *Channel) Stop(_ context.Context) error {
@@ -391,9 +396,9 @@ func resolveReceiveIDType(id string) string {
 // --- Content builders ---
 
 func buildPostContent(text string) string {
-	content := map[string]interface{}{
-		"zh_cn": map[string]interface{}{
-			"content": [][]map[string]interface{}{
+	content := map[string]any{
+		"zh_cn": map[string]any{
+			"content": [][]map[string]any{
 				{
 					{
 						"tag":  "md",
@@ -407,14 +412,14 @@ func buildPostContent(text string) string {
 	return string(data)
 }
 
-func buildMarkdownCard(text string) map[string]interface{} {
-	return map[string]interface{}{
+func buildMarkdownCard(text string) map[string]any {
+	return map[string]any{
 		"schema": "2.0",
-		"config": map[string]interface{}{
+		"config": map[string]any{
 			"wide_screen_mode": true,
 		},
-		"body": map[string]interface{}{
-			"elements": []map[string]interface{}{
+		"body": map[string]any{
+			"elements": []map[string]any{
 				{
 					"tag":     "markdown",
 					"content": text,

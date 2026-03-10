@@ -1,4 +1,5 @@
 import { useMemo, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Combobox } from "@/components/ui/combobox";
@@ -33,6 +34,8 @@ interface ProviderModelSelectProps {
   savedModel?: string;
   /** Called when verification status changes. True = save should be blocked (changed but not verified). */
   onSaveBlockedChange?: (blocked: boolean) => void;
+  /** When true, skip auto-selecting the first provider when none is set. Useful when empty means "use default". */
+  allowEmpty?: boolean;
 }
 
 export function ProviderModelSelect({
@@ -40,26 +43,28 @@ export function ProviderModelSelect({
   onProviderChange,
   model,
   onModelChange,
-  providerTip = "LLM provider name. Must match a configured provider.",
-  modelTip = "Model ID to use.",
-  providerLabel = "Provider",
-  modelLabel = "Model",
-  providerPlaceholder = "Select provider",
-  modelPlaceholder = "Enter or select model",
+  providerTip,
+  modelTip,
+  providerLabel,
+  modelLabel,
+  providerPlaceholder,
+  modelPlaceholder,
   showVerify,
   savedProvider,
   savedModel,
   onSaveBlockedChange,
+  allowEmpty,
 }: ProviderModelSelectProps) {
+  const { t } = useTranslation("common");
   const { providers } = useProviders();
   const enabledProviders = providers.filter((p) => p.enabled);
 
-  // Auto-select first enabled provider when none is set
+  // Auto-select first enabled provider when none is set (unless allowEmpty)
   useEffect(() => {
-    if (!provider && enabledProviders.length > 0) {
+    if (!allowEmpty && !provider && enabledProviders.length > 0) {
       onProviderChange(enabledProviders[0]!.name);
     }
-  }, [provider, enabledProviders, onProviderChange]);
+  }, [allowEmpty, provider, enabledProviders, onProviderChange]);
 
   const selectedProvider = useMemo(
     () => enabledProviders.find((p) => p.name === provider),
@@ -94,11 +99,11 @@ export function ProviderModelSelect({
   return (
     <div className="grid grid-cols-2 gap-4">
       <div className="grid gap-1.5">
-        <InfoLabel tip={providerTip}>{providerLabel}</InfoLabel>
+        <InfoLabel tip={providerTip ?? t("providerTip")}>{providerLabel ?? t("provider")}</InfoLabel>
         {enabledProviders.length > 0 ? (
           <Select value={provider} onValueChange={handleProviderChange}>
             <SelectTrigger>
-              <SelectValue placeholder={providerPlaceholder} />
+              <SelectValue placeholder={providerPlaceholder ?? t("selectProvider")} />
             </SelectTrigger>
             <SelectContent>
               {enabledProviders.map((p) => (
@@ -112,19 +117,19 @@ export function ProviderModelSelect({
           <Input
             value={provider}
             onChange={(e) => handleProviderChange(e.target.value)}
-            placeholder="No providers configured"
+            placeholder={t("noProvidersConfigured")}
           />
         )}
       </div>
       <div className="grid gap-1.5">
-        <InfoLabel tip={modelTip}>{modelLabel}</InfoLabel>
+        <InfoLabel tip={modelTip ?? t("modelTip")}>{modelLabel ?? t("model")}</InfoLabel>
         <div className="flex gap-2">
           <div className="flex-1">
             <Combobox
               value={model}
               onChange={onModelChange}
               options={models.map((m) => ({ value: m.id, label: m.name }))}
-              placeholder={modelsLoading ? "Loading models..." : modelPlaceholder}
+              placeholder={modelsLoading ? t("loadingModels") : (modelPlaceholder ?? t("enterOrSelectModel"))}
             />
           </div>
           {shouldShowVerify && (
@@ -136,13 +141,13 @@ export function ProviderModelSelect({
               disabled={!selectedProviderId || !model.trim() || verifying}
               onClick={handleVerify}
             >
-              {verifying ? "..." : "Check"}
+              {verifying ? "..." : t("check")}
             </Button>
           )}
         </div>
         {shouldShowVerify && verifyResult && (
           <p className={`text-xs ${verifyResult.valid ? "text-success" : "text-destructive"}`}>
-            {verifyResult.valid ? "Model verified" : verifyResult.error || "Verification failed"}
+            {verifyResult.valid ? t("modelVerified") : verifyResult.error || t("verificationFailed")}
           </p>
         )}
       </div>
