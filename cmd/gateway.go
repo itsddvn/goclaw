@@ -658,6 +658,7 @@ func runGateway() {
 	// Seed + apply builtin tool disables
 	if pgStores.BuiltinTools != nil {
 		seedBuiltinTools(context.Background(), pgStores.BuiltinTools)
+		migrateBuiltinToolSettings(context.Background(), pgStores.BuiltinTools)
 		applyBuiltinToolDisables(context.Background(), pgStores.BuiltinTools, toolsReg)
 	}
 
@@ -908,7 +909,6 @@ func runGateway() {
 	slog.Info("goclaw gateway starting",
 		"version", Version,
 		"protocol", protocol.ProtocolVersion,
-		"mode", "managed",
 		"agents", agentRouter.List(),
 		"tools", toolsReg.Count(),
 		"channels", channelMgr.GetEnabledChannels(),
