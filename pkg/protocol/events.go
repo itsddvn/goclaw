@@ -43,6 +43,12 @@ const (
 	// Team task lifecycle events.
 	EventTeamTaskClaimed   = "team.task.claimed"
 	EventTeamTaskCancelled = "team.task.cancelled"
+	EventTeamTaskReviewed  = "team.task.reviewed"
+	EventTeamTaskApproved  = "team.task.approved"
+	EventTeamTaskRejected  = "team.task.rejected"
+	EventTeamTaskProgress  = "team.task.progress"
+	EventTeamTaskCommented = "team.task.commented"
+	EventTeamTaskAssigned  = "team.task.assigned"
 
 	// Team CRUD events (admin operations).
 	EventTeamCreated       = "team.created"
@@ -50,6 +56,9 @@ const (
 	EventTeamDeleted       = "team.deleted"
 	EventTeamMemberAdded   = "team.member.added"
 	EventTeamMemberRemoved = "team.member.removed"
+
+	// Workspace events (team file changes).
+	EventWorkspaceFileChanged = "workspace.file.changed"
 
 	// Agent link events (admin operations).
 	EventAgentLinkCreated = "agent_link.created"
@@ -73,6 +82,9 @@ const (
 
 	// Cache invalidation events (internal, not forwarded to WS clients).
 	EventCacheInvalidate = "cache.invalidate"
+
+	// Audit log event (internal, not forwarded to WS clients).
+	EventAuditLog = "audit.log"
 
 	// Zalo Personal QR login events (client-scoped, not broadcast).
 	EventZaloPersonalQRCode = "zalo.personal.qr.code"
