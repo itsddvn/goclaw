@@ -36,6 +36,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
+	"github.com/nextlevelbuilder/goclaw/internal/tasks"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
 	"github.com/nextlevelbuilder/goclaw/pkg/browser"
@@ -580,7 +581,7 @@ func runGateway() {
 	toolsReg.Register(tools.NewSessionsSendTool())
 
 	// Message tool (send to channels)
-	toolsReg.Register(tools.NewMessageTool())
+	toolsReg.Register(tools.NewMessageTool(workspace, agentCfg.RestrictToWorkspace))
 	slog.Info("session + message tools registered")
 
 	// Register legacy tool aliases (backward-compat names from policy.go).
@@ -655,7 +656,7 @@ func runGateway() {
 	server.SetPolicyEngine(permPE)
 	server.SetPairingService(pgStores.Pairing)
 	server.SetMessageBus(msgBus)
-	server.SetOAuthHandler(httpapi.NewOAuthHandler(cfg.Gateway.Token, pgStores.Providers, pgStores.ConfigSecrets, providerRegistry))
+	server.SetOAuthHandler(httpapi.NewOAuthHandler(cfg.Gateway.Token, pgStores.Providers, pgStores.ConfigSecrets, providerRegistry, msgBus))
 
 	// contextFileInterceptor is created inside wireExtras.
 	// Declared here so it can be passed to registerAllMethods → AgentsMethods
@@ -752,8 +753,10 @@ func runGateway() {
 	// Supports media from any agent workspace (each agent has its own workspace from DB).
 	server.SetFilesHandler(httpapi.NewFilesHandler(cfg.Gateway.Token))
 
-	// Storage file management — browse/delete files under ~/.goclaw/ (excluding skills dirs).
-	server.SetStorageHandler(httpapi.NewStorageHandler(config.ExpandHome("~/.goclaw"), cfg.Gateway.Token))
+	// Storage file management — browse/delete files under the resolved workspace directory.
+	// Uses GOCLAW_WORKSPACE (or default ~/.goclaw/workspace) so it works correctly
+	// in Docker deployments where volumes are mounted outside ~/.goclaw/.
+	server.SetStorageHandler(httpapi.NewStorageHandler(workspace, cfg.Gateway.Token))
 
 	// Media upload endpoint — accepts multipart file uploads, returns temp path + MIME type.
 	server.SetMediaUploadHandler(httpapi.NewMediaUploadHandler(cfg.Gateway.Token))
@@ -820,6 +823,43 @@ func runGateway() {
 
 	// Wire channel event subscribers (cache invalidation, pairing, cascade disable)
 	wireChannelEventSubscribers(msgBus, server, pgStores, channelMgr, instanceLoader, pairingMethods, cfg)
+
+	// Audit log subscriber — persists audit events to activity_logs table.
+	// Uses a buffered channel with a single worker to avoid unbounded goroutines.
+	var auditCh chan bus.AuditEventPayload
+	if pgStores.Activity != nil {
+		auditCh = make(chan bus.AuditEventPayload, 256)
+		msgBus.Subscribe(bus.TopicAudit, func(evt bus.Event) {
+			if evt.Name != protocol.EventAuditLog {
+				return
+			}
+			payload, ok := evt.Payload.(bus.AuditEventPayload)
+			if !ok {
+				return
+			}
+			select {
+			case auditCh <- payload:
+			default:
+				slog.Warn("audit.queue_full", "action", payload.Action)
+			}
+		})
+		go func() {
+			for payload := range auditCh {
+				if err := pgStores.Activity.Log(context.Background(), &store.ActivityLog{
+					ActorType:  payload.ActorType,
+					ActorID:    payload.ActorID,
+					Action:     payload.Action,
+					EntityType: payload.EntityType,
+					EntityID:   payload.EntityID,
+					IPAddress:  payload.IPAddress,
+					Details:    payload.Details,
+				}); err != nil {
+					slog.Warn("audit.log_failed", "action", payload.Action, "error", err)
+				}
+			}
+		}()
+		slog.Info("audit subscriber registered")
+	}
 
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -990,6 +1030,13 @@ func runGateway() {
 
 	go consumeInboundMessages(ctx, msgBus, agentRouter, cfg, sched, channelMgr, consumerTeamStore, quotaChecker, delegateMgr, pgStores.Sessions, pgStores.Agents, contactCollector)
 
+	// Task recovery ticker: re-dispatches stale/pending team tasks on startup and periodically.
+	var taskTicker *tasks.TaskTicker
+	if pgStores.Teams != nil {
+		taskTicker = tasks.NewTaskTicker(pgStores.Teams, pgStores.Agents, msgBus, cfg.Gateway.TaskRecoveryIntervalSec)
+		taskTicker.Start()
+	}
+
 	go func() {
 		sig := <-sigCh
 		slog.Info("graceful shutdown initiated", "signal", sig)
@@ -997,9 +1044,17 @@ func runGateway() {
 		// Broadcast shutdown event
 		server.BroadcastEvent(*protocol.NewEvent(protocol.EventShutdown, nil))
 
-		// Stop channels and cron
+		// Stop channels, cron, and task ticker
 		channelMgr.StopAll(context.Background())
 		pgStores.Cron.Stop()
+		if taskTicker != nil {
+			taskTicker.Stop()
+		}
+
+		// Drain audit log queue before closing DB
+		if auditCh != nil {
+			close(auditCh)
+		}
 
 		// Close provider resources (e.g. Claude CLI temp files)
 		providerRegistry.Close()

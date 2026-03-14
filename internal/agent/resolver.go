@@ -189,7 +189,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 						hasTeam = true
 						contextFiles = append(contextFiles, bootstrap.ContextFile{
 							Path:    bootstrap.TeamFile,
-							Content: buildTeamMD(team, members, ag.ID),
+							Content: buildTeamMD(team, members, ag.ID, tools.IsTeamV2(team)),
 						})
 						// Detect lead role for tool policy
 						for _, m := range members {
@@ -366,7 +366,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			Sessions:               deps.Sessions,
 			Tools:                  toolsReg,
 			ToolPolicy:             deps.ToolPolicy,
-			AgentToolPolicy:        agentToolPolicyForTeam(agentToolPolicyWithMCP(ag.ParseToolsConfig(), hasMCPTools), isTeamLead),
+			AgentToolPolicy:        agentToolPolicyForTeam(agentToolPolicyWithWorkspace(agentToolPolicyWithMCP(ag.ParseToolsConfig(), hasMCPTools), hasTeam), isTeamLead),
 			SkillsLoader:           deps.Skills,
 			SkillAllowList:         skillAllowList,
 			HasMemory:              hasMemory,
@@ -386,6 +386,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			BuiltinToolSettings:    builtinSettings,
 			ThinkingLevel:          ag.ParseThinkingLevel(),
 			SelfEvolve:             ag.ParseSelfEvolve(),
+			WorkspaceSharing:       ag.ParseWorkspaceSharing(),
 			GroupWriterCache:       deps.GroupWriterCache,
 			TeamStore:              deps.TeamStore,
 			MediaStore:             deps.MediaStore,
