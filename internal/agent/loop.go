@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -96,13 +97,16 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	// Per-user workspace isolation.
 	// Workspace path comes from user_agent_profiles (includes channel segment
 	// for cross-channel isolation). Cached in userWorkspaces to avoid repeated DB queries.
+	isTeamSession := bootstrap.IsTeamSession(req.SessionKey)
 	if l.workspace != "" && req.UserID != "" {
 		cachedWs, loaded := l.userWorkspaces.Load(req.UserID)
 		if !loaded {
 			// First request for this user: get/create profile → returns stored workspace.
 			// Also seeds per-user context files on first chat.
+			// Team-dispatched sessions skip seeding — members process tasks with full
+			// capabilities, no bootstrap/user onboarding needed.
 			ws := l.workspace
-			if l.ensureUserFiles != nil {
+			if l.ensureUserFiles != nil && !isTeamSession {
 				var err error
 				ws, err = l.ensureUserFiles(ctx, l.agentUUID, req.UserID, l.agentType, l.workspace, req.Channel)
 				if err != nil {
@@ -133,17 +137,46 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		ctx = tools.WithToolWorkspace(ctx, l.workspace)
 	}
 
-	// Team workspace override: when a member agent runs a team task, use the
-	// team's workspace (lead agent's workspace) for file operations instead of
-	// the member's personal workspace. Memory/KG/skills are unaffected (DB-backed).
+	// Team workspace handling:
+	// - Dispatched task (req.TeamWorkspace set): override default workspace so
+	//   relative paths resolve to team workspace. Agent workspace is accessible
+	//   via ToolTeamWorkspace for absolute-path access.
+	// - Direct chat (auto-resolved): keep agent workspace as default, team
+	//   workspace accessible via absolute path.
 	if req.TeamWorkspace != "" {
 		if err := os.MkdirAll(req.TeamWorkspace, 0755); err != nil {
 			slog.Warn("failed to create team workspace directory", "workspace", req.TeamWorkspace, "error", err)
 		}
-		ctx = tools.WithToolWorkspace(ctx, req.TeamWorkspace)
+		ctx = tools.WithToolTeamWorkspace(ctx, req.TeamWorkspace)
+		ctx = tools.WithToolWorkspace(ctx, req.TeamWorkspace) // default for relative paths
 	}
 	if req.TeamID != "" {
 		ctx = tools.WithToolTeamID(ctx, req.TeamID)
+	}
+
+	// Auto-resolve team workspace for agents not dispatched via team task.
+	// Lead agents default to team workspace (primary job is team coordination).
+	// Non-lead members keep own workspace; team workspace is accessible via absolute path.
+	if req.TeamWorkspace == "" && l.teamStore != nil && l.agentUUID != uuid.Nil {
+		if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil {
+			// Shared workspace: scope by teamID only. Isolated (default): scope by chatID too.
+			wsChat := req.ChatID
+			if wsChat == "" {
+				wsChat = req.UserID
+			}
+			if tools.IsSharedWorkspace(team.Settings) {
+				wsChat = ""
+			}
+			if wsDir, err := tools.WorkspaceDir(l.dataDir, team.ID, wsChat); err == nil {
+				ctx = tools.WithToolTeamWorkspace(ctx, wsDir)
+				if team.LeadAgentID == l.agentUUID {
+					ctx = tools.WithToolWorkspace(ctx, wsDir)
+				}
+			}
+			if req.TeamID == "" {
+				ctx = tools.WithToolTeamID(ctx, team.ID.String())
+			}
+		}
 	}
 
 	// Persist agent UUID + user ID on the session (for querying/tracing)
@@ -321,17 +354,11 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	// knows images were received and stored (consistent with audio/video enrichment).
 	l.enrichImageIDs(messages, mediaRefs)
 
-	// 2f. Cross-session recovery: notify team leads about orphaned pending tasks
-	// and in-progress tasks being handled by delegates.
-	// Safe because Bước 1 (early ClaimTask) ensures running tasks are in_progress,
-	// so only truly un-spawned tasks remain pending.
+	// 2f. Cross-session task reminder: notify team leads about pending and in-progress tasks.
+	// Stale recovery (expired lock → pending) is handled by the background TaskTicker.
 	if l.teamStore != nil && l.agentUUID != uuid.Nil {
 		if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil && team.LeadAgentID == l.agentUUID {
-			// Recover tasks with expired locks (stale in_progress → pending)
-			if recovered, err := l.teamStore.RecoverStaleTasks(ctx, team.ID); err == nil && recovered > 0 {
-				slog.Info("recovered stale tasks", "team", team.ID, "count", recovered)
-			}
-			if tasks, err := l.teamStore.ListTasks(ctx, team.ID, "newest", "", req.UserID, "", ""); err == nil {
+			if tasks, err := l.teamStore.ListTasks(ctx, team.ID, "newest", "active", req.UserID, "", "", 0); err == nil {
 				var stale []string
 				var inProgress []string
 				for _, t := range tasks {
@@ -388,6 +415,7 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 	var finalContent string
 	var finalThinking string
 	var asyncToolCalls []string    // track async spawn tool names for fallback
+	var bootstrapWriteDetected bool // track if write_file was called during bootstrap
 	var mediaResults []MediaResult // media files from tool MEDIA: results
 	var deliverables []string      // actual content from tool outputs (for team task results)
 	var blockReplies int           // count of block.reply events emitted (for dedup in consumer)
@@ -399,9 +427,8 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 
 	// Team task orphan detection: track team_tasks create vs spawn calls.
 	// If the LLM creates tasks but forgets to spawn, inject a reminder.
-	var teamTaskCreates int  // count of team_tasks action=create calls
-	var teamTaskSpawns int   // count of spawn calls with team_task_id
-	var teamTaskRetried bool // only retry once to prevent infinite loops
+	var teamTaskCreates int // count of team_tasks action=create calls
+	var teamTaskSpawns int  // count of spawn calls with team_task_id
 
 	// Inject retry hook so channels can update placeholder on LLM retries.
 	ctx = providers.WithRetryHook(ctx, func(attempt, maxAttempts int, err error) {
@@ -459,6 +486,18 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 			}
 		} else {
 			toolDefs = l.tools.ProviderDefs()
+		}
+
+		// Bootstrap mode: restrict API tool definitions to write_file only (open agents).
+		// Predefined agents keep all tools — BOOTSTRAP.md guides behavior.
+		if hadBootstrap && l.agentType != "predefined" {
+			var bootstrapDefs []providers.ToolDefinition
+			for _, td := range toolDefs {
+				if bootstrapToolAllowlist[td.Function.Name] {
+					bootstrapDefs = append(bootstrapDefs, td)
+				}
+			}
+			toolDefs = bootstrapDefs
 		}
 
 		chatReq := providers.ChatRequest{
@@ -602,37 +641,6 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 
 		// No tool calls → done
 		if len(resp.ToolCalls) == 0 {
-			// Guard: detect orphaned team_tasks create (created but not spawned) — v2 only.
-			// Query DB for actual pending tasks instead of just counting tool calls,
-			// because auto-created tasks (from spawn without team_task_id) bypass the counter.
-			if teamTaskCreates > teamTaskSpawns && !teamTaskRetried {
-				if l.teamStore != nil && l.agentUUID != uuid.Nil {
-					if team, _ := l.teamStore.GetTeamForAgent(ctx, l.agentUUID); team != nil && tools.IsTeamV2(team) {
-						if tasks, err := l.teamStore.ListTasks(ctx, team.ID, "newest", "", req.UserID, "", ""); err == nil {
-							var pendingIDs []string
-							for _, t := range tasks {
-								if t.Status == store.TeamTaskStatusPending {
-									pendingIDs = append(pendingIDs, t.ID.String())
-								}
-							}
-							if len(pendingIDs) > 0 {
-								teamTaskRetried = true
-								slog.Warn("team task orphan detected",
-									"agent", l.id, "pending", len(pendingIDs),
-									"creates", teamTaskCreates, "spawns", teamTaskSpawns)
-								messages = append(messages,
-									providers.Message{Role: "assistant", Content: resp.Content},
-									providers.Message{
-										Role:    "user",
-										Content: fmt.Sprintf("[System] You have %d pending task(s) awaiting dispatch: %s. These will be auto-dispatched to team members. If no longer needed, cancel with team_tasks action=cancel.", len(pendingIDs), strings.Join(pendingIDs, ", ")),
-									},
-								)
-								continue
-							}
-						}
-					}
-				}
-			}
 			// Mid-run injection (Point B): drain all buffered user follow-up messages
 			// before exiting. If found, save current assistant response and continue
 			// the loop so the LLM can respond to the injected messages.
@@ -767,6 +775,9 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 				if tid, _ := tc.Arguments["team_task_id"].(string); tid != "" {
 					teamTaskSpawns++
 				}
+			}
+			if hadBootstrap && bootstrapToolAllowlist[tc.Name] {
+				bootstrapWriteDetected = true
 			}
 
 			toolResultPayload := map[string]any{
@@ -913,6 +924,9 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 						teamTaskSpawns++
 					}
 				}
+				if hadBootstrap && bootstrapToolAllowlist[r.tc.Name] {
+					bootstrapWriteDetected = true
+				}
 
 				parToolResultPayload := map[string]any{
 					"name":      r.tc.Name,
@@ -1015,6 +1029,26 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (*RunResult, error) 
 		Content:  finalContent,
 		Thinking: finalThinking,
 	})
+
+	// Bootstrap nudge: if model didn't call write_file on turn 2+, inject reminder
+	// into session history so the next turn sees it. Appended to pendingMsgs so it's
+	// flushed in the single Save below (avoids double I/O).
+	// Note: the nudge counts as a "user" turn in history, which accelerates auto-cleanup
+	// by one turn — acceptable since bootstrap should complete in 2-3 turns anyway.
+	if hadBootstrap && l.bootstrapCleanup != nil {
+		nudgeUserTurns := 1
+		for _, m := range history {
+			if m.Role == "user" {
+				nudgeUserTurns++
+			}
+		}
+		if !bootstrapWriteDetected && nudgeUserTurns >= 2 && nudgeUserTurns < bootstrapAutoCleanupTurns {
+			pendingMsgs = append(pendingMsgs, providers.Message{
+				Role:    "user",
+				Content: "[System] You haven't completed onboarding yet. Please update USER.md with the user's details and clear BOOTSTRAP.md as instructed.",
+			})
+		}
+	}
 
 	// Flush all buffered messages to session atomically.
 	// This ensures concurrent runs never see each other's in-progress messages.

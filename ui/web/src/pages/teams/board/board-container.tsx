@@ -24,11 +24,12 @@ interface BoardContainerProps {
   getTeamTasks: (teamId: string, status?: string, channel?: string, chatId?: string) => Promise<{ tasks: TeamTaskData[]; count: number }>;
   getTaskDetail: (teamId: string, taskId: string) => Promise<{ task: TeamTaskData; comments: TeamTaskComment[]; events: TeamTaskEvent[]; attachments: TeamTaskAttachment[] }>;
   deleteTask?: (teamId: string, taskId: string) => Promise<void>;
+  onWorkspace?: () => void;
 }
 
 export const BoardContainer = memo(function BoardContainer({
   teamId, members, scopes, isTeamV2,
-  getTeamTasks, getTaskDetail, deleteTask,
+  getTeamTasks, getTaskDetail, deleteTask, onWorkspace,
 }: BoardContainerProps) {
   const { t } = useTranslation("teams");
   const viewMode = useBoardStore((s) => s.viewMode);
@@ -107,6 +108,10 @@ export const BoardContainer = memo(function BoardContainer({
   const handleCreateTask = useCallback(() => toast.info(t("board.createViaChat")), [t]);
   const handleTaskClick = useCallback((task: TeamTaskData) => setSelectedTask(task), []);
   const handleCloseDetail = useCallback(() => setSelectedTask(null), []);
+  const handleNavigateTask = useCallback((taskId: string) => {
+    const found = tasks.find((t) => t.id === taskId);
+    if (found) setSelectedTask(found);
+  }, [tasks]);
 
   // Delete handler for kanban cards (confirm + call API)
   const deleteTaskRef = useRef(deleteTask);
@@ -133,6 +138,7 @@ export const BoardContainer = memo(function BoardContainer({
         spinning={refreshing}
         onRefresh={handleRefresh}
         onCreateTask={handleCreateTask}
+        onWorkspace={onWorkspace}
       />
 
       <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -144,6 +150,7 @@ export const BoardContainer = memo(function BoardContainer({
             isTeamV2={isTeamV2}
             groupBy={groupBy}
             emojiLookup={emojiLookup}
+            taskLookup={taskLookup}
             onTaskClick={handleTaskClick}
             onDeleteTask={deleteTask ? handleDeleteTask : undefined}
           />
@@ -172,6 +179,7 @@ export const BoardContainer = memo(function BoardContainer({
           taskLookup={taskLookup}
           memberLookup={memberLookup}
           emojiLookup={emojiLookup}
+          onNavigateTask={handleNavigateTask}
         />
       )}
     </div>

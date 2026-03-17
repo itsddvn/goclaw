@@ -104,6 +104,20 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		}
 	}
 
+	// Bootstrap mode: group chats and team-dispatched sessions skip onboarding entirely;
+	// only DMs enter minimal bootstrap mode.
+	if hadBootstrap && (peerKind == "group" || bootstrap.IsTeamSession(sessionKey)) {
+		// Filter BOOTSTRAP.md from context files — groups/team tasks don't need onboarding.
+		filtered := make([]bootstrap.ContextFile, 0, len(contextFiles))
+		for _, cf := range contextFiles {
+			if cf.Path != bootstrap.BootstrapFile {
+				filtered = append(filtered, cf)
+			}
+		}
+		contextFiles = filtered
+		hadBootstrap = false
+	}
+
 	// Group writer restrictions: filter context files + inject prompt
 	if l.groupWriterCache != nil && (strings.HasPrefix(userID, "group:") || strings.HasPrefix(userID, "guild:")) {
 		senderID := store.SenderIDFromContext(ctx)
@@ -124,6 +138,13 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		mcpToolDescs = l.buildMCPToolDescs(toolNames)
 	}
 
+	// Bootstrap DM mode: only restrict tools for open agents (identity being created).
+	// Predefined agents keep full capabilities — BOOTSTRAP.md guides behavior.
+	if hadBootstrap && l.agentType != "predefined" {
+		toolNames = filterBootstrapTools(toolNames)
+		mcpToolDescs = nil
+	}
+
 	systemPrompt := BuildSystemPrompt(SystemPromptConfig{
 		AgentID:                l.id,
 		Model:                  l.model,
@@ -138,6 +159,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		HasMemory:              l.hasMemory,
 		HasSpawn:               l.tools != nil && hasSpawn,
 		HasTeam:                hasTeamTools,
+		TeamWorkspace:          tools.ToolTeamWorkspaceFromCtx(ctx),
 		HasSkillSearch:         hasSkillSearch,
 		HasMCPToolSearch:       hasMCPToolSearch,
 		HasKnowledgeGraph:      hasKG,
@@ -150,6 +172,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		SandboxWorkspaceAccess: l.sandboxWorkspaceAccess,
 		SelfEvolve:             l.selfEvolve,
 		CredentialCLIContext:   l.buildCredentialCLIContext(ctx),
+		IsBootstrap:            hadBootstrap && l.agentType != "predefined",
 	})
 
 	messages = append(messages, providers.Message{
@@ -222,6 +245,24 @@ func (l *Loop) resolveContextFiles(ctx context.Context, userID string) []bootstr
 		}
 	}
 	return merged
+}
+
+// bootstrapToolAllowlist is the set of tools available during bootstrap onboarding.
+// Only write_file (and its alias Write) are needed to save USER.md and clear BOOTSTRAP.md.
+var bootstrapToolAllowlist = map[string]bool{
+	"write_file": true,
+	"Write":      true,
+}
+
+// filterBootstrapTools returns only the bootstrap-allowed tools from the full tool list.
+func filterBootstrapTools(toolNames []string) []string {
+	var filtered []string
+	for _, name := range toolNames {
+		if bootstrapToolAllowlist[name] {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
 }
 
 // Hybrid skill thresholds: when skill count and total token estimate are below
