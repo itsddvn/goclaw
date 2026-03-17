@@ -67,7 +67,7 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 	}
 	// Hint: tell the agent it's on a team task and where the shared workspace is.
 	if ws := taskTeamWorkspace(task); ws != "" {
-		content += fmt.Sprintf("\n\n[Team workspace: %s — all files you create will be saved here, accessible by the team lead and other members via workspace_read.]", ws)
+		content += fmt.Sprintf("\n\n[Team workspace: %s — use read_file/write_file/list_files to access shared files. All files you write are visible to the team lead and other members.]", ws)
 	}
 
 	// Use task's stored channel/chat as primary source for routing.
@@ -95,9 +95,19 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 		originUserID = originChatID
 	}
 
+	// Resolve peer kind from context; fallback to task metadata, then "direct".
+	originPeerKind := ToolPeerKindFromCtx(ctx)
+	if originPeerKind == "" {
+		if pk, ok := task.Metadata["peer_kind"].(string); ok && pk != "" {
+			originPeerKind = pk
+		} else {
+			originPeerKind = "direct"
+		}
+	}
+
 	meta := map[string]string{
 		"origin_channel":   originChannel,
-		"origin_peer_kind": "direct",
+		"origin_peer_kind": originPeerKind,
 		"origin_chat_id":   originChatID,
 		"origin_user_id":   originUserID,
 		"from_agent":       fromAgent,
@@ -105,7 +115,14 @@ func (m *TeamToolManager) dispatchTaskToAgent(ctx context.Context, task *store.T
 		"team_task_id":     task.ID.String(),
 		"team_id":          teamID.String(),
 	}
-	if localKey := ToolLocalKeyFromCtx(ctx); localKey != "" {
+	// Resolve local key from context; fallback to task metadata for deferred dispatches.
+	localKey := ToolLocalKeyFromCtx(ctx)
+	if localKey == "" {
+		if lk, ok := task.Metadata["local_key"].(string); ok {
+			localKey = lk
+		}
+	}
+	if localKey != "" {
 		meta["origin_local_key"] = localKey
 	}
 	// Pass the team workspace dir so member agents write files to the shared folder.
@@ -220,8 +237,12 @@ func (m *TeamToolManager) DispatchUnblockedTasks(ctx context.Context, teamID uui
 			m.broadcastTeamEvent(protocol.EventTeamTaskAssigned, protocol.TeamTaskEventPayload{
 				TeamID:        teamID.String(),
 				TaskID:        task.ID.String(),
+				TaskNumber:    task.TaskNumber,
+				Subject:       task.Subject,
 				Status:        store.TeamTaskStatusInProgress,
 				OwnerAgentKey: m.agentKeyFromID(ctx, *task.OwnerAgentID),
+				Channel:       task.Channel,
+				ChatID:        task.ChatID,
 				Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 				ActorType:     "system",
 				ActorID:       "dispatch_unblocked",

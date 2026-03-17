@@ -83,6 +83,7 @@ func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uu
 			sb.WriteString("Do NOT use `spawn` for team delegation — `spawn` is only for self-clone subagent work.\n\n")
 			sb.WriteString("Rules:\n")
 			sb.WriteString("- Always specify `assignee` — match member expertise from the list above\n")
+			sb.WriteString("- **Check task board first** — ALWAYS call `team_tasks(action=\"list\")` before creating tasks. The system blocks creation if you skip this step\n")
 			sb.WriteString("- Create all tasks first, then briefly tell the user what you delegated\n")
 			sb.WriteString("- Do NOT add confirmations (\"Done!\", \"Got it!\") — just state what was assigned\n")
 			sb.WriteString("- Results arrive automatically — do NOT present partial results\n")
@@ -116,6 +117,7 @@ func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uu
 
 			sb.WriteString("\n## Follow-up Reminders\n\n")
 			sb.WriteString("When you need user input/decision: create+claim task, then `ask_user` with text=<question>. ONLY use when you have a question for the user — NOT for waiting on teammates or status updates.\n")
+			sb.WriteString("IMPORTANT: Present the question directly to the user in your response. `ask_user` only sets up periodic REMINDERS in case they don't reply — it does NOT present the question for you.\n")
 			sb.WriteString("System auto-sends reminders. Call `clear_ask_user` when user replies.\n")
 		} else {
 			sb.WriteString("Create a task with `team_tasks` (with `assignee`), then the system dispatches automatically.\n")
@@ -133,7 +135,7 @@ func buildTeamMD(team *store.TeamData, members []store.TeamMemberData, selfID uu
 			sb.WriteString("You are a **reviewer**. When evaluating, respond with **APPROVED** or **REJECTED: <feedback>**.\n\n")
 		}
 		sb.WriteString("As a member, just do the assigned work. Task completion is automatic.\n")
-		sb.WriteString("For long-running tasks, send progress updates via `team_message` action=send.\n")
+		sb.WriteString("For long-running tasks, use `team_tasks(action=\"progress\", percent=50, text=\"status update\")` to report progress. The task_id is auto-resolved from your assigned task — you don't need to specify it.\n")
 	}
 
 	return sb.String()
@@ -173,9 +175,10 @@ func agentToolPolicyWithMCP(policy *config.ToolPolicySpec, hasMCP bool) *config.
 	return policy
 }
 
-// agentToolPolicyWithWorkspace injects workspace_write and workspace_read into
-// alsoAllow when the agent belongs to a team, ensuring the PolicyEngine doesn't
-// block them even if the agent has a restrictive allow list.
+// agentToolPolicyWithWorkspace injects file tools into alsoAllow when the agent
+// belongs to a team, ensuring the PolicyEngine doesn't block them even if the
+// agent has a restrictive allow list. File tools are now workspace-aware via
+// WorkspaceInterceptor, so no separate workspace_write/workspace_read needed.
 func agentToolPolicyWithWorkspace(policy *config.ToolPolicySpec, hasTeam bool) *config.ToolPolicySpec {
 	if !hasTeam {
 		return policy
@@ -183,7 +186,7 @@ func agentToolPolicyWithWorkspace(policy *config.ToolPolicySpec, hasTeam bool) *
 	if policy == nil {
 		policy = &config.ToolPolicySpec{}
 	}
-	for _, tool := range []string{"workspace_write", "workspace_read"} {
+	for _, tool := range []string{"read_file", "write_file", "list_files"} {
 		if !slices.Contains(policy.AlsoAllow, tool) {
 			policy.AlsoAllow = append(policy.AlsoAllow, tool)
 		}
