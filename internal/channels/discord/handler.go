@@ -62,6 +62,11 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 		return
 	}
 
+	// Handle bot commands (writer management, etc.) before further processing.
+	if c.tryHandleCommand(m) {
+		return
+	}
+
 	// Build content
 	content := m.Content
 
@@ -139,10 +144,18 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 			}
 		}
 		if !mentioned {
+			// Collect media file paths for group history context.
+			var mediaPaths []string
+			for _, mf := range mediaFiles {
+				if mf.Path != "" {
+					mediaPaths = append(mediaPaths, mf.Path)
+				}
+			}
 			c.groupHistory.Record(channelID, channels.HistoryEntry{
 				Sender:    senderName,
 				SenderID:  senderID,
 				Body:      content,
+				Media:     mediaPaths,
 				Timestamp: m.Timestamp,
 				MessageID: m.ID,
 			}, c.historyLimit)
@@ -206,6 +219,12 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 		} else {
 			finalContent = annotated
 		}
+		// Collect media from pending history entries (sent before this @mention).
+		if histMediaPaths := c.groupHistory.CollectMedia(channelID); len(histMediaPaths) > 0 {
+			for _, p := range histMediaPaths {
+				mediaFiles = append(mediaFiles, bus.MediaFile{Path: p})
+			}
+		}
 	}
 
 	metadata := map[string]string{
@@ -231,6 +250,11 @@ func (c *Channel) handleMessage(_ *discordgo.Session, m *discordgo.MessageCreate
 				break
 			}
 		}
+	}
+
+	// Collect contact for processed messages (DM + group-mentioned).
+	if cc := c.ContactCollector(); cc != nil {
+		cc.EnsureContact(context.Background(), c.Type(), c.Name(), senderID, senderID, senderName, m.Author.Username, peerKind)
 	}
 
 	// Publish directly to bus (to preserve MediaFile MIME types)

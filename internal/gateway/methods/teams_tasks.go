@@ -46,6 +46,7 @@ func (m *TeamsMethods) parseTaskParams(ctx context.Context, client *gateway.Clie
 // RegisterTasks registers teams.tasks.* RPC handlers.
 func (m *TeamsMethods) RegisterTasks(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodTeamsTaskGet, m.handleTaskGet)
+	router.Register(protocol.MethodTeamsTaskGetLight, m.handleTaskGetLight)
 	router.Register(protocol.MethodTeamsTaskApprove, m.handleTaskApprove)
 	router.Register(protocol.MethodTeamsTaskReject, m.handleTaskReject)
 	router.Register(protocol.MethodTeamsTaskComment, m.handleTaskComment)
@@ -53,6 +54,7 @@ func (m *TeamsMethods) RegisterTasks(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodTeamsTaskEvents, m.handleTaskEvents)
 	router.Register(protocol.MethodTeamsTaskCreate, m.handleTaskCreate)
 	router.Register(protocol.MethodTeamsTaskDelete, m.handleTaskDelete)
+	router.Register(protocol.MethodTeamsTaskDeleteBulk, m.handleTaskDeleteBulk)
 	router.Register(protocol.MethodTeamsTaskAssign, m.handleTaskAssign)
 }
 
@@ -107,6 +109,47 @@ func (m *TeamsMethods) handleTaskGet(ctx context.Context, client *gateway.Client
 		"comments":    comments,
 		"events":      events,
 		"attachments": attachments,
+	}))
+}
+
+// --- Task Get Light (task only, no comments/events/attachments) ---
+
+func (m *TeamsMethods) handleTaskGetLight(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	var params taskGetParams
+	locale, ok := m.parseTaskParams(ctx, client, req, &params)
+	if !ok {
+		return
+	}
+
+	teamID, err := uuid.Parse(params.TeamID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidID, "teamId")))
+		return
+	}
+	taskID, err := uuid.Parse(params.TaskID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidID, "taskId")))
+		return
+	}
+
+	task, err := m.teamStore.GetTask(ctx, taskID)
+	if err != nil {
+		if errors.Is(err, store.ErrTaskNotFound) {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, i18n.T(locale, i18n.MsgNotFound, "task", "")))
+		} else {
+			slog.Warn("teams.tasks.get-light failed", "task_id", taskID, "error", err)
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgInternalError, "")))
+		}
+		return
+	}
+
+	if task.TeamID != teamID {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, i18n.T(locale, i18n.MsgNotFound, "task", "")))
+		return
+	}
+
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"task": task,
 	}))
 }
 
@@ -287,12 +330,21 @@ func (m *TeamsMethods) handleTaskComment(ctx context.Context, client *gateway.Cl
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"ok": true}))
 
 	if m.msgBus != nil {
+		commentPreview := params.Content
+		if runes := []rune(commentPreview); len(runes) > 500 {
+			commentPreview = string(runes[:500]) + "..."
+		}
 		m.msgBus.Broadcast(taskBusEvent(protocol.EventTeamTaskCommented, protocol.TeamTaskEventPayload{
-			TeamID:    teamID.String(),
-			TaskID:    taskID.String(),
-			UserID:    client.UserID(),
-			Channel:   "dashboard",
-			Timestamp: taskNowUTC(),
+			TeamID:      teamID.String(),
+			TaskID:      taskID.String(),
+			TaskNumber:  task.TaskNumber,
+			Subject:     task.Subject,
+			CommentText: commentPreview,
+			UserID:      client.UserID(),
+			Channel:     "dashboard",
+			Timestamp:   taskNowUTC(),
+			ActorType:   "human",
+			ActorID:     client.UserID(),
 		}))
 	}
 }
@@ -456,17 +508,11 @@ func (m *TeamsMethods) handleTaskCreate(ctx context.Context, client *gateway.Cli
 		return
 	}
 
-	// Auto-assign: use explicit assignTo, otherwise fall back to team lead.
-	assignTo := params.AssignTo
-	if assignTo == "" {
-		team, err := m.teamStore.GetTeam(ctx, teamID)
-		if err == nil && team != nil && team.LeadAgentID != uuid.Nil {
-			assignTo = team.LeadAgentID.String()
-		}
-	}
+	// Auto-assign only when user explicitly specifies an agent.
+	// Unassigned tasks stay pending (backlog) — user assigns via UI when ready.
 	var autoAssignedAgentID uuid.UUID
-	if assignTo != "" {
-		agentID, err := uuid.Parse(assignTo)
+	if params.AssignTo != "" {
+		agentID, err := uuid.Parse(params.AssignTo)
 		if err == nil {
 			if err := m.teamStore.AssignTask(ctx, task.ID, agentID, teamID); err != nil {
 				slog.Warn("teams.tasks.create auto-assign failed", "task_id", task.ID, "agent_id", agentID, "error", err)
@@ -482,14 +528,17 @@ func (m *TeamsMethods) handleTaskCreate(ctx context.Context, client *gateway.Cli
 
 	if m.msgBus != nil {
 		m.msgBus.Broadcast(taskBusEvent(protocol.EventTeamTaskCreated, protocol.TeamTaskEventPayload{
-			TeamID:    teamID.String(),
-			TaskID:    task.ID.String(),
-			Status:    store.TeamTaskStatusPending,
-			UserID:    client.UserID(),
-			Channel:   "dashboard",
-			Timestamp: taskNowUTC(),
-			ActorType: "human",
-			ActorID:   client.UserID(),
+			TeamID:     teamID.String(),
+			TaskID:     task.ID.String(),
+			TaskNumber: task.TaskNumber,
+			Subject:    task.Subject,
+			Status:     task.Status,
+			UserID:     client.UserID(),
+			Channel:    ch,
+			ChatID:     cid,
+			Timestamp:  taskNowUTC(),
+			ActorType:  "human",
+			ActorID:    client.UserID(),
 		}))
 
 		if autoAssignedAgentID != uuid.Nil {
@@ -499,7 +548,8 @@ func (m *TeamsMethods) handleTaskCreate(ctx context.Context, client *gateway.Cli
 				Status:        store.TeamTaskStatusInProgress,
 				OwnerAgentKey: autoAssignedAgentID.String(),
 				UserID:        client.UserID(),
-				Channel:       "dashboard",
+				Channel:       ch,
+				ChatID:        cid,
 				Timestamp:     taskNowUTC(),
 				ActorType:     "human",
 				ActorID:       client.UserID(),
@@ -572,14 +622,15 @@ func (m *TeamsMethods) handleTaskAssign(ctx context.Context, client *gateway.Cli
 			TaskID:    taskID.String(),
 			Status:    store.TeamTaskStatusInProgress,
 			UserID:    client.UserID(),
-			Channel:   "dashboard",
+			Channel:   task.Channel,
+			ChatID:    task.ChatID,
 			Timestamp: taskNowUTC(),
 			ActorType: "human",
 			ActorID:   client.UserID(),
 		}))
 
 		// Dispatch task to the assigned agent via message bus so the consumer
-		// routes it through the agent loop (same pattern as team_message).
+		// routes it through the agent loop.
 		m.dispatchTaskToAgent(ctx, task, taskID, teamID, agentID, client.UserID())
 	}
 }
@@ -648,6 +699,70 @@ func (m *TeamsMethods) handleTaskDelete(ctx context.Context, client *gateway.Cli
 			ActorType: "human",
 			ActorID:   client.UserID(),
 		}))
+	}
+}
+
+// --- Task Delete Bulk (hard-delete multiple terminal-status tasks) ---
+
+type taskDeleteBulkParams struct {
+	TeamID  string   `json:"teamId"`
+	TaskIDs []string `json:"taskIds"`
+}
+
+func (m *TeamsMethods) handleTaskDeleteBulk(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	var params taskDeleteBulkParams
+	locale, ok := m.parseTaskParams(ctx, client, req, &params)
+	if !ok {
+		return
+	}
+
+	teamID, err := uuid.Parse(params.TeamID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidID, "teamId")))
+		return
+	}
+	if len(params.TaskIDs) == 0 {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "taskIds is required"))
+		return
+	}
+
+	taskUUIDs := make([]uuid.UUID, 0, len(params.TaskIDs))
+	for _, raw := range params.TaskIDs {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			continue // skip invalid IDs
+		}
+		taskUUIDs = append(taskUUIDs, id)
+	}
+	if len(taskUUIDs) == 0 {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "no valid taskIds"))
+		return
+	}
+
+	deleted, err := m.teamStore.DeleteTasks(ctx, taskUUIDs, teamID)
+	if err != nil {
+		slog.Warn("teams.tasks.delete-bulk failed", "team_id", teamID, "error", err)
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgInternalError, "")))
+		return
+	}
+
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+		"deleted": len(deleted),
+	}))
+
+	// Broadcast delete event per task for real-time UI sync.
+	if m.msgBus != nil {
+		for _, id := range deleted {
+			m.msgBus.Broadcast(taskBusEvent(protocol.EventTeamTaskDeleted, protocol.TeamTaskEventPayload{
+				TeamID:    teamID.String(),
+				TaskID:    id.String(),
+				UserID:    client.UserID(),
+				Channel:   "dashboard",
+				Timestamp: taskNowUTC(),
+				ActorType: "human",
+				ActorID:   client.UserID(),
+			}))
+		}
 	}
 }
 

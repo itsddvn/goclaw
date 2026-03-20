@@ -133,6 +133,7 @@ export const Methods = {
   TEAMS_DELETE: "teams.delete",
   TEAMS_TASK_LIST: "teams.tasks.list",
   TEAMS_TASK_GET: "teams.tasks.get",
+  TEAMS_TASK_GET_LIGHT: "teams.tasks.get-light",
   TEAMS_TASK_APPROVE: "teams.tasks.approve",
   TEAMS_TASK_REJECT: "teams.tasks.reject",
   TEAMS_TASK_COMMENT: "teams.tasks.comment",
@@ -140,6 +141,7 @@ export const Methods = {
   TEAMS_TASK_EVENTS: "teams.tasks.events",
   TEAMS_TASK_CREATE: "teams.tasks.create",
   TEAMS_TASK_DELETE: "teams.tasks.delete",
+  TEAMS_TASK_DELETE_BULK: "teams.tasks.delete-bulk",
   TEAMS_TASK_ASSIGN: "teams.tasks.assign",
   TEAMS_MEMBERS_ADD: "teams.members.add",
   TEAMS_MEMBERS_REMOVE: "teams.members.remove",
@@ -149,6 +151,21 @@ export const Methods = {
   TEAMS_WORKSPACE_LIST: "teams.workspace.list",
   TEAMS_WORKSPACE_READ: "teams.workspace.read",
   TEAMS_WORKSPACE_DELETE: "teams.workspace.delete",
+
+  // Heartbeat
+  HEARTBEAT_GET: "heartbeat.get",
+  HEARTBEAT_SET: "heartbeat.set",
+  HEARTBEAT_TOGGLE: "heartbeat.toggle",
+  HEARTBEAT_TEST: "heartbeat.test",
+  HEARTBEAT_LOGS: "heartbeat.logs",
+  HEARTBEAT_CHECKLIST_GET: "heartbeat.checklist.get",
+  HEARTBEAT_CHECKLIST_SET: "heartbeat.checklist.set",
+  HEARTBEAT_TARGETS: "heartbeat.targets",
+
+  // Config permissions
+  CONFIG_PERMISSIONS_LIST: "config.permissions.list",
+  CONFIG_PERMISSIONS_GRANT: "config.permissions.grant",
+  CONFIG_PERMISSIONS_REVOKE: "config.permissions.revoke",
 
   // Phase 3+ - NICE TO HAVE
   LOGS_TAIL: "logs.tail",
@@ -179,13 +196,18 @@ export const Events = {
   TEAM_TASK_CLAIMED: "team.task.claimed",
   TEAM_TASK_COMPLETED: "team.task.completed",
   TEAM_TASK_CANCELLED: "team.task.cancelled",
+  TEAM_TASK_FAILED: "team.task.failed",
   TEAM_TASK_REVIEWED: "team.task.reviewed",
   TEAM_TASK_APPROVED: "team.task.approved",
   TEAM_TASK_REJECTED: "team.task.rejected",
   TEAM_TASK_PROGRESS: "team.task.progress",
   TEAM_TASK_COMMENTED: "team.task.commented",
   TEAM_TASK_ASSIGNED: "team.task.assigned",
+  TEAM_TASK_DISPATCHED: "team.task.dispatched",
   TEAM_TASK_DELETED: "team.task.deleted",
+
+  // Team leader processing (bridges gap between last task.completed and announce run.started)
+  TEAM_LEADER_PROCESSING: "team.leader.processing",
 
   // Team messages
   TEAM_MESSAGE_SENT: "team.message.sent",
@@ -205,6 +227,9 @@ export const Events = {
   AGENT_LINK_UPDATED: "agent_link.updated",
   AGENT_LINK_DELETED: "agent_link.deleted",
 
+  // Session lifecycle
+  SESSION_UPDATED: "session.updated",
+
   // Trace lifecycle
   TRACE_UPDATED: "trace.updated",
 
@@ -215,6 +240,8 @@ export const Events = {
   // Skill dependency install (triggered by POST /v1/skills/install-deps)
   SKILL_DEPS_INSTALLING: "skill.deps.installing",
   SKILL_DEPS_INSTALLED: "skill.deps.installed",
+
+  HEARTBEAT: "heartbeat",
 } as const;
 
 /** All event names relevant to team debug view */
@@ -223,7 +250,7 @@ export const TEAM_RELATED_EVENTS: Set<string> = new Set([
   Events.TEAM_TASK_COMPLETED, Events.TEAM_TASK_CANCELLED,
   Events.TEAM_TASK_REVIEWED, Events.TEAM_TASK_APPROVED,
   Events.TEAM_TASK_REJECTED, Events.TEAM_TASK_PROGRESS,
-  Events.TEAM_TASK_COMMENTED, Events.TEAM_TASK_ASSIGNED, Events.TEAM_TASK_DELETED,
+  Events.TEAM_TASK_COMMENTED, Events.TEAM_TASK_ASSIGNED, Events.TEAM_TASK_DISPATCHED, Events.TEAM_TASK_DELETED,
   Events.TEAM_MESSAGE_SENT,
   Events.TEAM_CREATED, Events.TEAM_UPDATED, Events.TEAM_DELETED,
   Events.TEAM_MEMBER_ADDED, Events.TEAM_MEMBER_REMOVED,

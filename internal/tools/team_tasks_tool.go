@@ -42,7 +42,7 @@ func (t *TeamTasksTool) Parameters() map[string]any {
 			},
 			"description": map[string]any{
 				"type":        "string",
-				"description": "Task description (for create or update)",
+				"description": "Task description with clear objectives and requirements. Include all context the assignee needs to complete the task independently.",
 			},
 			"result": map[string]any{
 				"type":        "string",
@@ -58,7 +58,7 @@ func (t *TeamTasksTool) Parameters() map[string]any {
 			},
 			"query": map[string]any{
 				"type":        "string",
-				"description": "Search query for action=search",
+				"description": "Search query for action=search (supports keyword AND semantic matching). Use search before create to check for duplicates.",
 			},
 			"priority": map[string]any{
 				"type":        "number",
@@ -74,8 +74,8 @@ func (t *TeamTasksTool) Parameters() map[string]any {
 				"description": "Require user approval before claim (for create, default false)",
 			},
 			"percent": map[string]any{
-				"type":        "number",
-				"description": "Progress 0-100 (for progress)",
+				"type":        "integer",
+				"description": "Progress percentage 0-100 (for progress action)",
 			},
 			"file_id": map[string]any{
 				"type":        "string",

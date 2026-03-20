@@ -5,7 +5,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/ui/combobox";
-import { Bot, UserPlus, X } from "lucide-react";
+import { Bot, UserPlus, X, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAgents } from "@/pages/agents/hooks/use-agents";
 import type { TeamMemberData } from "@/types/team";
@@ -67,6 +67,8 @@ export function TeamMembersDialog({
     [members],
   );
 
+  const [removing, setRemoving] = useState<string | null>(null);
+
   const handleAdd = async () => {
     if (!selected) return;
     setAdding(true);
@@ -74,8 +76,22 @@ export function TeamMembersDialog({
       await onAddMember(selected, "member");
       setSelected("");
       setShowAdd(false);
-    } catch { /* handled upstream */ }
-    finally { setAdding(false); }
+    } catch {
+      // toast handled by hook
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleRemove = async (agentId: string) => {
+    setRemoving(agentId);
+    try {
+      await onRemoveMember(agentId);
+    } catch {
+      // toast handled by hook
+    } finally {
+      setRemoving(null);
+    }
   };
 
   return (
@@ -104,7 +120,8 @@ export function TeamMembersDialog({
                 placeholder={t("members.searchAgents")}
               />
             </div>
-            <Button size="sm" className="h-9 shrink-0" disabled={!selected || adding} onClick={handleAdd}>
+            <Button size="sm" className="h-9 shrink-0 gap-1" disabled={!selected || adding} onClick={handleAdd}>
+              {adding && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
               {t("members.add")}
             </Button>
           </div>
@@ -139,10 +156,11 @@ export function TeamMembersDialog({
               </div>
               {m.role !== "lead" && (
                 <button
-                  className="mt-0.5 shrink-0 cursor-pointer text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                  onClick={() => onRemoveMember(m.agent_id)}
+                  className="mt-0.5 shrink-0 cursor-pointer text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 disabled:opacity-50"
+                  onClick={() => handleRemove(m.agent_id)}
+                  disabled={removing === m.agent_id}
                 >
-                  <X className="h-4 w-4" />
+                  {removing === m.agent_id ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
                 </button>
               )}
             </div>

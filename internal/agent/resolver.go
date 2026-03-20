@@ -75,8 +75,8 @@ type ResolverDeps struct {
 	// Skill access store — for per-agent skill visibility filtering
 	SkillAccessStore store.SkillAccessStore
 
-	// Group file writer cache
-	GroupWriterCache *store.GroupWriterCache
+	// Config permission store for group file writer checks
+	ConfigPermStore store.ConfigPermissionStore
 
 	// Persistent media storage for cross-turn image/document access
 	MediaStore *media.Store
@@ -174,17 +174,17 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 		if !hasTeam {
 			contextFiles = append(contextFiles, bootstrap.ContextFile{
 				Path:    bootstrap.AvailabilityFile,
-				Content: "You are NOT part of any team. Do not use team_tasks or team_message tools.",
+				Content: "You are NOT part of any team. Do not use team_tasks tool.",
 			})
 		}
 
 		contextWindow := ag.ContextWindow
 		if contextWindow <= 0 {
-			contextWindow = 200000
+			contextWindow = config.DefaultContextWindow
 		}
 		maxIter := ag.MaxToolIterations
 		if maxIter <= 0 {
-			maxIter = 20
+			maxIter = config.DefaultMaxIterations
 		}
 
 		// Per-agent config overrides (fallback to global defaults from config.json)
@@ -250,7 +250,9 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			if err := mcpMgr.LoadForAgent(ctx, ag.ID, ""); err != nil {
 				slog.Warn("failed to load MCP servers for agent", "agent", agentKey, "error", err)
 			} else if mcpMgr.IsSearchMode() {
-				// Search mode: too many tools — register mcp_tool_search meta-tool
+				// Search mode: too many tools — register mcp_tool_search meta-tool.
+				// Also wire lazy activator so deferred tools can be called by name directly.
+				toolsReg.SetDeferredActivator(mcpMgr.ActivateToolIfDeferred)
 				searchTool := mcpbridge.NewMCPToolSearchTool(mcpMgr)
 				toolsReg.Register(searchTool)
 				hasMCPTools = true
@@ -343,8 +345,11 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			BuiltinToolSettings:    builtinSettings,
 			ThinkingLevel:          ag.ParseThinkingLevel(),
 			SelfEvolve:             ag.ParseSelfEvolve(),
+			SkillEvolve:            ag.AgentType == store.AgentTypePredefined && ag.ParseSkillEvolve(),
+			SkillNudgeInterval:     ag.ParseSkillNudgeInterval(),
 			WorkspaceSharing:       ag.ParseWorkspaceSharing(),
-			GroupWriterCache:       deps.GroupWriterCache,
+			ShellDenyGroups:        ag.ParseShellDenyGroups(),
+			ConfigPermStore:        deps.ConfigPermStore,
 			TeamStore:              deps.TeamStore,
 			SecureCLIStore:         deps.SecureCLIStore,
 			MediaStore:             deps.MediaStore,
