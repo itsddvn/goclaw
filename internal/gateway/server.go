@@ -48,9 +48,11 @@ type Server struct {
 	providersHandler        *httpapi.ProvidersHandler        // provider CRUD API
 	delegationsHandler      *httpapi.DelegationsHandler      // delegation history API
 	teamEventsHandler       *httpapi.TeamEventsHandler       // team event history API
+	teamAttachmentsHandler  *httpapi.TeamAttachmentsHandler  // team attachment download API
 	builtinToolsHandler     *httpapi.BuiltinToolsHandler     // builtin tool management API
 	pendingMessagesHandler  *httpapi.PendingMessagesHandler  // pending messages API
 	secureCLIHandler       *httpapi.SecureCLIHandler        // secure CLI credential CRUD API
+	packagesHandler        *httpapi.PackagesHandler         // runtime package management API
 	memoryHandler           *httpapi.MemoryHandler           // memory management API
 	kgHandler               *httpapi.KnowledgeGraphHandler   // knowledge graph API
 	oauthHandler            *httpapi.OAuthHandler            // OAuth endpoints
@@ -224,6 +226,11 @@ func (s *Server) BuildMux() *http.ServeMux {
 		s.teamEventsHandler.RegisterRoutes(mux)
 	}
 
+	// Team attachment download API
+	if s.teamAttachmentsHandler != nil {
+		s.teamAttachmentsHandler.RegisterRoutes(mux)
+	}
+
 	// Builtin tool management API
 	if s.builtinToolsHandler != nil {
 		s.builtinToolsHandler.RegisterRoutes(mux)
@@ -274,6 +281,10 @@ func (s *Server) BuildMux() *http.ServeMux {
 
 	if s.usageHandler != nil {
 		s.usageHandler.RegisterRoutes(mux)
+	}
+
+	if s.packagesHandler != nil {
+		s.packagesHandler.RegisterRoutes(mux)
 	}
 
 	// API documentation (OpenAPI spec + Swagger UI)
@@ -481,6 +492,11 @@ func (s *Server) SetDelegationsHandler(h *httpapi.DelegationsHandler) { s.delega
 // SetTeamEventsHandler sets the team event history handler.
 func (s *Server) SetTeamEventsHandler(h *httpapi.TeamEventsHandler) { s.teamEventsHandler = h }
 
+// SetTeamAttachmentsHandler sets the team attachment download handler.
+func (s *Server) SetTeamAttachmentsHandler(h *httpapi.TeamAttachmentsHandler) {
+	s.teamAttachmentsHandler = h
+}
+
 // SetPendingMessagesHandler sets the pending messages handler.
 func (s *Server) SetPendingMessagesHandler(h *httpapi.PendingMessagesHandler) {
 	s.pendingMessagesHandler = h
@@ -493,6 +509,9 @@ func (s *Server) SetBuiltinToolsHandler(h *httpapi.BuiltinToolsHandler) {
 
 // SetSecureCLIHandler sets the secure CLI credential CRUD handler.
 func (s *Server) SetSecureCLIHandler(h *httpapi.SecureCLIHandler) { s.secureCLIHandler = h }
+
+// SetPackagesHandler sets the runtime package management handler.
+func (s *Server) SetPackagesHandler(h *httpapi.PackagesHandler) { s.packagesHandler = h }
 
 // SetOAuthHandler sets the OAuth handler (available in all modes).
 func (s *Server) SetOAuthHandler(h *httpapi.OAuthHandler) { s.oauthHandler = h }
