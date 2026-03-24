@@ -63,7 +63,7 @@ func processNormalMessage(
 	if peerKind == "" {
 		peerKind = string(sessions.PeerDirect) // default to DM
 	}
-	sessionKey := sessions.BuildScopedSessionKey(agentID, msg.Channel, sessions.PeerKind(peerKind), msg.ChatID, cfg.Sessions.Scope, cfg.Sessions.DmScope, cfg.Sessions.MainKey)
+	sessionKey := sessions.BuildScopedSessionKey(agentID, msg.Channel, sessions.PeerKind(peerKind), msg.ChatID)
 
 	// Forum topic: override session key to isolate per-topic history.
 	// TS ref: buildTelegramGroupPeerId() in src/telegram/bot/helpers.ts
@@ -314,6 +314,11 @@ func processNormalMessage(
 	// Inject post-turn dispatch tracker so team task creates are deferred.
 	ptd := tools.NewPendingTeamDispatch()
 	schedCtx := tools.WithPendingTeamDispatch(ctx, ptd)
+
+	// Propagate run_kind from metadata (e.g. "notification" for team task status relays).
+	if rk := msg.Metadata["run_kind"]; rk != "" {
+		schedCtx = tools.WithRunKind(schedCtx, rk)
+	}
 
 	// Schedule through main lane (per-session concurrency controlled by maxConcurrent)
 	outCh := sched.ScheduleWithOpts(schedCtx, "main", agent.RunRequest{
