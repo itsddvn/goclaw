@@ -25,7 +25,6 @@
     "wait": "This may take a moment",
     "fileLabelSOUL": "Core personality",
     "fileLabelIDENTITY": "Identity & knowledge",
-    "fileLabelUSER_PREDEFINED": "User context",
     "agentReady": "{{name}} is ready!",
     "retrying": "Retrying..."
   },
@@ -35,11 +34,13 @@
       "appearance": "Appearance",
       "providers": "Providers",
       "agents": "Agents",
+      "channels": "Channels",
       "mcp": "MCP",
       "skills": "Skills",
       "tools": "Tools",
       "cron": "Cron",
       "traces": "Traces",
+      "storage": "Storage",
       "about": "About"
     },
     "theme": "Theme",
@@ -76,7 +77,18 @@
     "maxTeamMembers": "5 max",
     "databaseValue": "SQLite (local)",
     "usersValue": "Single user",
-    "builtWith": "Built with Go + React + Wails"
+    "builtWith": "Built with Go + React + Wails",
+    "reset": {
+      "title": "Danger Zone",
+      "description": "Delete the database and restart the app. All agents, sessions, providers, and settings will be permanently lost.",
+      "button": "Reset Database",
+      "confirmTitle": "Reset Database?",
+      "confirmDescription": "This will delete all your data and restart the app from scratch.",
+      "confirmPrompt": "Type {{word}} to confirm",
+      "cancel": "Cancel",
+      "confirm": "Reset & Restart",
+      "resetting": "Resetting..."
+    }
   },
   "presets": {
     "researcher": {

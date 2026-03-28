@@ -21,10 +21,13 @@ class ApiClient {
   }
 
   private headers(extra?: Record<string, string>): Record<string, string> {
+    // Send locale for i18n error messages from backend
+    const lang = typeof localStorage !== 'undefined' ? localStorage.getItem('goclaw:language') : null
     return {
       Authorization: `Bearer ${this.token}`,
       'Content-Type': 'application/json',
       'X-GoClaw-User-Id': 'system',
+      ...(lang ? { 'Accept-Language': lang } : {}),
       ...extra,
     }
   }
@@ -41,9 +44,14 @@ class ApiClient {
       let code: string | undefined
       let message = res.statusText
       try {
-        const json = (await res.json()) as { error?: { code?: string; message?: string } }
-        code = json.error?.code
-        message = json.error?.message ?? message
+        const json = await res.json()
+        // Backend sends either { error: "string" } or { error: { code, message } }
+        if (typeof json.error === 'string') {
+          message = json.error
+        } else if (json.error && typeof json.error === 'object') {
+          code = json.error.code
+          message = json.error.message ?? message
+        }
       } catch {
         // non-JSON error body
       }
@@ -90,6 +98,46 @@ class ApiClient {
   async signFileUrl(filePath: string): Promise<string> {
     const res = await this.post<{ url: string }>('/v1/files/sign', { path: filePath })
     return `${this.baseUrl}${res.url}`
+  }
+
+  /** Fetch a file as Blob with Bearer auth. Used for image previews and downloads. */
+  async fetchBlob(path: string, params?: Record<string, string>): Promise<Blob> {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+    const url = `${this.baseUrl}${path}${qs}`
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.token}` },
+    })
+    if (!res.ok) throw new ApiError(res.statusText, res.status)
+    return res.blob()
+  }
+
+  /** Fetch an SSE stream with Bearer auth. Used for storage size streaming. */
+  async streamFetch(path: string, signal?: AbortSignal): Promise<Response> {
+    const url = `${this.baseUrl}${path}`
+    return fetch(url, {
+      headers: { Authorization: `Bearer ${this.token}` },
+      signal,
+    })
+  }
+
+  /** Raw PUT request without JSON body (for query-param-only endpoints like /v1/storage/move). */
+  async putRaw(path: string): Promise<void> {
+    const url = `${this.baseUrl}${path}`
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'X-GoClaw-User-Id': 'system',
+      },
+    })
+    if (!res.ok) {
+      let message = res.statusText
+      try {
+        const json = (await res.json()) as { error?: string | { message?: string } }
+        message = typeof json.error === 'string' ? json.error : json.error?.message ?? message
+      } catch { /* non-JSON */ }
+      throw new ApiError(message, res.status)
+    }
   }
 
   async uploadFile<T = { url: string }>(path: string, file: File): Promise<T> {

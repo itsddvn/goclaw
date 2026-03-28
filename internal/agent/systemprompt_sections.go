@@ -131,12 +131,8 @@ func buildProjectContextSection(files []bootstrap.ContextFile, agentType string)
 		}
 	}
 
-	if hasBootstrap {
-		lines = append(lines,
-			"",
-			"IMPORTANT: BOOTSTRAP.md is present — this is your FIRST RUN. You MUST follow the instructions in BOOTSTRAP.md before doing anything else. Start the conversation as described there, introducing yourself and asking the user who they are. Do NOT respond with a generic greeting.",
-		)
-	}
+	// Bootstrap reminder removed — the FIRST RUN section in BuildSystemPrompt()
+	// provides stronger, earlier framing. Duplicate reminders dilute the signal.
 
 	if isPredefined && hasUserPredefined {
 		lines = append(lines,
@@ -358,6 +354,16 @@ func hasBootstrapFile(files []bootstrap.ContextFile) bool {
 		}
 	}
 	return false
+}
+
+// findContextFileContent returns the content of a context file by name, or "" if not found.
+func findContextFileContent(files []bootstrap.ContextFile, name string) string {
+	for _, f := range files {
+		if f.Path == name {
+			return f.Content
+		}
+	}
+	return ""
 }
 
 // hasTeamWorkspace checks if team_tasks is in the tool list (indicates team context).

@@ -25,7 +25,6 @@
     "wait": "Có thể mất một lúc",
     "fileLabelSOUL": "Tính cách cốt lõi",
     "fileLabelIDENTITY": "Danh tính & kiến thức",
-    "fileLabelUSER_PREDEFINED": "Ngữ cảnh người dùng",
     "agentReady": "{{name}} đã sẵn sàng!",
     "retrying": "Đang thử lại..."
   },
@@ -35,11 +34,13 @@
       "appearance": "Appearance",
       "providers": "Providers",
       "agents": "Agents",
+      "channels": "Kênh",
       "mcp": "MCP",
       "skills": "Skills",
       "tools": "Tools",
       "cron": "Cron",
       "traces": "Traces",
+      "storage": "Lưu trữ",
       "about": "About"
     },
     "theme": "Theme",
@@ -76,7 +77,18 @@
     "maxTeamMembers": "5 max",
     "databaseValue": "SQLite (local)",
     "usersValue": "Single user",
-    "builtWith": "Built with Go + React + Wails"
+    "builtWith": "Built with Go + React + Wails",
+    "reset": {
+      "title": "Vùng nguy hiểm",
+      "description": "Xóa database và khởi động lại ứng dụng. Tất cả agents, phiên chat, providers và cài đặt sẽ bị mất vĩnh viễn.",
+      "button": "Đặt lại Database",
+      "confirmTitle": "Đặt lại Database?",
+      "confirmDescription": "Thao tác này sẽ xóa toàn bộ dữ liệu và khởi động lại từ đầu.",
+      "confirmPrompt": "Nhập {{word}} để xác nhận",
+      "cancel": "Hủy",
+      "confirm": "Đặt lại & Khởi động lại",
+      "resetting": "Đang đặt lại..."
+    }
   },
   "presets": {
     "researcher": {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
@@ -35,10 +36,12 @@ type ResolverDeps struct {
 	OnEvent        func(AgentEvent)
 	TraceCollector *tracing.Collector
 
-	// Per-user file seeding + dynamic context loading
-	EnsureUserFiles   EnsureUserFilesFunc
+	// Per-user profile + file seeding + dynamic context loading
+	EnsureUserProfile EnsureUserProfileFunc
+	SeedUserFiles     SeedUserFilesFunc
 	ContextFileLoader ContextFileLoaderFunc
 	BootstrapCleanup  BootstrapCleanupFunc
+	CacheInvalidate   CacheInvalidateFunc
 
 	// Security
 	InjectionAction string // "log", "warn", "block", "off"
@@ -365,9 +368,11 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			SkillAllowList:         skillAllowList,
 			HasMemory:              hasMemory,
 			ContextFiles:           contextFiles,
-			EnsureUserFiles:        deps.EnsureUserFiles,
+			EnsureUserProfile:      deps.EnsureUserProfile,
+			SeedUserFiles:          deps.SeedUserFiles,
 			ContextFileLoader:      deps.ContextFileLoader,
 			BootstrapCleanup:       deps.BootstrapCleanup,
+			CacheInvalidate:        deps.CacheInvalidate,
 			OnEvent:                deps.OnEvent,
 			TraceCollector:         deps.TraceCollector,
 			InjectionAction:        deps.InjectionAction,
@@ -402,10 +407,17 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 
 // InvalidateAgent removes an agent from the router cache, forcing re-resolution.
 // Used when agent config is updated via API.
+// Matches both plain key ("agentKey") and tenant-scoped key ("tenantID:agentKey")
+// because callers only pass the agentKey without tenant context.
 func (r *Router) InvalidateAgent(agentKey string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.agents, agentKey)
+	suffix := ":" + agentKey
+	for key := range r.agents {
+		if key == agentKey || strings.HasSuffix(key, suffix) {
+			delete(r.agents, key)
+		}
+	}
 	slog.Debug("invalidated agent cache", "agent", agentKey)
 }
 
