@@ -47,6 +47,7 @@ export function useChatMessages(sessionKey: string, agentId: string) {
   const prevKeyRef = useRef(sessionKey);
   useEffect(() => {
     if (sessionKey === prevKeyRef.current) return;
+    const wasEmpty = !prevKeyRef.current;
     prevKeyRef.current = sessionKey;
     setStreamText(null);
     setThinkingText(null);
@@ -56,7 +57,11 @@ export function useChatMessages(sessionKey: string, agentId: string) {
     setBlockReplies([]);
     setTeamTasks([]);
     runIdRef.current = null;
-    expectingRunRef.current = false;
+    // Only reset when switching between existing sessions, not on "" → new key
+    // (the "" → key transition is part of the send flow for new sessions).
+    if (!wasEmpty) {
+      expectingRunRef.current = false;
+    }
     streamRef.current = "";
     thinkingRef.current = "";
     toolStreamRef.current = [];
@@ -100,7 +105,7 @@ export function useChatMessages(sessionKey: string, agentId: string) {
           chatMsg.mediaItems = m.media_refs.map((ref) => ({
             path: toFileUrl(ref.path || ref.id),
             mimeType: ref.mime_type,
-            fileName: ref.path?.split("/").pop() ?? ref.id,
+            fileName: (ref.path?.split("?")[0]?.split("/").pop()) ?? ref.id,
             kind: (ref.kind as MediaItem["kind"]) || "document",
           }));
         }
@@ -339,7 +344,7 @@ export function useChatMessages(sessionKey: string, agentId: string) {
             ? rawMedia.map((m) => ({
                 path: toFileUrl(m.path),
                 mimeType: m.content_type ?? "application/octet-stream",
-                fileName: m.path.split("/").pop() ?? "file",
+                fileName: m.path.split("?")[0]?.split("/").pop() ?? "file",
                 size: m.size,
                 kind: mediaKindFromMime(m.content_type ?? ""),
               }))

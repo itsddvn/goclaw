@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
 export type AppView = 'chat' | 'settings' | 'team-board'
-export type SettingsTab = 'appearance' | 'providers' | 'agents' | 'mcp' | 'skills' | 'tools' | 'cron' | 'traces' | 'about'
+export type SettingsTab = 'appearance' | 'providers' | 'agents' | 'channels' | 'mcp' | 'skills' | 'tools' | 'cron' | 'traces' | 'storage' | 'about'
 
 interface UiState {
   theme: 'dark' | 'light'
@@ -31,8 +31,8 @@ interface UiState {
 export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
-      theme: 'dark',
-      locale: 'en',
+      theme: 'light',
+      locale: 'vi',
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       sidebarOpen: true,
       sidebarWidth: 260,

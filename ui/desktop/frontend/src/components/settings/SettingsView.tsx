@@ -9,6 +9,8 @@ import { SkillList } from './skills/SkillList'
 import { ToolList } from './tools/ToolList'
 import { CronList } from './cron/CronList'
 import { TraceList } from './traces/TraceList'
+import { StorageTab } from './storage/StorageTab'
+import { ChannelList } from './channels/ChannelList'
 
 export function SettingsView() {
   const settingsTab = useUiStore((s) => s.settingsTab)
@@ -37,11 +39,19 @@ export function SettingsView() {
       </div>
 
       {/* Tab content */}
-      <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4 canvas-dots">
-        <div className="bg-surface-secondary border border-border rounded-xl p-5">
-          <TabContent tab={settingsTab} />
+      {settingsTab === 'storage' ? (
+        <div className="flex-1 flex flex-col min-h-0 px-4 py-4 canvas-dots">
+          <div className="bg-surface-secondary border border-border rounded-xl p-5 flex-1 flex flex-col min-h-0">
+            <TabContent tab={settingsTab} />
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4 canvas-dots">
+          <div className="bg-surface-secondary border border-border rounded-xl p-5">
+            <TabContent tab={settingsTab} />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -51,11 +61,13 @@ function TabContent({ tab }: { tab: string }) {
     case 'appearance': return <AppearanceTab />
     case 'providers': return <ProviderList />
     case 'agents': return <AgentList />
+    case 'channels': return <ChannelList />
     case 'mcp': return <McpServerList />
     case 'skills': return <SkillList />
     case 'tools': return <ToolList />
     case 'cron': return <CronList />
     case 'traces': return <TraceList />
+    case 'storage': return <StorageTab />
     case 'about': return <AboutTab />
     default:
       return (

@@ -9,11 +9,11 @@ import (
 // TeamTasksTool exposes the shared team task list to agents.
 // Actions are filtered by TeamActionPolicy (full in standard, limited in lite).
 type TeamTasksTool struct {
-	manager *TeamToolManager
+	manager TeamToolBackend
 	policy  TeamActionPolicy
 }
 
-func NewTeamTasksTool(manager *TeamToolManager, policy TeamActionPolicy) *TeamTasksTool {
+func NewTeamTasksTool(manager TeamToolBackend, policy TeamActionPolicy) *TeamTasksTool {
 	return &TeamTasksTool{manager: manager, policy: policy}
 }
 
@@ -42,7 +42,7 @@ func (t *TeamTasksTool) Parameters() map[string]any {
 			},
 			"description": map[string]any{
 				"type":        "string",
-				"description": "Task description with clear objectives and requirements. Include all context the assignee needs to complete the task independently.",
+				"description": "Task description — ONE specific action with clear objective and expected output. Detailed context is fine, but if you need TWO different skills (research+writing, design+coding), split into separate tasks. Include all context the assignee needs.",
 			},
 			"result": map[string]any{
 				"type":        "string",

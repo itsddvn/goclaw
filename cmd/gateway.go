@@ -177,18 +177,18 @@ func runGateway() {
 					label = fmt.Sprintf("%d tasks", len(items))
 				}
 				batchMeta := map[string]string{
-					"origin_channel":      meta.OriginChannel,
-					"origin_peer_kind":    meta.OriginPeerKind,
-					"parent_agent":        meta.ParentAgent,
-					"subagent_label":      label,
-					"origin_trace_id":     meta.OriginTraceID,
-					"origin_root_span_id": meta.OriginRootSpanID,
+					tools.MetaOriginChannel:    meta.OriginChannel,
+					tools.MetaOriginPeerKind:   meta.OriginPeerKind,
+					tools.MetaParentAgent:      meta.ParentAgent,
+					tools.MetaSubagentLabel:    label,
+					tools.MetaOriginTraceID:    meta.OriginTraceID,
+					tools.MetaOriginRootSpanID: meta.OriginRootSpanID,
 				}
 				if meta.OriginLocalKey != "" {
-					batchMeta["origin_local_key"] = meta.OriginLocalKey
+					batchMeta[tools.MetaOriginLocalKey] = meta.OriginLocalKey
 				}
 				if meta.OriginSessionKey != "" {
-					batchMeta["origin_session_key"] = meta.OriginSessionKey
+					batchMeta[tools.MetaOriginSessionKey] = meta.OriginSessionKey
 				}
 				// Collect media from all items in the batch.
 				var batchMedia []bus.MediaFile
@@ -511,7 +511,11 @@ func runGateway() {
 
 	// Wire pairing event broadcasts to all WS clients.
 	pairingMethods.SetBroadcaster(server.BroadcastEvent)
-	if ps, ok := pgStores.Pairing.(*pg.PGPairingStore); ok {
+	// Wire pairing request callback — works for both PG and SQLite stores.
+	type pairingRequestNotifier interface {
+		SetOnRequest(func(code, senderID, channel, chatID string))
+	}
+	if ps, ok := pgStores.Pairing.(pairingRequestNotifier); ok {
 		ps.SetOnRequest(func(code, senderID, channel, chatID string) {
 			server.BroadcastEvent(*protocol.NewEvent(protocol.EventDevicePairReq, map[string]any{
 				"code": code, "sender_id": senderID, "channel": channel, "chat_id": chatID,
