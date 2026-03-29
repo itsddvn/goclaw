@@ -177,7 +177,7 @@ type Loop struct {
 
 // AgentEvent is emitted during agent execution for WS broadcasting.
 type AgentEvent struct {
-	Type    string `json:"type"` // "run.started", "run.completed", "run.failed", "chunk", "tool.call", "tool.result"
+	Type    string `json:"type"` // "run.started", "run.completed", "run.failed", "run.cancelled", "chunk", "tool.call", "tool.result"
 	AgentID string `json:"agentId"`
 	RunID   string `json:"runId"`
 	RunKind string `json:"runKind,omitempty"` // "delegation", "announce" — omitted for user-initiated runs
@@ -427,8 +427,9 @@ type RunRequest struct {
 	TraceName         string          // override trace name (default: "chat <agentID>")
 	TraceTags         []string        // additional tags for the trace (e.g. "cron")
 	MaxIterations     int             // per-request override (0 = use agent default, must be lower)
-	ModelOverride     string          // per-request model override (heartbeat uses cheaper model)
-	LightContext      bool            // skip loading context files (only inject ExtraSystemPrompt)
+	ModelOverride    string            // per-request model override (heartbeat uses cheaper model)
+	ProviderOverride providers.Provider // per-request provider override (heartbeat uses different provider)
+	LightContext     bool              // skip loading context files (only inject ExtraSystemPrompt)
 
 	// Run classification
 	RunKind       string // "delegation", "announce" — empty for user-initiated runs
@@ -501,8 +502,11 @@ type runState struct {
 	// Crash safety
 	checkpointFlushedMsgs int
 
-	// Mid-loop compaction
-	midLoopCompacted bool
+	// Mid-loop compaction and overhead calibration
+	midLoopCompacted   bool
+	midLoopPruned      bool
+	overheadTokens     int  // non-history token overhead (system prompt + tools + context files)
+	overheadCalibrated bool
 
 	// Bootstrap detection
 	bootstrapWriteDetected bool

@@ -862,7 +862,7 @@ func runGateway() {
 	defer sched.Stop()
 
 	// Start cron service with job handler (routes through scheduler's cron lane)
-	pgStores.Cron.SetOnJob(makeCronJobHandler(sched, msgBus, cfg, channelMgr, pgStores.Sessions))
+	pgStores.Cron.SetOnJob(makeCronJobHandler(sched, msgBus, cfg, channelMgr, pgStores.Sessions, pgStores.Agents))
 	pgStores.Cron.SetOnEvent(func(event store.CronEvent) {
 		server.BroadcastEvent(*protocol.NewEvent(protocol.EventCron, event))
 	})
@@ -872,12 +872,14 @@ func runGateway() {
 
 	// Start heartbeat ticker (routes through scheduler's cron lane)
 	heartbeatTicker := heartbeat.NewTicker(heartbeat.TickerConfig{
-		Store:    pgStores.Heartbeats,
-		Agents:   pgStores.Agents,
-		Sessions: pgStores.Sessions,
-		MsgBus:   msgBus,
-		Sched:    sched,
-		RunAgent: makeHeartbeatRunFn(sched),
+		Store:         pgStores.Heartbeats,
+		Agents:        pgStores.Agents,
+		Sessions:      pgStores.Sessions,
+		ProviderStore: pgStores.Providers,
+		ProviderReg:   providerRegistry,
+		MsgBus:        msgBus,
+		Sched:         sched,
+		RunAgent:      makeHeartbeatRunFn(sched),
 	})
 	heartbeatTicker.SetOnEvent(func(event store.HeartbeatEvent) {
 		server.BroadcastEvent(*protocol.NewEvent(protocol.EventHeartbeat, event))
@@ -942,7 +944,7 @@ func runGateway() {
 		}
 
 		// Clear activity on terminal events
-		if agentEvent.Type == protocol.AgentEventRunCompleted || agentEvent.Type == protocol.AgentEventRunFailed {
+		if agentEvent.Type == protocol.AgentEventRunCompleted || agentEvent.Type == protocol.AgentEventRunFailed || agentEvent.Type == protocol.AgentEventRunCancelled {
 			if sessionKey := agentRouter.SessionKeyForRun(agentEvent.RunID); sessionKey != "" {
 				agentRouter.ClearActivity(sessionKey)
 			}
