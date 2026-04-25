@@ -13,6 +13,12 @@ import type {
   ChatGPTOAuthRouteReadiness,
 } from "./chatgpt-oauth-quota-utils";
 
+/** Reads prompt_mode from agent.other_config JSONB bag, defaults to "full". */
+export function readPromptMode(agent: { other_config?: Record<string, unknown> | null }): string {
+  const bag = (agent.other_config ?? {}) as Record<string, unknown>;
+  return (bag.prompt_mode as string) || "full";
+}
+
 /** Matches a standard UUID v4 string. */
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -21,6 +27,7 @@ export interface NormalizedChatGPTOAuthRouting {
   overrideMode: ChatGPTOAuthRoutingOverrideMode;
   strategy: EffectiveChatGPTOAuthRoutingStrategy;
   extraProviderNames: string[];
+  hasExplicitExtraProviderNames: boolean;
 }
 
 export interface EffectiveChatGPTOAuthRouting {
@@ -46,15 +53,30 @@ export function agentKeyDisplay(agentKey: string): string {
   return UUID_RE.test(agentKey) ? agentKey.slice(0, 8) + "…" : agentKey;
 }
 
-/** Returns normalized ChatGPT OAuth routing config from agent other_config. */
-export function normalizeChatGPTOAuthRouting(otherConfig?: Record<string, unknown> | null): NormalizedChatGPTOAuthRouting {
-  const raw = otherConfig?.chatgpt_oauth_routing;
+/**
+ * Returns normalized ChatGPT OAuth routing from agent top-level chatgpt_oauth_routing field.
+ * Also accepts legacy other_config shape for backward compatibility during transition.
+ */
+export function normalizeChatGPTOAuthRouting(
+  routingOrLegacy?: ChatGPTOAuthRoutingConfig | Record<string, unknown> | null,
+): NormalizedChatGPTOAuthRouting {
+  // Detect legacy call: Record with chatgpt_oauth_routing key (old other_config shape)
+  let raw: unknown = routingOrLegacy;
+  if (
+    raw &&
+    typeof raw === "object" &&
+    !Array.isArray(raw) &&
+    "chatgpt_oauth_routing" in (raw as Record<string, unknown>)
+  ) {
+    raw = (raw as Record<string, unknown>).chatgpt_oauth_routing;
+  }
   if (!raw || typeof raw !== "object") {
     return {
       isExplicit: false,
       overrideMode: "custom",
-      strategy: "primary_first",
+      strategy: "priority_order",
       extraProviderNames: [],
+      hasExplicitExtraProviderNames: false,
     };
   }
   const routing = raw as Record<string, unknown>;
@@ -76,20 +98,26 @@ export function normalizeChatGPTOAuthRouting(otherConfig?: Record<string, unknow
     routing.override_mode === "custom" ||
     hasStrategyField ||
     hasExtraProviderField ||
-    strategy !== "primary_first" ||
+    strategy !== "priority_order" ||
     extraProviderNames.length > 0;
   return {
     isExplicit,
     overrideMode,
     strategy,
     extraProviderNames,
+    hasExplicitExtraProviderNames: hasExtraProviderField,
   };
 }
 
 /** Returns true when an agent has active multi-account ChatGPT OAuth routing configured. */
-export function hasActiveChatGPTOAuthRouting(otherConfig?: Record<string, unknown> | null): boolean {
-  const routing = normalizeChatGPTOAuthRouting(otherConfig);
-  return routing.isExplicit && (routing.strategy !== "primary_first" || routing.extraProviderNames.length > 0);
+export function hasActiveChatGPTOAuthRouting(
+  routing?: ChatGPTOAuthRoutingConfig | Record<string, unknown> | null,
+): boolean {
+  const normalized = normalizeChatGPTOAuthRouting(routing);
+  return normalized.isExplicit && (
+    normalized.strategy === "round_robin" ||
+    normalized.extraProviderNames.length > 0
+  );
 }
 
 export function normalizeChatGPTOAuthRoutingInput(
@@ -99,13 +127,12 @@ export function normalizeChatGPTOAuthRoutingInput(
     return {
       isExplicit: false,
       overrideMode: "custom",
-      strategy: "primary_first",
+      strategy: "priority_order",
       extraProviderNames: [],
+      hasExplicitExtraProviderNames: false,
     };
   }
-  return normalizeChatGPTOAuthRouting({
-    chatgpt_oauth_routing: routing,
-  });
+  return normalizeChatGPTOAuthRouting(routing);
 }
 
 export function resolveEffectiveChatGPTOAuthRouting(
@@ -119,8 +146,9 @@ export function resolveEffectiveChatGPTOAuthRouting(
     ({
       isExplicit: false,
       overrideMode: "custom",
-      strategy: "primary_first",
+      strategy: "priority_order",
       extraProviderNames: [],
+      hasExplicitExtraProviderNames: false,
     } satisfies NormalizedChatGPTOAuthRouting);
 
   let source: EffectiveChatGPTOAuthRouting["source"] = "single";
@@ -130,7 +158,7 @@ export function resolveEffectiveChatGPTOAuthRouting(
 
   if (normalizedAgent.overrideMode === "inherit") {
     source = providerDefaults ? "provider_default" : "single";
-    strategy = providerDefaults?.strategy ?? "primary_first";
+    strategy = providerDefaults?.strategy ?? "priority_order";
     extraProviderNames = providerDefaults?.extraProviderNames ?? [];
     overrideMode = "inherit";
   } else if (normalizedAgent.isExplicit) {
@@ -147,7 +175,7 @@ export function resolveEffectiveChatGPTOAuthRouting(
     providerDefaults?.extraProviderNames.length &&
     source === "agent_custom"
   ) {
-    if (strategy === "primary_first" && extraProviderNames.length === 0) {
+    if (normalizedAgent.hasExplicitExtraProviderNames && extraProviderNames.length === 0) {
       extraProviderNames = [];
     } else {
       extraProviderNames = providerDefaults.extraProviderNames;
@@ -170,8 +198,7 @@ export function strategyLabelKey(
   strategy: EffectiveChatGPTOAuthRoutingStrategy,
 ): string {
   if (strategy === "round_robin") return "chatgptOAuthRouting.strategy.roundRobin";
-  if (strategy === "priority_order") return "chatgptOAuthRouting.strategy.priorityOrder";
-  return "chatgptOAuthRouting.strategy.primaryFirst";
+  return "chatgptOAuthRouting.strategy.priorityOrder";
 }
 
 /** Maps route readiness state to badge variant. */
@@ -206,45 +233,45 @@ export const failureVariantByKind: Record<
   unavailable: "outline",
 };
 
+/**
+ * Builds an update payload with chatgpt_oauth_routing at top level.
+ * Returns an object whose keys are meant to be spread directly into the
+ * agent update request (not nested under other_config).
+ */
 export function buildAgentOtherConfigWithChatGPTOAuthRouting(
   agent: AgentData,
   routing: ChatGPTOAuthRoutingConfig,
   providerSettings?: Record<string, unknown>,
 ): Record<string, unknown> {
-  const existing = (agent.other_config as Record<string, unknown> | null) ?? {};
-  const otherBase: Record<string, unknown> = { ...existing };
   const providerDefaults = getChatGPTOAuthProviderRouting(providerSettings);
   const normalized = normalizeChatGPTOAuthRoutingInput(routing);
 
-  delete otherBase.chatgpt_oauth_routing;
+  // Base: preserve other_config as-is (extensibility bag), set routing at top level
+  const result: Record<string, unknown> = {
+    other_config: agent.other_config ?? null,
+  };
+
   if (normalized.overrideMode === "inherit") {
-    otherBase.chatgpt_oauth_routing = {
-      override_mode: "inherit",
-    };
-    return otherBase;
+    result.chatgpt_oauth_routing = { override_mode: "inherit" };
+    return result;
   }
 
   if (
     providerDefaults ||
     normalized.isExplicit ||
-    normalized.strategy !== "primary_first" ||
     normalized.extraProviderNames.length > 0
   ) {
     const customRouting: Record<string, unknown> = {
       override_mode: "custom",
       strategy: normalized.strategy,
     };
-    if (
-      !providerDefaults ||
-      (normalized.strategy === "primary_first" &&
-        normalized.extraProviderNames.length === 0)
-    ) {
+    if (normalized.hasExplicitExtraProviderNames || normalized.extraProviderNames.length > 0) {
       customRouting.extra_provider_names = normalized.extraProviderNames;
     }
-    otherBase.chatgpt_oauth_routing = {
-      ...customRouting,
-    };
+    result.chatgpt_oauth_routing = customRouting;
+  } else {
+    result.chatgpt_oauth_routing = null;
   }
 
-  return otherBase;
+  return result;
 }

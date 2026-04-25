@@ -14,6 +14,16 @@ const (
 	OptReasoningEffort = "reasoning_effort"
 	OptEnableThinking  = "enable_thinking"
 	OptThinkingBudget  = "thinking_budget"
+	// OptStripThinking (bool) tells stream handlers to drop reasoning tokens
+	// from ChatResponse.Thinking and onChunk callbacks. Usage.ThinkingTokens
+	// and RawAssistantContent are preserved (billing + tool passback safety).
+	OptStripThinking = "strip_thinking"
+
+	// Middleware-related options (Phase 2 will use these)
+	OptServiceTier          = "service_tier"
+	OptFastMode             = "fast_mode"
+	OptPromptCacheKey       = "prompt_cache_key"
+	OptPromptCacheRetention = "prompt_cache_retention"
 )
 
 // TokenSource provides an OAuth access token (with auto-refresh).
@@ -88,29 +98,36 @@ type ChatResponse struct {
 	// ThinkingSignature is the accumulated signature from streaming thinking blocks.
 	// Required by Anthropic API for tool use passback when thinking is enabled.
 	ThinkingSignature string `json:"-"`
+
+	// Images holds generated images returned by image_generation_call tools (Codex).
+	// Not persisted to DB; populated at runtime from provider response.
+	Images []ImageContent `json:"-"`
 }
 
 // StreamChunk is a piece of a streaming response.
 type StreamChunk struct {
-	Content  string `json:"content,omitempty"`
-	Thinking string `json:"thinking,omitempty"`
-	Done     bool   `json:"done,omitempty"`
+	Content  string         `json:"content,omitempty"`
+	Thinking string         `json:"thinking,omitempty"`
+	Done     bool           `json:"done,omitempty"`
+	Images   []ImageContent `json:"images,omitempty"` // image generation frames (Codex)
 }
 
 // ImageContent represents a base64-encoded image for vision-capable models.
 type ImageContent struct {
-	MimeType string `json:"mime_type"` // e.g. "image/jpeg"
-	Data     string `json:"data"`      // base64-encoded image bytes
+	MimeType string `json:"mime_type"`         // e.g. "image/jpeg"
+	Data     string `json:"data"`              // base64-encoded image bytes
+	Partial  bool   `json:"partial,omitempty"` // true for intermediate frames (Codex image_generation_call)
 }
 
 // MediaRef is a lightweight reference to a persistently stored media file.
 // Stored in session JSONB (~60 bytes each) instead of megabytes for base64.
 // On reload, MediaRefs are resolved to file paths and loaded into Images (for images).
 type MediaRef struct {
-	ID       string `json:"id"`             // unique media ID (uuid)
-	MimeType string `json:"mime_type"`      // e.g. "image/jpeg", "application/pdf"
-	Kind     string `json:"kind"`           // "image", "video", "audio", "document"
-	Path     string `json:"path,omitempty"` // absolute workspace path (persisted for /v1/files/ serving)
+	ID       string `json:"id"`               // unique media ID (uuid)
+	MimeType string `json:"mime_type"`        // e.g. "image/jpeg", "application/pdf"
+	Kind     string `json:"kind"`             // "image", "video", "audio", "document"
+	Path     string `json:"path,omitempty"`   // absolute workspace path (persisted for /v1/files/ serving)
+	Prompt   string `json:"prompt,omitempty"` // prompt that generated this asset, if known
 }
 
 // Message represents a conversation message.
@@ -142,16 +159,20 @@ type Message struct {
 
 // ToolCall represents a tool invocation requested by the LLM.
 type ToolCall struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Arguments map[string]any    `json:"arguments"`
-	Metadata  map[string]string `json:"metadata,omitempty"` // provider-specific (e.g. Gemini thought_signature)
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Arguments  map[string]any    `json:"arguments"`
+	Metadata   map[string]string `json:"metadata,omitempty"`    // provider-specific (e.g. Gemini thought_signature)
+	ParseError string            `json:"parse_error,omitempty"` // set when arguments JSON was malformed/truncated
 }
 
 // ToolDefinition describes a tool available to the LLM.
+// Type is "function" for standard function tools, or a native provider tool type
+// (e.g. "image_generation") for first-class provider-native tools.
+// Function is nil when Type is not "function".
 type ToolDefinition struct {
-	Type     string             `json:"type"` // "function"
-	Function ToolFunctionSchema `json:"function"`
+	Type     string              `json:"type"`               // "function" | "image_generation" | ...
+	Function *ToolFunctionSchema `json:"function,omitempty"` // nil when Type != "function"
 }
 
 // ToolFunctionSchema is the schema for a function tool.
@@ -159,6 +180,7 @@ type ToolFunctionSchema struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"`
+	Strict      *bool          `json:"strict,omitempty"` // OpenAI strict mode — constrained decoding
 }
 
 // Usage tracks token consumption.

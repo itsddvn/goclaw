@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
@@ -29,7 +30,8 @@ type ReadFileTool struct {
 	sandboxMgr       sandbox.Manager         // nil = direct host access
 	contextFileIntc  *ContextFileInterceptor // nil = no virtual FS routing
 	memIntc          *MemoryInterceptor      // nil = no memory routing
-	permStore store.ConfigPermissionStore // nil = no group read restriction
+	permStore        store.ConfigPermissionStore // nil = no group read restriction
+	vaultIntc        *VaultInterceptor           // nil = no vault lazy sync
 }
 
 // SetContextFileInterceptor enables virtual FS routing for context files.
@@ -45,6 +47,11 @@ func (t *ReadFileTool) SetMemoryInterceptor(intc *MemoryInterceptor) {
 // SetConfigPermStore enables group read restriction for SOUL.md/AGENTS.md.
 func (t *ReadFileTool) SetConfigPermStore(s store.ConfigPermissionStore) {
 	t.permStore = s
+}
+
+// SetVaultInterceptor enables lazy vault hash sync on file reads.
+func (t *ReadFileTool) SetVaultInterceptor(v *VaultInterceptor) {
+	t.vaultIntc = v
 }
 
 func NewReadFileTool(workspace string, restrict bool) *ReadFileTool {
@@ -69,8 +76,10 @@ func NewSandboxedReadFileTool(workspace string, restrict bool, mgr sandbox.Manag
 // SetSandboxKey is a no-op; sandbox key is now read from ctx (thread-safe).
 func (t *ReadFileTool) SetSandboxKey(key string) {}
 
-func (t *ReadFileTool) Name() string        { return "read_file" }
-func (t *ReadFileTool) Description() string { return "Read the contents of a file" }
+func (t *ReadFileTool) Name() string { return "read_file" }
+func (t *ReadFileTool) Description() string {
+	return "Read the contents of a file. For large files, use offset and limit to read specific line ranges."
+}
 func (t *ReadFileTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -78,6 +87,14 @@ func (t *ReadFileTool) Parameters() map[string]any {
 			"path": map[string]any{
 				"type":        "string",
 				"description": "File path (relative to workspace, or absolute)",
+			},
+			"offset": map[string]any{
+				"type":        "integer",
+				"description": "Start reading from this line number (0-indexed). Defaults to 0.",
+			},
+			"limit": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of lines to return. Omit to read until output cap.",
 			},
 		},
 		"required": []string{"path"},
@@ -129,14 +146,14 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 			if content == "" {
 				return SilentResult(fmt.Sprintf("(memory file %s does not exist yet — it will be created when memory is saved)", path))
 			}
-			return SilentResult(content)
+			return SilentResult(content + "\n\n[Source: database, not filesystem]")
 		}
 	}
 
 	// Sandbox routing (sandboxKey from ctx — thread-safe)
 	sandboxKey := ToolSandboxKeyFromCtx(ctx)
 	if t.sandboxMgr != nil && sandboxKey != "" {
-		return t.executeInSandbox(ctx, path, sandboxKey)
+		return t.executeInSandbox(ctx, path, sandboxKey, args)
 	}
 
 	// Host execution — use per-user workspace from context if available
@@ -159,6 +176,11 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 		return ErrorResult(fmt.Sprintf("cannot read binary file (%s). Use the appropriate tool: read_image for images, read_document for documents, read_audio for audio, read_video for video.", ext))
 	}
 
+	// Vault lazy sync: update hash if file was modified outside the agent.
+	if t.vaultIntc != nil {
+		go t.vaultIntc.BeforeRead(context.WithoutCancel(ctx), resolved)
+	}
+
 	data, err := os.ReadFile(resolved)
 	if err != nil {
 		msg := fmt.Sprintf("failed to read file: %v", err)
@@ -170,10 +192,10 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *Result
 		return ErrorResult(msg)
 	}
 
-	return SilentResult(string(data))
+	return t.paginateOutput(string(data), args)
 }
 
-func (t *ReadFileTool) executeInSandbox(ctx context.Context, path, sandboxKey string) *Result {
+func (t *ReadFileTool) executeInSandbox(ctx context.Context, path, sandboxKey string, args map[string]any) *Result {
 	bridge, err := t.getFsBridge(ctx, sandboxKey)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("sandbox error: %v", err))
@@ -190,7 +212,7 @@ func (t *ReadFileTool) executeInSandbox(ctx context.Context, path, sandboxKey st
 		return ErrorResult(fmt.Sprintf("failed to read file: %v", err) + MaybeFsBridgeHint(err))
 	}
 
-	return SilentResult(data)
+	return t.paginateOutput(data, args)
 }
 
 func (t *ReadFileTool) getFsBridge(ctx context.Context, sandboxKey string) (*sandbox.FsBridge, error) {
@@ -201,16 +223,144 @@ func (t *ReadFileTool) getFsBridge(ctx context.Context, sandboxKey string) (*san
 	return sandbox.NewFsBridge(sb.ID(), sandbox.DefaultContainerWorkdir), nil
 }
 
-// allowedWithTeamWorkspace returns the allowed prefixes with team workspace appended
-// if present in context. Thread-safe: creates a new slice per request.
+// readFileMaxChars is the output cap for read_file. Large files require offset/limit pagination.
+const readFileMaxChars = 50000
+
+// paginateOutput applies offset/limit slicing and output capping to file content.
+// Returns a SilentResult with pagination metadata when the output is truncated.
+func (t *ReadFileTool) paginateOutput(content string, args map[string]any) *Result {
+	lines := strings.Split(content, "\n")
+	totalLines := len(lines)
+
+	// Parse offset (0-indexed line number).
+	offset := 0
+	if v, ok := args["offset"]; ok {
+		switch n := v.(type) {
+		case float64:
+			offset = int(n)
+		case int:
+			offset = n
+		}
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= totalLines {
+		return SilentResult(fmt.Sprintf("(offset %d exceeds file length of %d lines)", offset, totalLines))
+	}
+
+	// Parse limit (max lines to return).
+	limit := 0 // 0 = no explicit limit
+	if v, ok := args["limit"]; ok {
+		switch n := v.(type) {
+		case float64:
+			limit = int(n)
+		case int:
+			limit = n
+		}
+	}
+
+	// Slice lines by offset and limit.
+	sliced := lines[offset:]
+	if limit > 0 && limit < len(sliced) {
+		sliced = sliced[:limit]
+	}
+
+	output := strings.Join(sliced, "\n")
+	shownLines := len(sliced)
+	endLine := offset + shownLines
+
+	// Check output char cap.
+	runeCount := len([]rune(output))
+	if runeCount <= readFileMaxChars {
+		// Fits within cap — add line info if offset was used or file was partially read.
+		if offset > 0 || endLine < totalLines {
+			output += fmt.Sprintf("\n\n[Showing lines %d-%d of %d total]", offset, endLine-1, totalLines)
+		}
+		return SilentResult(output)
+	}
+
+	// Output exceeds cap — truncate at line boundary within budget.
+	charCount := 0
+	truncIdx := len(sliced)
+	for i, line := range sliced {
+		charCount += len([]rune(line)) + 1 // +1 for newline
+		if charCount > readFileMaxChars {
+			truncIdx = i
+			break
+		}
+	}
+	if truncIdx < 1 {
+		truncIdx = 1
+	}
+
+	output = strings.Join(sliced[:truncIdx], "\n")
+	shownLines = truncIdx
+	nextOffset := offset + shownLines
+
+	output += fmt.Sprintf("\n\n[Output capped. File has %d lines, showed %d (lines %d-%d). Use offset=%d to continue reading.]",
+		totalLines, shownLines, offset, offset+shownLines-1, nextOffset)
+
+	return SilentResult(output)
+}
+
+// allowedWithTeamWorkspace returns the READ-allowed prefixes with team workspace,
+// team root, and tenant-specific paths appended if present in context.
+// Thread-safe: creates a new slice per request.
+// Merge order: base (global) → tenant paths → team workspace (leaf scope) → team root.
+// Team root is the team-wide directory without UserChatLayer suffix; it lets
+// any agent in the team read files generated by peers under different chat scopes.
+//
+// Use this variant for read operations (read_file, read_image, list_files, send_file).
+// For write operations, use allowedWriteWithTeamWorkspace instead — team root is
+// intentionally excluded from write to prevent cross-chat write leakage.
 func allowedWithTeamWorkspace(ctx context.Context, base []string) []string {
+	return buildAllowedPrefixes(ctx, base, true)
+}
+
+// allowedWriteWithTeamWorkspace returns the WRITE-allowed prefixes. Same as the
+// read variant but WITHOUT team root — writes must stay within the agent's leaf
+// scope (team workspace = own chat dir for isolated mode, team root itself for
+// shared mode). This prevents an agent in chat A from writing into chat B's
+// workspace through a cross-chat absolute path.
+//
+// Use this variant for write/mutation operations (write_file, edit, shell).
+func allowedWriteWithTeamWorkspace(ctx context.Context, base []string) []string {
+	return buildAllowedPrefixes(ctx, base, false)
+}
+
+// buildAllowedPrefixes merges base + tenant paths + team workspace, optionally
+// including team root. Extracted to share the slice-building logic between read
+// and write variants without duplication.
+func buildAllowedPrefixes(ctx context.Context, base []string, includeTeamRoot bool) []string {
+	tenantPaths := TenantAllowedPathsFromCtx(ctx)
 	teamWs := ToolTeamWorkspaceFromCtx(ctx)
-	if teamWs == "" {
+	var teamRoot string
+	if includeTeamRoot {
+		teamRoot = ToolTeamRootFromCtx(ctx)
+	}
+
+	if len(tenantPaths) == 0 && teamWs == "" && teamRoot == "" {
 		return base
 	}
-	out := make([]string, len(base)+1)
-	copy(out, base)
-	out[len(base)] = teamWs
+
+	capacity := len(base) + len(tenantPaths)
+	if teamWs != "" {
+		capacity++
+	}
+	if teamRoot != "" && teamRoot != teamWs {
+		capacity++
+	}
+
+	out := make([]string, 0, capacity)
+	out = append(out, base...)
+	out = append(out, tenantPaths...)
+	if teamWs != "" {
+		out = append(out, teamWs)
+	}
+	if teamRoot != "" && teamRoot != teamWs {
+		out = append(out, teamRoot)
+	}
 	return out
 }
 
@@ -386,7 +536,13 @@ func resolvePath(path, workspace string, restrict bool) (string, error) {
 }
 
 // isPathInside checks whether child is inside or equal to parent directory.
+// On Windows, comparison is case-insensitive since NTFS paths are case-insensitive.
 func isPathInside(child, parent string) bool {
+	// Windows paths are case-insensitive; normalize to lowercase for comparison.
+	if runtime.GOOS == "windows" {
+		child = strings.ToLower(child)
+		parent = strings.ToLower(parent)
+	}
 	if child == parent {
 		return true
 	}

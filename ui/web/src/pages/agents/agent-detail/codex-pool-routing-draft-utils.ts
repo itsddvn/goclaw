@@ -6,42 +6,36 @@ import {
 
 export function buildDraftRouting(
   savedRouting: NormalizedChatGPTOAuthRouting,
-  hasProviderDefaults: boolean,
 ): ChatGPTOAuthRoutingConfig {
   if (savedRouting.isExplicit) {
-    return {
+    const draft: ChatGPTOAuthRoutingConfig = {
       override_mode: savedRouting.overrideMode,
       strategy: savedRouting.strategy,
-      extra_provider_names: savedRouting.extraProviderNames,
     };
-  }
-
-  if (hasProviderDefaults) {
-    return {
-      override_mode: "inherit",
-      strategy: "primary_first",
-      extra_provider_names: [],
-    };
+    if (savedRouting.hasExplicitExtraProviderNames || savedRouting.extraProviderNames.length > 0) {
+      draft.extra_provider_names = savedRouting.extraProviderNames;
+    }
+    return draft;
   }
 
   return {
-    override_mode: "custom",
-    strategy: "primary_first",
+    override_mode: "inherit",
+    strategy: "priority_order",
     extra_provider_names: [],
   };
 }
 
 export function routingDraftSignature(
   routing: ChatGPTOAuthRoutingConfig,
-  hasProviderDefaults: boolean,
 ): string {
   const normalized = normalizeChatGPTOAuthRoutingInput(routing);
-  if (normalized.overrideMode === "inherit" && hasProviderDefaults) {
+  if (normalized.overrideMode === "inherit") {
     return JSON.stringify({ override_mode: "inherit" });
   }
   return JSON.stringify({
     override_mode: "custom",
     strategy: normalized.strategy,
     extra_provider_names: normalized.extraProviderNames,
+    has_explicit_extra_provider_names: normalized.hasExplicitExtraProviderNames,
   });
 }

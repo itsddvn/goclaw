@@ -2,7 +2,14 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"   # stable only: v1.2.3 (not beta/rc)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v3.0.0). Leave empty to use latest tag on HEAD.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -15,26 +22,52 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      version: ${{ steps.semrel.outputs.version }}
-      released: ${{ steps.semrel.outputs.version != '' }}
+      version: ${{ steps.version.outputs.version }}
+      released: ${{ steps.version.outputs.version != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - id: semrel
-        uses: go-semantic-release/action@v1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          allow-initial-development-versions: true
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if [[ -z "$TAG" || "$TAG" == "main" || "$TAG" == "dev" ]]; then
+            TAG=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")
+          fi
+          if [[ -z "$TAG" ]]; then
+            echo "No tag found. Skipping release."
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          echo "Releasing version: $VERSION (tag: $TAG)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          gh release create "$TAG" \
+            --title "GoClaw $TAG" \
+            --generate-notes \
+            --latest \
+            2>/dev/null || echo "Release $TAG already exists, continuing..."
 
   # Build cross-platform binaries and attach to release
   build-binaries:
     needs: release
     if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
           - goos: linux
@@ -53,13 +86,24 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build web UI
+        run: |
+          corepack enable && corepack prepare pnpm@10.28.2 --activate
+          cd ui/web && pnpm install --frozen-lockfile && pnpm build && cd ../..
+          mkdir -p internal/webui/dist
+          cp -r ui/web/dist/* internal/webui/dist/
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: v${{ needs.release.outputs.version }}
         run: |
-          CGO_ENABLED=0 go build \
+          CGO_ENABLED=0 go build -tags embedui \
             -ldflags="-s -w -X github.com/nextlevelbuilder/goclaw/cmd.Version=${VERSION}" \
             -o goclaw .
           tar -czf "goclaw-${{ needs.release.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" goclaw migrations/
@@ -72,74 +116,139 @@ jobs:
             "goclaw-${{ needs.release.outputs.version }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" \
             --clobber
 
-  # Build and push Docker images to GHCR + Docker Hub
-  docker-images:
-    needs: release
+  # Generate SHA256 checksums for all binary assets
+  checksums:
+    needs: [release, build-binaries]
     if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download all binary assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "v${{ needs.release.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "goclaw-*.tar.gz" \
+            --dir assets
+
+      - name: Generate checksums
+        run: |
+          cd assets
+          sha256sum goclaw-*.tar.gz > CHECKSUMS.sha256
+          echo "Generated checksums:"
+          cat CHECKSUMS.sha256
+
+      - name: Upload checksums to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "v${{ needs.release.outputs.version }}" \
+            assets/CHECKSUMS.sha256 \
+            --repo "${{ github.repository }}" \
+            --clobber
+
+  # Build Docker images per (variant × platform) on native runners (no QEMU).
+  # Each job pushes a digest-only image; the merge job combines them into a
+  # multi-arch manifest and pushes the final tags to both GHCR and Docker Hub.
+  # Variants: base (backend only), latest (+ web UI + Python), full (+ all skills).
+  # OTel and Tailscale variants are not built — users build from source if needed.
+  docker-build:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    timeout-minutes: 90
     strategy:
+      fail-fast: false
       matrix:
+        variant: [base, latest, full]
+        platform: [linux/amd64, linux/arm64]
         include:
+          - variant: base
+            enable_embedui: "false"
+            enable_python: "false"
+            enable_full_skills: "false"
           - variant: latest
-            suffix: ""
-            enable_otel: "false"
-            enable_tsnet: "false"
-            enable_redis: "false"
-            enable_node: "false"
-            enable_python: "false"
-            enable_full_skills: "false"
-          - variant: node
-            suffix: "-node"
-            enable_otel: "false"
-            enable_tsnet: "false"
-            enable_redis: "false"
-            enable_node: "true"
-            enable_python: "false"
-            enable_full_skills: "false"
-          - variant: python
-            suffix: "-python"
-            enable_otel: "false"
-            enable_tsnet: "false"
-            enable_redis: "false"
-            enable_node: "false"
+            enable_embedui: "true"
             enable_python: "true"
             enable_full_skills: "false"
           - variant: full
-            suffix: "-full"
-            enable_otel: "false"
-            enable_tsnet: "false"
-            enable_redis: "false"
-            enable_node: "true"
+            enable_embedui: "true"
             enable_python: "true"
             enable_full_skills: "true"
-          - variant: otel
-            suffix: "-otel"
-            enable_otel: "true"
-            enable_tsnet: "false"
-            enable_redis: "false"
-            enable_node: "false"
-            enable_python: "false"
-            enable_full_skills: "false"
-          - variant: tsnet
-            suffix: "-tsnet"
-            enable_otel: "false"
-            enable_tsnet: "true"
-            enable_redis: "false"
-            enable_node: "false"
-            enable_python: "false"
-            enable_full_skills: "false"
-          - variant: redis
-            suffix: "-redis"
-            enable_otel: "false"
-            enable_tsnet: "false"
-            enable_redis: "true"
-            enable_node: "false"
-            enable_python: "false"
-            enable_full_skills: "false"
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            ENABLE_OTEL=false
+            ENABLE_EMBEDUI=${{ matrix.enable_embedui }}
+            ENABLE_PYTHON=${{ matrix.enable_python }}
+            ENABLE_FULL_SKILLS=${{ matrix.enable_full_skills }}
+            VERSION=v${{ needs.release.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          provenance: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.variant }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combine per-platform digests into multi-arch manifests and push final tags
+  # to both GHCR and Docker Hub. One job per variant runs in parallel.
+  docker-merge:
+    needs: [release, docker-build]
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: base
+            suffix: "-base"
+          - variant: latest
+            suffix: ""
+          - variant: full
+            suffix: "-full"
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.variant }}-*
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
 
@@ -168,34 +277,92 @@ jobs:
             type=raw,value=latest,enable=${{ matrix.suffix == '' }},suffix=
             type=raw,value=${{ matrix.variant }},enable=${{ matrix.suffix != '' }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            ENABLE_OTEL=${{ matrix.enable_otel }}
-            ENABLE_TSNET=${{ matrix.enable_tsnet }}
-            ENABLE_REDIS=${{ matrix.enable_redis }}
-            ENABLE_NODE=${{ matrix.enable_node }}
-            ENABLE_PYTHON=${{ matrix.enable_python }}
-            ENABLE_FULL_SKILLS=${{ matrix.enable_full_skills }}
-            VERSION=v${{ needs.release.outputs.version }}
-          cache-from: type=gha,scope=${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          # Compose -t flags from metadata-action tags (newline-separated)
+          TAG_ARGS=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && TAG_ARGS+=("-t" "$tag")
+          done <<< "${{ steps.meta.outputs.tags }}"
+          # Compose source digest refs (pushed to GHCR by docker-build)
+          DIGEST_ARGS=()
+          for f in *; do
+            DIGEST_ARGS+=("${{ env.GHCR_IMAGE }}@sha256:$f")
+          done
+          set -x
+          docker buildx imagetools create "${TAG_ARGS[@]}" "${DIGEST_ARGS[@]}"
 
-  # Build and push web UI Docker image
-  docker-web:
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect \
+            "${{ env.GHCR_IMAGE }}:v${{ needs.release.outputs.version }}${{ matrix.suffix }}"
+
+  # Build web UI Docker image per platform on native runners.
+  docker-web-build:
     needs: release
     if: needs.release.outputs.released == 'true'
-    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ui/web
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.GHCR_IMAGE }}-web,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=web-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=web-${{ matrix.arch }}
+          provenance: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-web-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-web-merge:
+    needs: [release, docker-web-build]
+    if: needs.release.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-web-*
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
 
@@ -223,22 +390,31 @@ jobs:
             type=raw,value=v${{ needs.release.outputs.version }}
             type=raw,value=latest
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ui/web
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          TAG_ARGS=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && TAG_ARGS+=("-t" "$tag")
+          done <<< "${{ steps.meta.outputs.tags }}"
+          DIGEST_ARGS=()
+          for f in *; do
+            DIGEST_ARGS+=("${{ env.GHCR_IMAGE }}-web@sha256:$f")
+          done
+          set -x
+          docker buildx imagetools create "${TAG_ARGS[@]}" "${DIGEST_ARGS[@]}"
+
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect \
+            "${{ env.GHCR_IMAGE }}-web:v${{ needs.release.outputs.version }}"
 
   # Notify Discord on new release (runs even if docker jobs fail)
   notify-discord:
-    needs: [release, build-binaries, docker-images, docker-web]
+    needs: [release, build-binaries, docker-merge, docker-web-merge]
     if: always() && needs.release.outputs.released == 'true' && !cancelled()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Send Discord notification
         env:

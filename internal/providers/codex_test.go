@@ -121,7 +121,8 @@ func TestCodexProviderBuildRequestBodyWithTools(t *testing.T) {
 		Messages: []Message{{Role: "user", Content: "What's the weather?"}},
 		Tools: []ToolDefinition{
 			{
-				Function: ToolFunctionSchema{
+				Type: "function",
+				Function: &ToolFunctionSchema{
 					Name:        "get_weather",
 					Description: "Get current weather",
 					Parameters: map[string]any{
@@ -342,6 +343,355 @@ func TestCodexProviderChatStream(t *testing.T) {
 	}
 	if result.Usage.TotalTokens != 7 {
 		t.Errorf("TotalTokens = %d, want 7", result.Usage.TotalTokens)
+	}
+}
+
+func TestCodexProviderChatFallsBackToOutputTextDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{
+			Type: "response.output_text.done",
+			Text: "<file name=\"SOUL.md\">hello</file>",
+		}))
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{
+			Type: "response.completed",
+			Response: &codexAPIResponse{
+				ID: "resp-done", Status: "completed",
+				Usage: &codexUsage{InputTokens: 5, OutputTokens: 4, TotalTokens: 9},
+			},
+		}))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, server.URL, "gpt-4o")
+	p.retryConfig.Attempts = 1
+
+	result, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Generate a file"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if result.Content != "<file name=\"SOUL.md\">hello</file>" {
+		t.Errorf("Content = %q, want fallback output_text.done content", result.Content)
+	}
+}
+
+func TestCodexProviderChatFallsBackToOutputItemMessageContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{
+			Type: "response.output_item.done",
+			Item: &codexItem{
+				Type:  "message",
+				Role:  "assistant",
+				Phase: "final_answer",
+				Content: []codexContent{
+					{Type: "output_text", Text: "<file name=\"IDENTITY.md\">world</file>"},
+				},
+			},
+		}))
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{
+			Type: "response.completed",
+			Response: &codexAPIResponse{
+				ID: "resp-item", Status: "completed",
+				Usage: &codexUsage{InputTokens: 5, OutputTokens: 4, TotalTokens: 9},
+			},
+		}))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, server.URL, "gpt-4o")
+	p.retryConfig.Attempts = 1
+
+	result, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Generate a file"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if result.Content != "<file name=\"IDENTITY.md\">world</file>" {
+		t.Errorf("Content = %q, want fallback output_item.done content", result.Content)
+	}
+	if result.Phase != "final_answer" {
+		t.Errorf("Phase = %q, want final_answer", result.Phase)
+	}
+}
+
+func TestCodexProviderChatIgnoresCommentaryAndKeepsFinalAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		events := []codexSSEEvent{
+			{
+				Type:        "response.output_item.added",
+				OutputIndex: 0,
+				Item: &codexItem{
+					ID:    "msg_commentary",
+					Type:  "message",
+					Phase: "commentary",
+				},
+			},
+			{
+				Type:         "response.output_text.delta",
+				ItemID:       "msg_commentary",
+				OutputIndex:  0,
+				ContentIndex: 0,
+				Delta:        "Planning out the answer...",
+			},
+			{
+				Type:        "response.output_item.done",
+				OutputIndex: 0,
+				Item: &codexItem{
+					ID:    "msg_commentary",
+					Type:  "message",
+					Phase: "commentary",
+				},
+			},
+			{
+				Type:        "response.output_item.added",
+				OutputIndex: 1,
+				Item: &codexItem{
+					ID:    "msg_final",
+					Type:  "message",
+					Phase: "final_answer",
+				},
+			},
+			{
+				Type:         "response.output_text.delta",
+				ItemID:       "msg_final",
+				OutputIndex:  1,
+				ContentIndex: 0,
+				Delta:        "<file name=\"SOUL.md\">hello</file>",
+			},
+			{
+				Type:        "response.output_item.done",
+				OutputIndex: 1,
+				Item: &codexItem{
+					ID:    "msg_final",
+					Type:  "message",
+					Phase: "final_answer",
+				},
+			},
+			{
+				Type: "response.completed",
+				Response: &codexAPIResponse{
+					ID: "resp-commentary", Status: "completed",
+					Usage: &codexUsage{InputTokens: 5, OutputTokens: 4, TotalTokens: 9},
+				},
+			},
+		}
+
+		for _, event := range events {
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(event))
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, server.URL, "gpt-4o")
+	p.retryConfig.Attempts = 1
+
+	var chunks []string
+	result, err := p.ChatStream(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Generate files"}},
+	}, func(chunk StreamChunk) {
+		if chunk.Content != "" {
+			chunks = append(chunks, chunk.Content)
+		}
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	if result.Content != "<file name=\"SOUL.md\">hello</file>" {
+		t.Errorf("Content = %q, want final_answer only", result.Content)
+	}
+	if len(chunks) != 1 || chunks[0] != "<file name=\"SOUL.md\">hello</file>" {
+		t.Errorf("chunks = %v, want only final_answer chunk", chunks)
+	}
+	if result.Phase != "final_answer" {
+		t.Errorf("Phase = %q, want final_answer", result.Phase)
+	}
+}
+
+func TestCodexProviderChatConcatenatesMultipleOutputTextDoneParts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		events := []codexSSEEvent{
+			{
+				Type:        "response.output_item.added",
+				OutputIndex: 0,
+				Item: &codexItem{
+					ID:    "msg_final",
+					Type:  "message",
+					Phase: "final_answer",
+				},
+			},
+			{
+				Type:         "response.output_text.done",
+				ItemID:       "msg_final",
+				OutputIndex:  0,
+				ContentIndex: 1,
+				Text:         "hello</file>",
+			},
+			{
+				Type:         "response.output_text.done",
+				ItemID:       "msg_final",
+				OutputIndex:  0,
+				ContentIndex: 0,
+				Text:         "<file name=\"SOUL.md\">",
+			},
+			{
+				Type: "response.completed",
+				Response: &codexAPIResponse{
+					ID: "resp-multipart", Status: "completed",
+					Usage: &codexUsage{InputTokens: 5, OutputTokens: 4, TotalTokens: 9},
+				},
+			},
+		}
+
+		for _, event := range events {
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(event))
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, server.URL, "gpt-4o")
+	p.retryConfig.Attempts = 1
+
+	result, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Generate a file"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if result.Content != "<file name=\"SOUL.md\">hello</file>" {
+		t.Errorf("Content = %q, want concatenated output_text.done parts", result.Content)
+	}
+}
+
+func TestCodexProviderChatFallsBackToContentPartDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+
+		events := []codexSSEEvent{
+			{
+				Type:        "response.output_item.added",
+				OutputIndex: 0,
+				Item: &codexItem{
+					ID:    "msg_final",
+					Type:  "message",
+					Phase: "final_answer",
+				},
+			},
+			{
+				Type:         "response.content_part.done",
+				ItemID:       "msg_final",
+				OutputIndex:  0,
+				ContentIndex: 0,
+				Part: &codexContentPart{
+					Type: "output_text",
+					Text: "<frontmatter>summary</frontmatter>",
+				},
+			},
+			{
+				Type: "response.completed",
+				Response: &codexAPIResponse{
+					ID: "resp-content-part", Status: "completed",
+					Usage: &codexUsage{InputTokens: 5, OutputTokens: 4, TotalTokens: 9},
+				},
+			},
+		}
+
+		for _, event := range events {
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(event))
+			flusher.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, server.URL, "gpt-4o")
+	p.retryConfig.Attempts = 1
+
+	result, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Generate a summary"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if result.Content != "<frontmatter>summary</frontmatter>" {
+		t.Errorf("Content = %q, want content_part.done fallback content", result.Content)
+	}
+}
+
+func TestCodexProviderChatFallsBackToCompletedResponseOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(codexSSEEvent{
+			Type: "response.completed",
+			Response: &codexAPIResponse{
+				ID:     "resp-completed",
+				Status: "completed",
+				Output: []codexItem{
+					{
+						ID:    "msg_commentary",
+						Type:  "message",
+						Role:  "assistant",
+						Phase: "commentary",
+						Content: []codexContent{
+							{Type: "output_text", Text: "Draft commentary"},
+						},
+					},
+					{
+						ID:    "msg_final",
+						Type:  "message",
+						Role:  "assistant",
+						Phase: "final_answer",
+						Content: []codexContent{
+							{Type: "output_text", Text: "<frontmatter>summary</frontmatter>"},
+						},
+					},
+				},
+				Usage: &codexUsage{InputTokens: 6, OutputTokens: 3, TotalTokens: 9},
+			},
+		}))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, server.URL, "gpt-4o")
+	p.retryConfig.Attempts = 1
+
+	result, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Generate a summary"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if result.Content != "<frontmatter>summary</frontmatter>" {
+		t.Errorf("Content = %q, want fallback response.completed output content", result.Content)
+	}
+	if result.Phase != "final_answer" {
+		t.Errorf("Phase = %q, want final_answer", result.Phase)
 	}
 }
 
@@ -580,6 +930,114 @@ func TestCodexProviderTokenSource(t *testing.T) {
 
 	if capturedAuth != "Bearer my-oauth-token" {
 		t.Errorf("Authorization = %q, want 'Bearer my-oauth-token'", capturedAuth)
+	}
+}
+
+// TestCodexBuildRequestBodyImageGenerationTool verifies that a ToolDefinition with
+// Type="image_generation" produces a native image_generation object in the tools array,
+// not a function-shaped entry.
+func TestCodexBuildRequestBodyImageGenerationTool(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-4o")
+
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Draw a cat"}},
+		Tools: []ToolDefinition{
+			{Type: "image_generation"},
+		},
+	}
+
+	body := p.buildRequestBody(req, false)
+
+	tools, ok := body["tools"].([]map[string]any)
+	if !ok {
+		t.Fatalf("tools is not []map[string]any: %T", body["tools"])
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tools length = %d, want 1", len(tools))
+	}
+
+	tool := tools[0]
+	if tool["type"] != "image_generation" {
+		t.Errorf("tool[type] = %v, want image_generation", tool["type"])
+	}
+	if tool["action"] != "generate" {
+		t.Errorf("tool[action] = %v, want generate", tool["action"])
+	}
+	if tool["model"] != "gpt-image-2" {
+		t.Errorf("tool[model] = %v, want gpt-image-2", tool["model"])
+	}
+	if tool["output_format"] != "png" {
+		t.Errorf("tool[output_format] = %v, want png", tool["output_format"])
+	}
+	if tool["partial_images"] != 1 {
+		t.Errorf("tool[partial_images] = %v, want 1", tool["partial_images"])
+	}
+	// Must NOT contain function-specific fields.
+	if _, has := tool["name"]; has {
+		t.Error("image_generation tool must not have 'name' field")
+	}
+	if _, has := tool["parameters"]; has {
+		t.Error("image_generation tool must not have 'parameters' field")
+	}
+}
+
+// TestCodexBuildRequestBodyMixedTools verifies that a request containing both function
+// tools and an image_generation tool produces both in the correct shapes, in order.
+func TestCodexBuildRequestBodyMixedTools(t *testing.T) {
+	p := NewCodexProvider("test", &staticTokenSource{token: "test"}, "", "gpt-4o")
+
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Search and draw"}},
+		Tools: []ToolDefinition{
+			{
+				Type: "function",
+				Function: &ToolFunctionSchema{
+					Name:        "web_search",
+					Description: "Search the web",
+					Parameters: map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"query": map[string]any{"type": "string"}},
+						"required":   []string{"query"},
+					},
+				},
+			},
+			{Type: "image_generation"},
+		},
+	}
+
+	body := p.buildRequestBody(req, false)
+
+	tools, ok := body["tools"].([]map[string]any)
+	if !ok {
+		t.Fatalf("tools is not []map[string]any: %T", body["tools"])
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tools length = %d, want 2", len(tools))
+	}
+
+	// First tool: function shape.
+	fn := tools[0]
+	if fn["type"] != "function" {
+		t.Errorf("tools[0] type = %v, want function", fn["type"])
+	}
+	if fn["name"] != "web_search" {
+		t.Errorf("tools[0] name = %v, want web_search", fn["name"])
+	}
+
+	// Second tool: native image_generation shape.
+	img := tools[1]
+	if img["type"] != "image_generation" {
+		t.Errorf("tools[1] type = %v, want image_generation", img["type"])
+	}
+	if img["action"] != "generate" {
+		t.Errorf("tools[1] action = %v, want generate", img["action"])
+	}
+	if img["model"] != "gpt-image-2" {
+		t.Errorf("tools[1] model = %v, want gpt-image-2", img["model"])
+	}
+	// Function field must not bleed into image tool.
+	if _, has := img["name"]; has {
+		t.Error("image_generation tool must not contain 'name'")
 	}
 }
 

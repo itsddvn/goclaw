@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ChatGPTOAuthQuotaStrip } from "@/pages/agents/agent-detail/chatgpt-oauth-quota-strip";
 import type { EffectiveChatGPTOAuthRoutingStrategy } from "@/types/agent";
+import { getProviderReasoningDefaults } from "@/types/provider";
 import type { ChatGPTOAuthProviderQuota } from "./hooks/use-chatgpt-oauth-provider-quotas";
 import type { ChatGPTOAuthAvailability } from "./hooks/use-chatgpt-oauth-provider-statuses";
 import type { ProviderData } from "./hooks/use-providers";
@@ -24,21 +25,24 @@ interface ProviderOAuthPoolSummary {
 interface ProviderListRowProps {
   provider: ProviderData;
   oauthPool?: ProviderOAuthPoolSummary;
+  showPoolHint?: boolean;
   onClick: () => void;
   onDelete?: () => void;
+  onPoolSetup?: () => void;
 }
 
 function strategyLabelKey(strategy: EffectiveChatGPTOAuthRoutingStrategy): string {
   if (strategy === "round_robin") return "list.strategy.roundRobin";
-  if (strategy === "priority_order") return "list.strategy.priorityOrder";
-  return "list.strategy.primaryFirst";
+  return "list.strategy.priorityOrder";
 }
 
 export function ProviderListRow({
   provider,
   oauthPool,
+  showPoolHint,
   onClick,
   onDelete,
+  onPoolSetup,
 }: ProviderListRowProps) {
   const { t: tc } = useTranslation("common");
   const { t } = useTranslation("providers");
@@ -70,6 +74,7 @@ export function ProviderListRow({
     : null;
   const showQuota = provider.provider_type === "chatgpt_oauth"
     && (oauthPool?.quotaLoading || Boolean(oauthPool?.quota));
+  const reasoningDefaults = getProviderReasoningDefaults(provider.settings);
   const connectorLineClass = oauthPool?.connectorPosition === "first" || oauthPool?.connectorPosition === "middle"
     ? "top-[-0.75rem] h-[calc(100%+1.5rem)]"
     : "top-[-0.75rem] h-[calc(50%+0.75rem)]";
@@ -130,13 +135,29 @@ export function ProviderListRow({
             <Badge
               variant={oauthPool.role === "owner" ? "outline" : "info"}
               className={cn(
-                "h-5 px-1.5 text-[10px]",
+                "h-5 px-1.5 text-2xs",
                 oauthPool.role === "owner" && "border-primary/30 bg-primary/[0.06] text-primary",
               )}
             >
               {t(oauthPool.role === "owner" ? "list.poolOwner" : "list.poolMember")}
             </Badge>
           )}
+          {showPoolHint && !hasPoolRole && onPoolSetup ? (
+            <Badge
+              variant="outline"
+              className="h-5 cursor-pointer border-dashed border-primary/40 px-1.5 text-2xs text-primary transition-colors hover:border-primary hover:bg-primary/10"
+              onClick={(event) => { event.stopPropagation(); onPoolSetup(); }}
+            >
+              {t("list.poolAvailable")}
+            </Badge>
+          ) : null}
+          {reasoningDefaults ? (
+            <Badge variant="secondary" className="h-5 px-1.5 text-2xs">
+              {t("list.reasoningDefault", {
+                level: t(`reasoning.${reasoningDefaults.effort ?? "off"}`),
+              })}
+            </Badge>
+          ) : null}
         </div>
         {(secondaryText || availabilityWarningLabel || showQuota) && (
           <div className="flex min-w-0 items-center gap-2 text-xs">
@@ -176,7 +197,7 @@ export function ProviderListRow({
       </div>
 
       <div className="hidden shrink-0 sm:block">
-        <Badge variant={typeBadge.variant} className="text-[11px]">
+        <Badge variant={typeBadge.variant} className="text-xs-plus">
           {typeBadge.label}
         </Badge>
       </div>
@@ -185,7 +206,7 @@ export function ProviderListRow({
         <ProviderApiKeyBadge provider={provider} oauthAvailability={oauthPool?.availability} />
       </div>
 
-      <div className="hidden shrink-0 text-[11px] text-muted-foreground lg:block">
+      <div className="hidden shrink-0 text-xs-plus text-muted-foreground lg:block">
         {provider.enabled ? tc("enabled") : tc("disabled")}
       </div>
 

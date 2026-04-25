@@ -31,19 +31,29 @@ export interface ChatGPTOAuthPoolOwnership {
 
 export function getChatGPTOAuthPoolOwnership(
   providers: ProviderData[],
+  options?: { enabledOnly?: boolean },
 ): ChatGPTOAuthPoolOwnership {
   const membersByOwner = new Map<string, string[]>();
   const ownerByMember = new Map<string, string>();
   const strategyByOwner = new Map<string, EffectiveChatGPTOAuthRoutingStrategy>();
+  const enabledOnly = options?.enabledOnly ?? false;
+  const eligibleProviders = enabledOnly
+    ? providers.filter((provider) => provider.provider_type === "chatgpt_oauth" && provider.enabled)
+    : providers.filter((provider) => provider.provider_type === "chatgpt_oauth");
+  const eligibleProvidersByName = new Map(
+    eligibleProviders.map((provider) => [provider.name, provider]),
+  );
 
   for (const provider of providers) {
     if (provider.provider_type !== "chatgpt_oauth") continue;
+    if (enabledOnly && !provider.enabled) continue;
     const routing = getChatGPTOAuthProviderRouting(provider.settings);
     if (!routing) continue;
     strategyByOwner.set(provider.name, routing.strategy);
-    if (routing.extraProviderNames.length === 0) continue;
-    membersByOwner.set(provider.name, routing.extraProviderNames);
-    for (const memberName of routing.extraProviderNames) {
+    const eligibleMembers = routing.extraProviderNames.filter((memberName) => eligibleProvidersByName.has(memberName));
+    if (eligibleMembers.length === 0) continue;
+    membersByOwner.set(provider.name, eligibleMembers);
+    for (const memberName of eligibleMembers) {
       if (!ownerByMember.has(memberName)) {
         ownerByMember.set(memberName, provider.name);
       }
@@ -105,39 +115,39 @@ export function ProviderApiKeyBadge({
   if (provider.provider_type === "chatgpt_oauth") {
     if (oauthAvailability === "needs_sign_in") {
       return (
-        <span className="flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400">
+        <span className="flex items-center gap-1 text-xs-plus text-amber-700 dark:text-amber-400">
           <AlertTriangle className="h-3 w-3" />{t("card.signInNeeded")}
         </span>
       );
     }
     if (oauthAvailability === "disabled") {
       return (
-        <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1 text-xs-plus text-muted-foreground">
           <CircleSlash2 className="h-3 w-3" />{t("card.disabled")}
         </span>
       );
     }
     return (
-      <span className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+      <span className="flex items-center gap-1 text-xs-plus text-emerald-600 dark:text-emerald-400">
         <Link2 className="h-3 w-3" />{t("card.connected")}
       </span>
     );
   }
   if (provider.provider_type === "claude_cli") {
     return (
-      <span className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+      <span className="flex items-center gap-1 text-xs-plus text-emerald-600 dark:text-emerald-400">
         <ShieldCheck className="h-3 w-3" />{t("card.authenticated")}
       </span>
     );
   }
   if (provider.api_key === "***") {
     return (
-      <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+      <span className="flex items-center gap-1 text-xs-plus text-muted-foreground">
         <Key className="h-3 w-3" />{t("card.apiKeySet")}
       </span>
     );
   }
   return (
-    <span className="text-[11px] text-muted-foreground/60">{t("apiKey.notSet")}</span>
+    <span className="text-xs-plus text-muted-foreground/60">{t("apiKey.notSet")}</span>
   );
 }

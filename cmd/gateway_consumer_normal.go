@@ -11,6 +11,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/telegram/voiceguard"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
@@ -72,9 +73,9 @@ func processNormalMessage(
 	}
 
 	// DM thread: override session key to isolate per-thread history in private chats.
-	if msg.Metadata["dm_thread_id"] != "" && peerKind == string(sessions.PeerDirect) {
+	if msg.Metadata[tools.MetaDMThreadID] != "" && peerKind == string(sessions.PeerDirect) {
 		var threadID int
-		fmt.Sscanf(msg.Metadata["dm_thread_id"], "%d", &threadID)
+		fmt.Sscanf(msg.Metadata[tools.MetaDMThreadID], "%d", &threadID)
 		if threadID > 0 {
 			sessionKey = sessions.BuildDMThreadSessionKey(agentID, msg.Channel, msg.ChatID, threadID)
 		}
@@ -108,6 +109,12 @@ func processNormalMessage(
 		}
 	}
 
+	// Set session label for Pancake channels: "Pancake:{SenderName}:{PageName}"
+	if msg.Metadata["pancake_mode"] != "" {
+		label := buildPancakeSessionLabel(msg.Metadata["display_name"], msg.Metadata["page_name"])
+		deps.SessStore.SetLabel(ctx, sessionKey, label)
+	}
+
 	// Auto-collect channel contacts for the contact selector.
 	// Skip internal senders (system:*, notification:*, teammate:*, ticker:*, session_send_tool).
 	if deps.ContactCollector != nil && msg.SenderID != "" && !bus.IsInternalSender(msg.SenderID) {
@@ -121,13 +128,13 @@ func processNormalMessage(
 		}
 		displayName := sessionMeta["display_name"]
 		username := sessionMeta["username"]
-		deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, senderNumericID, userID, displayName, username, peerKind, "user")
+		deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, senderNumericID, userID, displayName, username, peerKind, "user", "", "")
 
 		// Also collect group chat as a contact (for group permission management / merge).
 		// Group IDs (e.g., Telegram "-100456") differ from user IDs — no UNIQUE conflict.
 		if peerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
-			groupTitle := msg.Metadata["chat_title"] // Telegram: message.Chat.Title
-			deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, msg.ChatID, "", groupTitle, "", "group", "group")
+			groupTitle := msg.Metadata[tools.MetaChatTitle] // Telegram: message.Chat.Title
+			deps.ContactCollector.EnsureContact(ctx, channelType, msg.Channel, msg.ChatID, "", groupTitle, "", "group", "group", "", "")
 		}
 	}
 
@@ -208,15 +215,10 @@ func processNormalMessage(
 
 	// Build outbound metadata for reply-to + thread routing BEFORE RegisterRun
 	// so block.reply handler can use it for routing intermediate messages.
-	outMeta := make(map[string]string)
+	outMeta := channels.CopyFinalRoutingMeta(msg.Metadata)
 	if isGroup {
 		if mid := msg.Metadata["message_id"]; mid != "" {
 			outMeta["reply_to_message_id"] = mid
-		}
-	}
-	for _, k := range []string{tools.MetaMessageThreadID, "local_key", "placeholder_key", "group_id"} {
-		if v := msg.Metadata[k]; v != "" {
-			outMeta[k] = v
 		}
 	}
 
@@ -231,7 +233,7 @@ func processNormalMessage(
 	blockReply := deps.ChannelMgr != nil && deps.ChannelMgr.ResolveBlockReply(msg.Channel, deps.Cfg.Gateway.BlockReply)
 	toolStatus := deps.Cfg.Gateway.ToolStatus == nil || *deps.Cfg.Gateway.ToolStatus // default true
 	if deps.ChannelMgr != nil {
-		deps.ChannelMgr.RegisterRun(runID, msg.Channel, chatIDForRun, messageID, outMeta, enableStream, blockReply, toolStatus)
+		deps.ChannelMgr.RegisterRun(runID, msg.Channel, chatIDForRun, messageID, outMeta, msg.TenantID, enableStream, blockReply, toolStatus)
 	}
 
 	// Group-aware system prompt: help the LLM adapt tone and behavior for group chats.
@@ -241,20 +243,31 @@ func processNormalMessage(
 			"- Messages may include a [Chat messages since your last reply] section with recent group history. Each history line shows \"sender [time]: message\".\n" +
 			"- The current message includes a [From: sender_name] tag identifying who @mentioned you.\n" +
 			"- Keep responses concise and focused; long replies are disruptive in groups.\n" +
+			"- Write like a human. Avoid Markdown tables. Use real line breaks sparingly.\n" +
 			"- Address the group naturally. If the history shows a multi-person conversation, consider the full context before answering."
 	}
 
 	// Append per-topic system prompt (from group/topic config hierarchy).
-	if tsp := msg.Metadata["topic_system_prompt"]; tsp != "" {
+	if tsp := msg.Metadata[tools.MetaTopicSystemPrompt]; tsp != "" {
 		if extraPrompt != "" {
 			extraPrompt += "\n\n"
 		}
 		extraPrompt += tsp
 	}
 
+	// Append channel-provided self-identity hint (e.g. "You are @bot (Name) on Telegram").
+	// Prevents the LLM from treating its own platform handle as another bot when users
+	// @mention it directly or reference it alongside another bot in multi-bot groups.
+	if identity := msg.Metadata[tools.MetaChannelSelfIdentity]; identity != "" {
+		if extraPrompt != "" {
+			extraPrompt += "\n\n"
+		}
+		extraPrompt += identity
+	}
+
 	// Per-topic skill filter override (from group/topic config hierarchy).
 	var skillFilter []string
-	if ts := msg.Metadata["topic_skills"]; ts != "" {
+	if ts := msg.Metadata[tools.MetaTopicSkills]; ts != "" {
 		skillFilter = strings.Split(ts, ",")
 	}
 
@@ -343,6 +356,29 @@ func processNormalMessage(
 		schedCtx = tools.WithRunKind(schedCtx, rk)
 	}
 
+	// Resolve effective sender: prefer MetaOriginSenderID when the on-wire
+	// SenderID is an internal/synthetic one (e.g. "notification:progress",
+	// "ticker:system", "system:escalation", "session_send_tool"). This lets
+	// system-initiated turns that DO have a real user behind them (because
+	// they propagated the origin via metadata) attribute actions to that user
+	// — e.g. for CheckFileWriterPermission in group chats (#915). Synthetic
+	// senders without propagation keep their on-wire value and hit F1's
+	// deny-in-group rule (safe default).
+	effectiveSenderID := msg.SenderID
+	if bus.IsInternalSender(effectiveSenderID) {
+		// Defense-in-depth: if a propagation bug ever writes a synthetic
+		// value into MetaOriginSenderID, do NOT honour it. We want only real
+		// user senders to override the on-wire synthetic.
+		if realSender := msg.Metadata[tools.MetaOriginSenderID]; realSender != "" && !bus.IsInternalSender(realSender) {
+			effectiveSenderID = realSender
+		}
+	}
+	// Role propagation: carry the RBAC role of the originating actor so
+	// permission checks during the re-ingress turn can bypass per-user
+	// grants for authenticated admins (#915). Only present when the
+	// upstream dispatch set MetaOriginRole.
+	effectiveRole := msg.Metadata[tools.MetaOriginRole]
+
 	// Schedule through main lane (per-session concurrency controlled by maxConcurrent)
 	outCh := deps.Sched.ScheduleWithOpts(schedCtx, "main", agent.RunRequest{
 		SessionKey:        sessionKey,
@@ -351,12 +387,15 @@ func processNormalMessage(
 		ForwardMedia:      fwdMedia,
 		Channel:           msg.Channel,
 		ChannelType:       resolveChannelType(deps.ChannelMgr, msg.Channel),
-		ChatTitle:         msg.Metadata["chat_title"],
+		ChatTitle:         msg.Metadata[tools.MetaChatTitle],
 		ChatID:            msg.ChatID,
+		WorkspaceChatID:   msg.ChatID,
 		PeerKind:          peerKind,
 		LocalKey:          msg.Metadata["local_key"],
 		UserID:            userID,
-		SenderID:          msg.SenderID,
+		SenderID:          effectiveSenderID,
+		Role:              effectiveRole,
+		SenderName:        resolveSenderName(msg),
 		RunID:             runID,
 		Stream:            enableStream,
 		HistoryLimit:      msg.HistoryLimit,
@@ -368,7 +407,7 @@ func processNormalMessage(
 	})
 
 	// Handle result asynchronously to not block the flush callback.
-	go func(agentKey, channel, chatID, session, rID, peerKind, inboundContent string, meta map[string]string, blockReplyEnabled bool, ptd *tools.PendingTeamDispatch) {
+	go func(agentKey, channel, chatID, session, rID, peerKind, inboundContent string, meta map[string]string, blockReplyEnabled bool, ptd *tools.PendingTeamDispatch, tenantID, agentUUID uuid.UUID, agentOtherConfig []byte) {
 		outcome := <-outCh
 
 		// Release team create lock — tasks already visible in DB, other goroutines can list.
@@ -398,15 +437,28 @@ func processNormalMessage(
 					ChatID:   chatID,
 					Content:  "",
 					Metadata: meta,
+					TenantID: tenantID,
+					AgentID:  agentUUID,
 				})
 				return
 			}
 			slog.Error("inbound: agent run failed", "error", outcome.Err, "channel", channel)
+			// Suppress technical error text on public-facing channels (FB, Telegram, etc.)
+			// Empty Content still triggers placeholder/typing cleanup downstream.
+			errContent := formatAgentError(outcome.Err)
+			if deps.ChannelMgr != nil {
+				if ct := deps.ChannelMgr.ChannelTypeForName(channel); isExternalChannel(ct) {
+					slog.Info("inbound: suppressed error for external channel", "channel", channel, "type", ct)
+					errContent = ""
+				}
+			}
 			deps.MsgBus.PublishOutbound(bus.OutboundMessage{
 				Channel:  channel,
 				ChatID:   chatID,
-				Content:  formatAgentError(outcome.Err),
+				Content:  errContent,
 				Metadata: meta,
+				TenantID: tenantID,
+				AgentID:  agentUUID,
 			})
 			return
 		}
@@ -424,6 +476,8 @@ func processNormalMessage(
 				ChatID:   chatID,
 				Content:  "",
 				Metadata: meta,
+				TenantID: tenantID,
+				AgentID:  agentUUID,
 			})
 			return
 		}
@@ -439,6 +493,8 @@ func processNormalMessage(
 				ChatID:   chatID,
 				Content:  "",
 				Metadata: meta,
+				TenantID: tenantID,
+				AgentID:  agentUUID,
 			})
 			return
 		}
@@ -454,10 +510,13 @@ func processNormalMessage(
 
 		// Publish response back to the channel
 		outMsg := bus.OutboundMessage{
-			Channel:  channel,
-			ChatID:   chatID,
-			Content:  replyContent,
-			Metadata: meta,
+			Channel:          channel,
+			ChatID:           chatID,
+			Content:          replyContent,
+			Metadata:         meta,
+			TenantID:         tenantID,
+			AgentID:          agentUUID,
+			AgentOtherConfig: agentOtherConfig,
 		}
 
 		appendMediaToOutbound(&outMsg, outcome.Result.Media)
@@ -468,5 +527,5 @@ func processNormalMessage(
 		if deps.TeamStore != nil && channel != tools.ChannelSystem && channel != tools.ChannelTeammate && channel != tools.ChannelDashboard {
 			go autoSetFollowup(ctx, deps.TeamStore, deps.AgentStore, agentKey, channel, chatID, replyContent)
 		}
-	}(agentID, msg.Channel, msg.ChatID, sessionKey, runID, peerKind, msg.Content, outMeta, blockReply, ptd)
+	}(agentID, msg.Channel, msg.ChatID, sessionKey, runID, peerKind, msg.Content, outMeta, blockReply, ptd, msg.TenantID, agentLoop.UUID(), agentLoop.OtherConfig())
 }

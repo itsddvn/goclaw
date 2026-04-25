@@ -9,7 +9,9 @@ import (
 	"log/slog"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/media"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
@@ -23,15 +25,22 @@ import (
 
 // ChatMethods handles chat.send, chat.history, chat.abort, chat.inject.
 type ChatMethods struct {
-	agents         *agent.Router
-	sessions       store.SessionStore
-	rateLimiter    *gateway.RateLimiter
-	eventBus       bus.EventPublisher
-	postTurn tools.PostTurnProcessor
+	agents      *agent.Router
+	sessions    store.SessionStore
+	cfg         *config.Config
+	rateLimiter *gateway.RateLimiter
+	eventBus    bus.EventPublisher
+	postTurn    tools.PostTurnProcessor
+	audioMgr    *audio.Manager // for TTS auto-apply on WS responses (nil = disabled)
 }
 
-func NewChatMethods(agents *agent.Router, sess store.SessionStore, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
-	return &ChatMethods{agents: agents, sessions: sess, rateLimiter: rl, eventBus: eventBus}
+func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.Config, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
+	return &ChatMethods{agents: agents, sessions: sess, cfg: cfg, rateLimiter: rl, eventBus: eventBus}
+}
+
+// SetAudioManager sets the audio manager for TTS auto-apply on WS responses.
+func (m *ChatMethods) SetAudioManager(mgr *audio.Manager) {
+	m.audioMgr = mgr
 }
 
 // SetPostTurnProcessor sets the post-turn processor for team task dispatch.
@@ -50,16 +59,26 @@ func (m *ChatMethods) Register(router *gateway.MethodRouter) {
 
 // handleSessionStatus returns the running state and activity for a session.
 // Used by the frontend to restore UI state after switching between sessions.
-func (m *ChatMethods) handleSessionStatus(_ context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+func (m *ChatMethods) handleSessionStatus(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	locale := store.LocaleFromContext(ctx)
 	var params struct {
 		SessionKey string `json:"sessionKey"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionKey == "" {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "sessionKey required"))
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "sessionKey")))
+		return
+	}
+
+	// Ownership check: non-admin users can only query their own sessions.
+	if !requireSessionOwner(ctx, m.sessions, m.cfg, client, req.ID, params.SessionKey) {
 		return
 	}
 
 	isRunning := m.agents.IsSessionBusy(params.SessionKey)
+	var runId string
+	if rid, ok := m.agents.SessionRunID(params.SessionKey); ok {
+		runId = rid
+	}
 	var activity map[string]any
 	if status := m.agents.GetActivity(params.SessionKey); status != nil {
 		activity = map[string]any{
@@ -71,6 +90,7 @@ func (m *ChatMethods) handleSessionStatus(_ context.Context, client *gateway.Cli
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
 		"isRunning": isRunning,
+		"runId":     runId,
 		"activity":  activity,
 	}))
 }
@@ -161,6 +181,15 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		sessionKey = sessions.BuildWSSessionKey(params.AgentID, uuid.NewString())
 	}
 
+	// Ownership check: when resuming an existing session, verify the caller owns it.
+	// Skip for new sessions (Get returns nil) so first-message creation is not blocked.
+	if params.SessionKey != "" && !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, userID) {
+		if sess := m.sessions.Get(ctx, sessionKey); sess != nil && sess.UserID != userID {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrUnauthorized, i18n.T(locale, i18n.MsgPermissionDenied, "session")))
+			return
+		}
+	}
+
 	// Detach from HTTP request context so agent runs survive page navigation/reconnect.
 	// WithoutCancel preserves all context values (locale, user ID, etc.)
 	// but HTTP request cancellation no longer propagates.
@@ -173,6 +202,23 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 	// Mid-run injection: if session already has an active run, inject the message
 	// into the running loop instead of starting a new concurrent run.
 	if m.agents.IsSessionBusy(sessionKey) {
+		// Exact cancel keyword detection: auto-abort when user sends "stop", "cancel", etc.
+		if agent.IsExactCancelKeyword(params.Message) {
+			results := m.agents.AbortRunsForSession(sessionKey)
+			aborted := false
+			for _, r := range results {
+				if r.Stopped || r.Forced {
+					aborted = true
+					break
+				}
+			}
+			client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
+				"cancelled": true,
+				"aborted":   aborted,
+			}))
+			return
+		}
+
 		injected := m.agents.InjectMessage(sessionKey, agent.InjectedMessage{
 			Content: params.Message,
 			UserID:  userID,
@@ -192,7 +238,7 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 
 	// Create cancellable context for abort support (matching TS AbortController pattern).
 	runCtx, cancel := context.WithCancel(runCtxBase)
-	injectCh := m.agents.RegisterRun(runID, sessionKey, params.AgentID, cancel)
+	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, cancel)
 
 	// Run agent asynchronously - events are broadcast via the event system
 	go func() {
@@ -208,7 +254,7 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		var mediaInfos []media.MediaInfo
 		for _, item := range items {
 			mimeType := media.DetectMIMEType(item.Path)
-			mediaFiles = append(mediaFiles, bus.MediaFile{Path: item.Path, MimeType: mimeType})
+			mediaFiles = append(mediaFiles, bus.MediaFile{Path: item.Path, MimeType: mimeType, Filename: item.Filename})
 			mediaInfos = append(mediaInfos, media.MediaInfo{
 				Type:        media.MediaKindFromMime(mimeType),
 				FilePath:    item.Path,
@@ -230,15 +276,21 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		}
 
 		result, err := loop.Run(runCtx, agent.RunRequest{
-			SessionKey: sessionKey,
-			Message:    message,
-			Media:      mediaFiles,
-			Channel:    "ws",
-			ChatID:     userID, // use stable userID for team/workspace isolation (not ephemeral client.ID())
-			RunID:      runID,
-			UserID:     userID,
+			SessionKey:      sessionKey,
+			Message:         message,
+			Media:           mediaFiles,
+			Channel:         "ws",
+			ChatID:          userID, // use stable userID for team/workspace isolation (not ephemeral client.ID())
+			WorkspaceChatID: userID, // mirror ChatID so vault chat_id isolation activates for WS direct flow
+			RunID:           runID,
+			UserID:          userID,
 			Stream:     params.Stream,
 			InjectCh:   injectCh,
+			// Wire trace ID back to the active run so force-abort can mark the
+			// correct trace as cancelled if the goroutine does not exit within 3s.
+			OnTraceCreated: func(traceID uuid.UUID) {
+				m.agents.SetRunTraceID(runID, traceID)
+			},
 		})
 
 		if err != nil {
@@ -277,13 +329,40 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 			}()
 		}
 
+		// TTS auto-apply: convert [[tts]] tagged responses to voice audio
+		content := result.Content
+		var ttsAudio *agent.MediaResult
+		if m.audioMgr != nil && content != "" {
+			// For WS, we don't have voice inbound info - use "tagged" mode only
+			ttsResult, _ := m.audioMgr.AutoApplyToText(runCtx, content, "ws", false, "")
+			if ttsResult != nil && ttsResult.AudioPath != "" {
+				// Include audio in media results
+				ttsAudio = &agent.MediaResult{
+					Path:        httpapi.SignMediaPath(ttsResult.AudioPath, httpapi.FileSigningKey()),
+					ContentType: ttsResult.AudioMime,
+					AsVoice:     true,
+				}
+				content = ttsResult.Text // Use stripped text
+			} else if ttsResult != nil {
+				content = ttsResult.Text // Strip directives even if TTS not applied
+			}
+		}
+
 		resp := map[string]any{
 			"runId":   result.RunID,
-			"content": result.Content,
+			"content": content,
 			"usage":   result.Usage,
 		}
-		if len(result.Media) > 0 {
-			resp["media"] = result.Media
+		if result.Thinking != "" {
+			resp["thinking"] = result.Thinking
+		}
+		// Combine existing media with TTS audio
+		mediaResults := result.Media
+		if ttsAudio != nil {
+			mediaResults = append([]agent.MediaResult{*ttsAudio}, mediaResults...)
+		}
+		if len(mediaResults) > 0 {
+			resp["media"] = mediaResults
 		}
 		client.SendResponse(protocol.NewOKResponse(req.ID, resp))
 	}()
@@ -309,6 +388,11 @@ func (m *ChatMethods) handleHistory(ctx context.Context, client *gateway.Client,
 	sessionKey := params.SessionKey
 	if sessionKey == "" {
 		sessionKey = sessions.BuildWSSessionKey(params.AgentID, uuid.NewString())
+	}
+
+	// Ownership check: non-admin users can only read their own session history.
+	if params.SessionKey != "" && !requireSessionOwner(ctx, m.sessions, m.cfg, client, req.ID, sessionKey) {
+		return
 	}
 
 	history := m.sessions.GetHistory(ctx, sessionKey)
@@ -350,6 +434,11 @@ func (m *ChatMethods) handleInject(ctx context.Context, client *gateway.Client, 
 		return
 	}
 
+	// Ownership check: non-admin users can only inject into their own sessions.
+	if !requireSessionOwner(ctx, m.sessions, m.cfg, client, req.ID, params.SessionKey) {
+		return
+	}
+
 	// Truncate label
 	if len(params.Label) > 100 {
 		params.Label = params.Label[:100]
@@ -383,7 +472,8 @@ func (m *ChatMethods) handleInject(ctx context.Context, client *gateway.Client, 
 //
 // Response:
 //
-//	{ ok: true, aborted: bool, runIds: []string }
+//	{ ok: true, aborted: bool, stopped: bool, forced: bool,
+//	  alreadyAborting: bool, notFound: bool, unauthorized: bool, runIds: []string }
 func (m *ChatMethods) handleAbort(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	locale := store.LocaleFromContext(ctx)
 	var params struct {
@@ -400,21 +490,64 @@ func (m *ChatMethods) handleAbort(ctx context.Context, client *gateway.Client, r
 		return
 	}
 
-	var abortedIDs []string
+	// Non-admin users must provide sessionKey for ownership verification.
+	if params.SessionKey == "" && params.RunID != "" && !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "sessionKey")))
+		return
+	}
 
+	// Ownership check: non-admin users can only abort their own sessions.
+	if params.SessionKey != "" && !requireSessionOwner(ctx, m.sessions, m.cfg, client, req.ID, params.SessionKey) {
+		return
+	}
+
+	isAdmin := canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID())
+
+	// Collect abort results.
+	var results []agent.AbortResult
 	if params.RunID != "" {
-		// Abort specific run (with sessionKey authorization)
-		if m.agents.AbortRun(params.RunID, params.SessionKey) {
-			abortedIDs = append(abortedIDs, params.RunID)
-		}
+		results = []agent.AbortResult{m.agents.AbortRun(params.RunID, params.SessionKey)}
 	} else {
-		// Abort all runs for session
-		abortedIDs = m.agents.AbortRunsForSession(params.SessionKey)
+		results = m.agents.AbortRunsForSession(params.SessionKey)
+	}
+
+	// Aggregate counts and run IDs.
+	var runIDs []string
+	stopped, forced, alreadyAborting, notFound, unauthorized := 0, 0, 0, 0, 0
+	for _, r := range results {
+		runIDs = append(runIDs, r.RunID)
+		switch {
+		case r.Stopped:
+			stopped++
+		case r.Forced:
+			forced++
+		case r.AlreadyAborting:
+			alreadyAborting++
+		case r.NotFound:
+			notFound++
+		case r.Unauthorized:
+			unauthorized++
+			slog.Warn("chat.abort: unauthorized run abort attempt",
+				"runId", r.RunID, "userID", client.UserID())
+		}
+	}
+
+	// Security: collapse Unauthorized → NotFound for non-admin callers so run
+	// existence is not leaked to unprivileged clients.
+	respUnauthorized := unauthorized
+	if !isAdmin && unauthorized > 0 {
+		notFound += unauthorized
+		respUnauthorized = 0
 	}
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{
-		"ok":      true,
-		"aborted": len(abortedIDs) > 0,
-		"runIds":  abortedIDs,
+		"ok":              true,
+		"aborted":         stopped+forced > 0,
+		"stopped":         stopped > 0,
+		"forced":          forced > 0,
+		"alreadyAborting": alreadyAborting > 0,
+		"notFound":        notFound > 0 && stopped+forced+alreadyAborting == 0,
+		"unauthorized":    respUnauthorized > 0,
+		"runIds":          runIDs,
 	}))
 }

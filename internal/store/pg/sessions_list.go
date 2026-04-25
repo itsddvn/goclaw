@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +17,14 @@ import (
 // buildSessionFilter builds a dynamic WHERE clause from SessionListOpts.
 // Returns the WHERE string (with leading " WHERE ") and the positional args.
 // The tableAlias is prepended to column names (e.g. "s" → "s.session_key").
-func buildSessionFilter(opts store.SessionListOpts, tableAlias string) (string, []any) {
+//
+// Tenant isolation precedence:
+//  1. opts.TenantID (if set) wins — admin tooling override path.
+//  2. Else if ctx is NOT cross-tenant, fall back to store.TenantIDFromContext(ctx).
+//     This matches the canonical pattern in List() above and prevents
+//     silent cross-tenant reads from callers that rely on ctx scoping.
+//  3. Else (cross-tenant ctx, no opts override) no tenant filter.
+func buildSessionFilter(ctx context.Context, opts store.SessionListOpts, tableAlias string) (string, []any) {
 	prefix := ""
 	if tableAlias != "" {
 		prefix = tableAlias + "."
@@ -41,9 +49,15 @@ func buildSessionFilter(opts store.SessionListOpts, tableAlias string) (string, 
 		args = append(args, opts.UserID)
 		idx++
 	}
-	if opts.TenantID != uuid.Nil {
+
+	// Resolve tenant filter — opts override beats ctx.
+	tenantID := opts.TenantID
+	if tenantID == uuid.Nil && !store.IsCrossTenant(ctx) {
+		tenantID = store.TenantIDFromContext(ctx)
+	}
+	if tenantID != uuid.Nil {
 		conditions = append(conditions, fmt.Sprintf("%stenant_id = $%d", prefix, idx))
-		args = append(args, opts.TenantID)
+		args = append(args, tenantID)
 		idx++
 	}
 	_ = idx // consumed
@@ -79,40 +93,18 @@ func (s *PGSessionStore) List(ctx context.Context, agentID string) []store.Sessi
 		where = " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT session_key, messages, created_at, updated_at, label, channel, user_id, COALESCE(metadata, '{}') FROM sessions"+where+" ORDER BY updated_at DESC",
-		args...)
-	if err != nil {
+	var scanned []sessionListRow
+	if err := pkgSqlxDB.SelectContext(ctx, &scanned,
+		"SELECT session_key, messages, created_at, updated_at, label, channel, user_id, COALESCE(metadata, '{}') AS metadata FROM sessions"+where+" ORDER BY updated_at DESC",
+		args...); err != nil {
 		return nil
 	}
-	defer rows.Close()
 
 	var result []store.SessionInfo
-	for rows.Next() {
-		var key string
-		var msgsJSON []byte
-		var createdAt, updatedAt time.Time
-		var label, channel, userID *string
-		var metaJSON []byte
-		if err := rows.Scan(&key, &msgsJSON, &createdAt, &updatedAt, &label, &channel, &userID, &metaJSON); err != nil {
-			continue
-		}
+	for i := range scanned {
 		var msgs []providers.Message
-		json.Unmarshal(msgsJSON, &msgs)
-		var meta map[string]string
-		if len(metaJSON) > 0 {
-			json.Unmarshal(metaJSON, &meta)
-		}
-		result = append(result, store.SessionInfo{
-			Key:          key,
-			MessageCount: len(msgs),
-			Created:      createdAt,
-			Updated:      updatedAt,
-			Label:        derefStr(label),
-			Channel:      derefStr(channel),
-			UserID:       derefStr(userID),
-			Metadata:     meta,
-		})
+		json.Unmarshal(scanned[i].MsgsJSON, &msgs) //nolint:errcheck
+		result = append(result, scanned[i].toSessionInfo(len(msgs)))
 	}
 	return result
 }
@@ -124,7 +116,7 @@ func (s *PGSessionStore) ListPaged(ctx context.Context, opts store.SessionListOp
 	}
 	offset := max(opts.Offset, 0)
 
-	where, whereArgs := buildSessionFilter(opts, "")
+	where, whereArgs := buildSessionFilter(ctx, opts, "")
 
 	// Count total
 	var total int
@@ -135,43 +127,18 @@ func (s *PGSessionStore) ListPaged(ctx context.Context, opts store.SessionListOp
 
 	// Fetch page using jsonb_array_length to avoid loading full messages
 	nextIdx := len(whereArgs) + 1
-	selectQ := fmt.Sprintf(`SELECT session_key, jsonb_array_length(messages), created_at, updated_at, label, channel, user_id, COALESCE(metadata, '{}')
+	selectQ := fmt.Sprintf(`SELECT session_key, jsonb_array_length(messages) AS message_count, created_at, updated_at, label, channel, user_id, COALESCE(metadata, '{}') AS metadata
 		FROM sessions%s ORDER BY updated_at DESC LIMIT $%d OFFSET $%d`, where, nextIdx, nextIdx+1)
 	selectArgs := append(append([]any{}, whereArgs...), limit, offset)
 
-	rows, err := s.db.QueryContext(ctx, selectQ, selectArgs...)
-	if err != nil {
+	var scanned []sessionPagedRow
+	if err := pkgSqlxDB.SelectContext(ctx, &scanned, selectQ, selectArgs...); err != nil {
 		return store.SessionListResult{Sessions: []store.SessionInfo{}, Total: total}
 	}
-	defer rows.Close()
 
-	var result []store.SessionInfo
-	for rows.Next() {
-		var key string
-		var msgCount int
-		var createdAt, updatedAt time.Time
-		var label, channel, userID *string
-		var metaJSON []byte
-		if err := rows.Scan(&key, &msgCount, &createdAt, &updatedAt, &label, &channel, &userID, &metaJSON); err != nil {
-			continue
-		}
-		var meta map[string]string
-		if len(metaJSON) > 0 {
-			json.Unmarshal(metaJSON, &meta)
-		}
-		result = append(result, store.SessionInfo{
-			Key:          key,
-			MessageCount: msgCount,
-			Created:      createdAt,
-			Updated:      updatedAt,
-			Label:        derefStr(label),
-			Channel:      derefStr(channel),
-			UserID:       derefStr(userID),
-			Metadata:     meta,
-		})
-	}
-	if result == nil {
-		result = []store.SessionInfo{}
+	result := make([]store.SessionInfo, 0, len(scanned))
+	for i := range scanned {
+		result = append(result, scanned[i].toSessionInfo())
 	}
 	return store.SessionListResult{Sessions: result, Total: total}
 }
@@ -184,7 +151,7 @@ func (s *PGSessionStore) ListPagedRich(ctx context.Context, opts store.SessionLi
 	}
 	offset := max(opts.Offset, 0)
 
-	where, whereArgs := buildSessionFilter(opts, "s")
+	where, whereArgs := buildSessionFilter(ctx, opts, "s")
 
 	// Count total
 	var total int
@@ -194,12 +161,15 @@ func (s *PGSessionStore) ListPagedRich(ctx context.Context, opts store.SessionLi
 	}
 
 	// Fetch page with agent name via LEFT JOIN
-	const richCols = `s.session_key, jsonb_array_length(s.messages), s.created_at, s.updated_at,
-		s.label, s.channel, s.user_id, COALESCE(s.metadata, '{}'),
+	const richCols = `s.session_key, jsonb_array_length(s.messages) AS message_count, s.created_at, s.updated_at,
+		s.label, s.channel, s.user_id, COALESCE(s.metadata, '{}') AS metadata,
 		s.model, s.provider, s.input_tokens, s.output_tokens,
-		COALESCE(a.display_name, ''),
-		octet_length(s.messages::text) / 4 + 12000,
-		COALESCE(a.context_window, 200000), -- config.DefaultContextWindow
+		COALESCE(a.display_name, '') AS agent_name,
+		COALESCE(
+		  NULLIF(s.metadata->>'last_prompt_tokens', '')::int,
+		  octet_length(s.messages::text) / 4 + 12000
+		) AS estimated_tokens,
+		COALESCE(a.context_window, 200000) AS context_window,
 		s.compaction_count`
 
 	nextIdx := len(whereArgs) + 1
@@ -208,55 +178,14 @@ func (s *PGSessionStore) ListPagedRich(ctx context.Context, opts store.SessionLi
 		%s ORDER BY s.updated_at DESC LIMIT $%d OFFSET $%d`, richCols, where, nextIdx, nextIdx+1)
 	selectArgs := append(append([]any{}, whereArgs...), limit, offset)
 
-	rows, err := s.db.QueryContext(ctx, selectQ, selectArgs...)
-	if err != nil {
+	var scanned []sessionRichRow
+	if err := pkgSqlxDB.SelectContext(ctx, &scanned, selectQ, selectArgs...); err != nil {
 		return store.SessionListRichResult{Sessions: []store.SessionInfoRich{}, Total: total}
 	}
-	defer rows.Close()
 
-	var result []store.SessionInfoRich
-	for rows.Next() {
-		var key string
-		var msgCount int
-		var createdAt, updatedAt time.Time
-		var label, channel, userID *string
-		var metaJSON []byte
-		var model, provider *string
-		var inputTokens, outputTokens int64
-		var agentName string
-		var estimatedTokens, contextWindow, compactionCount int
-		if err := rows.Scan(&key, &msgCount, &createdAt, &updatedAt, &label, &channel, &userID, &metaJSON,
-			&model, &provider, &inputTokens, &outputTokens, &agentName,
-			&estimatedTokens, &contextWindow, &compactionCount); err != nil {
-			continue
-		}
-		var meta map[string]string
-		if len(metaJSON) > 0 {
-			json.Unmarshal(metaJSON, &meta)
-		}
-		result = append(result, store.SessionInfoRich{
-			SessionInfo: store.SessionInfo{
-				Key:          key,
-				MessageCount: msgCount,
-				Created:      createdAt,
-				Updated:      updatedAt,
-				Label:        derefStr(label),
-				Channel:      derefStr(channel),
-				UserID:       derefStr(userID),
-				Metadata:     meta,
-			},
-			Model:           derefStr(model),
-			Provider:        derefStr(provider),
-			InputTokens:     inputTokens,
-			OutputTokens:    outputTokens,
-			AgentName:       agentName,
-			EstimatedTokens: estimatedTokens,
-			ContextWindow:   contextWindow,
-			CompactionCount: compactionCount,
-		})
-	}
-	if result == nil {
-		result = []store.SessionInfoRich{}
+	result := make([]store.SessionInfoRich, 0, len(scanned))
+	for i := range scanned {
+		result = append(result, scanned[i].toSessionInfoRich())
 	}
 	return store.SessionListRichResult{Sessions: result, Total: total}
 }
@@ -273,7 +202,21 @@ func (s *PGSessionStore) Save(ctx context.Context, key string) error {
 	msgs := make([]providers.Message, len(data.Messages))
 	copy(msgs, data.Messages)
 	snapshot.Messages = msgs
+	// Deep-copy Metadata under RLock so subsequent mutation does not race with
+	// concurrent readers holding data.Metadata via GetSessionMetadata.
+	metaCopy := make(map[string]string, len(data.Metadata)+2)
+	for k, v := range data.Metadata {
+		metaCopy[k] = v
+	}
+	snapshot.Metadata = metaCopy
 	s.mu.RUnlock()
+
+	// Persist adaptive-throttle numbers into metadata JSONB so list queries can
+	// read accurate token counts without a dedicated column.
+	if snapshot.LastPromptTokens > 0 {
+		snapshot.Metadata["last_prompt_tokens"] = strconv.Itoa(snapshot.LastPromptTokens)
+		snapshot.Metadata["last_message_count"] = strconv.Itoa(snapshot.LastMessageCount)
+	}
 
 	msgsJSON, _ := json.Marshal(snapshot.Messages)
 	metaJSON := []byte("{}")
@@ -427,6 +370,18 @@ func (s *PGSessionStore) loadFromDB(ctx context.Context, key string) *store.Sess
 		json.Unmarshal(*metaJSON, &meta)
 	}
 
+	// Restore adaptive-throttle fields from metadata so GetLastPromptTokens()
+	// returns the persisted value after a server restart (clean cache).
+	var lastPromptTokens, lastMessageCount int
+	if meta != nil {
+		if v := meta["last_prompt_tokens"]; v != "" {
+			lastPromptTokens, _ = strconv.Atoi(v)
+		}
+		if v := meta["last_message_count"]; v != "" {
+			lastMessageCount, _ = strconv.Atoi(v)
+		}
+	}
+
 	return &store.SessionData{
 		Key:                        sessionKey,
 		Messages:                   msgs,
@@ -448,6 +403,8 @@ func (s *PGSessionStore) loadFromDB(ctx context.Context, key string) *store.Sess
 		SpawnedBy:                  derefStr(spawnedBy),
 		SpawnDepth:                 spawnDepth,
 		Metadata:                   meta,
+		LastPromptTokens:           lastPromptTokens,
+		LastMessageCount:           lastMessageCount,
 	}
 }
 

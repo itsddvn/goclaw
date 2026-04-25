@@ -12,22 +12,19 @@ export type ParamField = {
 
 export const MEDIA_PARAMS_SCHEMA: Record<string, Record<string, ParamField[]>> = {
   create_image: {
-    minimax_native: [
+    chatgpt_oauth: [
       {
-        key: "size",
-        label: "Size",
+        key: "image_model",
+        label: "Image model",
         type: "select",
-        default: "1024*1024",
+        default: "gpt-image-2",
         options: [
-          { value: "1024*1024", label: "1:1" },
-          { value: "1280*720", label: "16:9" },
-          { value: "720*1280", label: "9:16" },
-          { value: "1024*768", label: "4:3" },
-          { value: "768*1024", label: "3:4" },
+          { value: "gpt-image-2", label: "Default · gpt-image-2 (recommended)" },
+          { value: "gpt-image-1.5", label: "Legacy · gpt-image-1.5" },
         ],
       },
-      { key: "prompt_optimizer", label: "Prompt Optimizer", type: "toggle", default: true },
     ],
+    minimax_native: [],
     bailian: [
       {
         key: "size",
@@ -73,6 +70,23 @@ export const MEDIA_PARAMS_SCHEMA: Record<string, Record<string, ParamField[]>> =
     ],
     gemini_native: [
       {
+        key: "resolution",
+        label: "Resolution",
+        type: "select",
+        default: "720p",
+        options: [
+          { value: "720p", label: "720p (50% cheaper)" },
+          { value: "1080p", label: "1080p" },
+        ],
+      },
+      {
+        key: "generate_audio",
+        label: "Generate Audio",
+        type: "toggle",
+        default: true,
+        description: "Auto-generate synchronized audio",
+      },
+      {
         key: "person_generation",
         label: "Person Generation",
         type: "select",
@@ -107,26 +121,6 @@ export const MEDIA_PARAMS_SCHEMA: Record<string, Record<string, ParamField[]>> =
           { value: "64000", label: "64kbps" },
           { value: "128000", label: "128kbps" },
           { value: "256000", label: "256kbps" },
-        ],
-      },
-    ],
-    suno: [
-      {
-        key: "style",
-        label: "Style",
-        type: "text",
-        default: "",
-        description: "e.g. Pop, Classical, Jazz",
-      },
-      {
-        key: "vocal_gender",
-        label: "Vocal Gender",
-        type: "select",
-        default: "",
-        options: [
-          { value: "", label: "Any" },
-          { value: "m", label: "Male" },
-          { value: "f", label: "Female" },
         ],
       },
     ],

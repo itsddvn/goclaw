@@ -28,6 +28,16 @@ var (
 	htmlTagRe            = regexp.MustCompile(`<[^>]*>`)
 )
 
+// extractMigrateChatID checks if a Telegram API error contains a group→supergroup
+// migration indicator and returns the new chat ID, or 0 if not a migration error.
+func extractMigrateChatID(err error) int64 {
+	var apiErr *telegoapi.Error
+	if errors.As(err, &apiErr) && apiErr.Parameters != nil && apiErr.Parameters.MigrateToChatID != 0 {
+		return apiErr.Parameters.MigrateToChatID
+	}
+	return 0
+}
+
 const (
 	sendMaxRetries     = 3
 	sendRetryDelay     = 2 * time.Second
@@ -40,16 +50,19 @@ func stripHTML(s string) string {
 	return html.UnescapeString(htmlTagRe.ReplaceAllString(s, ""))
 }
 
-// isRetryableNetworkErr checks if a Telegram API error is a transient network/server error
-// worth retrying. Covers transport-level failures and Telegram 5xx server errors.
+// isRetryableNetworkErr checks if a Telegram API error is a transient error
+// worth retrying. Covers 429 rate limits, 5xx server errors, and transport failures.
 func isRetryableNetworkErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Check for Telegram API 5xx errors via typed error.
+	// Check for Telegram API errors via typed error.
 	var apiErr *telegoapi.Error
-	if errors.As(err, &apiErr) && apiErr.ErrorCode >= 500 {
-		return true
+	if errors.As(err, &apiErr) {
+		// 429 = rate limited (transient), 5xx = server error (transient)
+		if apiErr.ErrorCode == 429 || apiErr.ErrorCode >= 500 {
+			return true
+		}
 	}
 	// Transport-level errors (timeout, reset, DNS, etc.)
 	s := err.Error()
@@ -79,11 +92,26 @@ func isPostConnectNetworkErr(err error) bool {
 		strings.Contains(s, "EOF")) && !strings.Contains(s, "lookup")
 }
 
+// mediaSendMethods lists sendX calls that upload a file body and therefore
+// need the longer sendMediaOverallTimeout budget. Keyed by the `name` argument
+// passed to retrySend so no call site has to change when we bump the budget.
+var mediaSendMethods = map[string]struct{}{
+	"sendPhoto":    {},
+	"sendVideo":    {},
+	"sendAudio":    {},
+	"sendVoice":    {},
+	"sendDocument": {},
+}
+
 // retrySend wraps a Telegram send call with retry logic for transient network errors.
 // Parse errors are NOT retried (handled by caller's HTML fallback).
 // resetFn is called before each retry (e.g. to seek file handles back to start). Can be nil.
 func (c *Channel) retrySend(ctx context.Context, name string, resetFn func(), fn func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(ctx, sendOverallTimeout)
+	overall := sendOverallTimeout
+	if _, isMedia := mediaSendMethods[name]; isMedia {
+		overall = sendMediaOverallTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, overall)
 	defer cancel()
 
 	var err error
@@ -107,15 +135,23 @@ func (c *Channel) retrySend(ctx context.Context, name string, resetFn func(), fn
 			c.enableIPv4Only()
 		}
 
+		// Honor Telegram's retry_after for 429 rate limit errors.
+		delay := sendRetryDelay * time.Duration(attempt)
+		var retryAPIErr *telegoapi.Error
+		if errors.As(err, &retryAPIErr) && retryAPIErr.ErrorCode == 429 &&
+			retryAPIErr.Parameters != nil && retryAPIErr.Parameters.RetryAfter > 0 {
+			delay = time.Duration(retryAPIErr.Parameters.RetryAfter+1) * time.Second // +1s safety margin
+		}
+
 		slog.Warn("telegram send retry",
-			"func", name, "attempt", attempt, "max", sendMaxRetries, "error", err)
+			"func", name, "attempt", attempt, "max", sendMaxRetries, "delay", delay, "error", err)
 		if resetFn != nil {
 			resetFn()
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(sendRetryDelay * time.Duration(attempt)):
+		case <-time.After(delay):
 		}
 	}
 	return err
@@ -218,7 +254,50 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			c.placeholders.Delete(localKey)
 			_ = c.deleteMessage(ctx, chatID, pID.(int))
 		}
-		return c.sendMediaMessage(ctx, chatID, msg, replyToMsgID, threadID)
+		err := c.sendMediaMessage(ctx, chatID, msg, replyToMsgID, threadID)
+		// Migration fallback: group upgraded to supergroup — retry with new chat ID.
+		if err != nil {
+			if newChatID := extractMigrateChatID(err); newChatID != 0 {
+				slog.Info("telegram: group migrated to supergroup (media send-path)",
+					"old_chat_id", chatID, "new_chat_id", newChatID)
+				c.migrateGroupChat(ctx, chatID, newChatID)
+				return c.sendMediaMessage(ctx, newChatID, msg, replyToMsgID, threadID)
+			}
+		}
+		return err
+	}
+
+	// TTS auto-apply: convert [[tts]] tagged responses to voice
+	if c.audioMgr != nil && msg.Content != "" {
+		isVoiceInbound := msg.Metadata["is_voice_inbound"] == "true"
+		ttsResult, ttsErr := c.audioMgr.AutoApplyToText(ctx, msg.Content, "telegram", isVoiceInbound, "")
+		if ttsErr != nil {
+			slog.Debug("telegram: tts auto-apply error", "error", ttsErr)
+		}
+		if ttsResult != nil && ttsResult.AudioPath != "" {
+			// Send voice message instead of text
+			if err := c.sendVoice(ctx, tu.ID(chatID), ttsResult.AudioPath, "", replyToMsgID, threadID); err != nil {
+				slog.Warn("telegram: tts auto-apply voice send failed, falling back to text", "error", err)
+			} else {
+				// Voice sent successfully
+				strippedText := strings.TrimSpace(ttsResult.Text)
+				if strippedText == "" {
+					// Voice-only: delete placeholder (no text to show)
+					if pID, ok := c.placeholders.LoadAndDelete(localKey); ok {
+						if msgID, ok := pID.(int); ok && msgID > 0 {
+							_ = c.deleteMessage(ctx, chatID, msgID)
+						}
+					}
+					return nil
+				}
+				// Has remaining text: let normal flow handle placeholder edit
+				msg.Content = strippedText
+			}
+		}
+		// Update content with directives stripped (even if TTS not applied)
+		if ttsResult != nil {
+			msg.Content = ttsResult.Text
+		}
 	}
 
 	// Text-only message
@@ -252,6 +331,13 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 				slog.Warn("telegram: final edit timed out or lost, skipping chunk 0 of multi-chunk response",
 					"chat_id", chatID, "message_id", msgID, "error", err)
 				startChunk = 1
+			} else if isRetryableNetworkErr(err) {
+				// Retryable error (429 rate limit, 5xx, network). The stream message
+				// still exists with valid streamed content — don't delete it.
+				// Sending fresh would also fail, so keep the stream message as-is.
+				slog.Warn("telegram: final edit failed with retryable error, keeping stream message",
+					"chat_id", chatID, "message_id", msgID, "error", err)
+				return nil
 			} else {
 				// Edit failed definitely (400 rejection), or a single-chunk edit timed out.
 				// For single-chunk answers, we delete (best-effort) and send fresh to
@@ -336,8 +422,15 @@ func (c *Channel) sendMediaMessage(ctx context.Context, chatID int64, msg bus.Ou
 				return err
 			}
 		case strings.HasPrefix(ct, "audio/"):
-			if err := c.sendAudio(ctx, chatIDObj, media.URL, caption, replyTo, threadID); err != nil {
-				return err
+			// Voice message: use SendVoice for inline playback bubble.
+			if msg.Metadata["audio_as_voice"] == "true" && isVoiceCompatible(ct) {
+				if err := c.sendVoice(ctx, chatIDObj, media.URL, caption, replyTo, threadID); err != nil {
+					return err
+				}
+			} else {
+				if err := c.sendAudio(ctx, chatIDObj, media.URL, caption, replyTo, threadID); err != nil {
+					return err
+				}
 			}
 		default:
 			if err := c.sendDocument(ctx, chatIDObj, media.URL, caption, replyTo, threadID); err != nil {
@@ -389,6 +482,17 @@ func (c *Channel) sendHTMLWithDepth(ctx context.Context, chatID int64, htmlConte
 	})
 
 	if err != nil {
+		// Case 0: Group migrated to supergroup — update DB and retry with new chat ID.
+		if newChatID := extractMigrateChatID(err); newChatID != 0 {
+			slog.Info("telegram: group migrated to supergroup (send-path)",
+				"old_chat_id", chatID, "new_chat_id", newChatID)
+			c.migrateGroupChat(ctx, chatID, newChatID)
+			if depth < maxSplitDepth {
+				return c.sendHTMLWithDepth(ctx, newChatID, htmlContent, replyTo, threadID, depth+1)
+			}
+			return fmt.Errorf("migration retry depth exceeded: %w", err)
+		}
+
 		errStr := err.Error()
 
 		// Case 1: Message too long. Split into smaller chunks and send individually.
@@ -579,6 +683,57 @@ func (c *Channel) sendAudio(ctx context.Context, chatID telego.ChatID, filePath,
 		_, err = c.bot.SendAudio(ctx, params)
 	}
 	return err
+}
+
+// sendVoice sends an audio file as a voice message (inline playable bubble).
+// Telegram supports OGG (Opus), MP3, and M4A for voice messages.
+func (c *Channel) sendVoice(ctx context.Context, chatID telego.ChatID, filePath, caption string, replyTo, threadID int) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open voice %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	params := &telego.SendVoiceParams{
+		ChatID:  chatID,
+		Voice:   telego.InputFile{File: file},
+		Caption: caption,
+	}
+	if caption != "" {
+		params.ParseMode = telego.ModeHTML
+	}
+	if sendThreadID := resolveThreadIDForSend(threadID); sendThreadID > 0 {
+		params.MessageThreadID = sendThreadID
+	}
+	if replyTo > 0 {
+		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyTo, AllowSendingWithoutReply: true}
+	}
+
+	err = c.retrySend(ctx, "sendVoice", func() { file.Seek(0, 0) }, func(ctx context.Context) error {
+		_, e := c.bot.SendVoice(ctx, params)
+		return e
+	})
+	if err != nil && parseErrRe.MatchString(err.Error()) {
+		slog.Warn("sendVoice: HTML parse failed, retrying with plain text caption", "error", err)
+		file.Seek(0, 0)
+		params.ParseMode = ""
+		params.Caption = stripHTML(params.Caption)
+		_, err = c.bot.SendVoice(ctx, params)
+	}
+	if err != nil && params.MessageThreadID != 0 && threadNotFoundRe.MatchString(err.Error()) {
+		slog.Warn("sendVoice: thread not found, retrying without thread", "thread_id", params.MessageThreadID)
+		file.Seek(0, 0)
+		params.MessageThreadID = 0
+		_, err = c.bot.SendVoice(ctx, params)
+	}
+	return err
+}
+
+// isVoiceCompatible returns true if content-type is supported by Telegram SendVoice.
+// Supported: OGG (Opus), MP3, M4A per Telegram Bot API docs.
+func isVoiceCompatible(ct string) bool {
+	return ct == "audio/ogg" || ct == "audio/mpeg" || ct == "audio/mp3" ||
+		ct == "audio/m4a" || ct == "audio/x-m4a"
 }
 
 // sendDocument sends a document/file message.

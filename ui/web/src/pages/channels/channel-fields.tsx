@@ -35,7 +35,11 @@ export function ChannelFields({ fields, values, onChange, idPrefix, isEdit, cont
         // Conditional visibility: skip field if showWhen condition is not met
         if (field.showWhen) {
           const depValue = allValues[field.showWhen.key] ?? fields.find((f) => f.key === field.showWhen!.key)?.defaultValue;
-          if (String(depValue) !== field.showWhen.value) return null;
+          const depStr = depValue !== undefined && depValue !== null ? String(depValue) : "";
+          const match = Array.isArray(field.showWhen.value)
+            ? field.showWhen.value.includes(depStr)
+            : depStr === field.showWhen.value;
+          if (!match) return null;
         }
         // Check disabledWhen condition
         let disabled = false;
@@ -123,20 +127,23 @@ function FieldRenderer({
         </div>
       );
 
-    case "boolean":
+    case "boolean": {
+      const boolHint = resolvedHint || help;
       return (
-        <div className={`flex items-center gap-2${disabled ? " opacity-50" : ""}`}>
-          <Switch
-            id={id}
-            checked={(value as boolean) ?? (field.defaultValue as boolean) ?? false}
-            onCheckedChange={(v) => onChange(v)}
-            disabled={disabled}
-          />
-          <Label htmlFor={id}>{label}</Label>
-          {resolvedHint && <span className="text-xs text-muted-foreground ml-1">— {resolvedHint}</span>}
-          {!resolvedHint && help && <span className="text-xs text-muted-foreground ml-1">— {help}</span>}
+        <div className={`grid gap-1${disabled ? " opacity-50" : ""}`}>
+          <div className="flex items-center gap-2">
+            <Switch
+              id={id}
+              checked={(value as boolean) ?? (field.defaultValue as boolean) ?? false}
+              onCheckedChange={(v) => onChange(v)}
+              disabled={disabled}
+            />
+            <Label htmlFor={id}>{label}</Label>
+          </div>
+          {boolHint && <p className="text-xs text-muted-foreground ml-9">{boolHint}</p>}
         </div>
       );
+    }
 
     case "select":
       return (

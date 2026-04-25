@@ -2,12 +2,19 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -358,4 +365,500 @@ func TestValidateChannelTenant(t *testing.T) {
 			t.Errorf("expected nil for master context, got: %s", err.ForLLM)
 		}
 	})
+}
+
+func TestSelfSendGuard(t *testing.T) {
+	workspace := t.TempDir()
+	workspaceCanonical, _ := filepath.EvalSymlinks(workspace)
+
+	// Create a test file for MEDIA: resolution.
+	testFile := filepath.Join(workspaceCanonical, "report.csv")
+	os.WriteFile(testFile, []byte("data"), 0o644)
+
+	tool := NewMessageTool(workspaceCanonical, true)
+	// Wire message bus so MEDIA sends can proceed past self-send guard.
+	tool.SetMessageBus(bus.New())
+
+	// Build context with self-send channel/chatID.
+	mkCtx := func() context.Context {
+		ctx := context.Background()
+		ctx = WithToolChannel(ctx, "telegram")
+		ctx = WithToolChatID(ctx, "chat-42")
+		return ctx
+	}
+
+	t.Run("text self-send blocked", func(t *testing.T) {
+		result := tool.Execute(mkCtx(), map[string]any{
+			"action":  "send",
+			"channel": "telegram",
+			"target":  "chat-42",
+			"message": "Hello, this is a text message",
+		})
+		if !result.IsError {
+			t.Fatal("expected text self-send to be blocked")
+		}
+	})
+
+	t.Run("text to different chat allowed", func(t *testing.T) {
+		// Cross-target guard also kicks in on unbound sessions — supply
+		// forward=true so this test isolates the self-send guard.
+		result := tool.Execute(mkCtx(), map[string]any{
+			"action":         "send",
+			"channel":        "telegram",
+			"target":         "chat-99",
+			"message":        "Hello, other chat",
+			"forward":        true,
+			"forward_reason": "test cross-chat",
+		})
+		if result.IsError {
+			t.Fatalf("expected cross-chat send to succeed, got: %s", result.ForLLM)
+		}
+	})
+
+	t.Run("MEDIA self-send allowed when not delivered", func(t *testing.T) {
+		// No delivered media tracker — MEDIA self-send should be allowed.
+		result := tool.Execute(mkCtx(), map[string]any{
+			"action":  "send",
+			"channel": "telegram",
+			"target":  "chat-42",
+			"message": "MEDIA:" + testFile,
+		})
+		if result.IsError {
+			t.Fatalf("expected MEDIA self-send to be allowed, got: %s", result.ForLLM)
+		}
+	})
+
+	t.Run("MEDIA self-send blocked when already delivered", func(t *testing.T) {
+		ctx := mkCtx()
+		dm := NewDeliveredMedia()
+		dm.Mark(testFile)
+		ctx = WithDeliveredMedia(ctx, dm)
+
+		result := tool.Execute(ctx, map[string]any{
+			"action":  "send",
+			"channel": "telegram",
+			"target":  "chat-42",
+			"message": "MEDIA:" + testFile,
+		})
+		if !result.IsError {
+			t.Fatal("expected MEDIA self-send to be blocked when file already delivered")
+		}
+	})
+
+	t.Run("MEDIA self-send allowed for undelivered file with tracker", func(t *testing.T) {
+		ctx := mkCtx()
+		dm := NewDeliveredMedia()
+		dm.Mark("/some/other/file.pdf") // different file marked
+		ctx = WithDeliveredMedia(ctx, dm)
+
+		result := tool.Execute(ctx, map[string]any{
+			"action":  "send",
+			"channel": "telegram",
+			"target":  "chat-42",
+			"message": "MEDIA:" + testFile,
+		})
+		if result.IsError {
+			t.Fatalf("expected MEDIA self-send for undelivered file to be allowed, got: %s", result.ForLLM)
+		}
+	})
+
+	t.Run("embedded MEDIA in text self-send blocked", func(t *testing.T) {
+		ctx := mkCtx()
+		dm := NewDeliveredMedia()
+		dm.Mark(testFile)
+		ctx = WithDeliveredMedia(ctx, dm)
+
+		result := tool.Execute(ctx, map[string]any{
+			"action":  "send",
+			"channel": "telegram",
+			"target":  "chat-42",
+			"message": "Here is the file\nMEDIA:" + testFile,
+		})
+		// Contains MEDIA: pattern → passes text guard → but file is delivered → blocked
+		if !result.IsError {
+			t.Fatal("expected embedded MEDIA self-send to be blocked when file already delivered")
+		}
+	})
+}
+
+func TestMessageToolNumericTargetUsesSendPath(t *testing.T) {
+	// JSON tool args use float64 for integers; target must not be ignored (was only .(string)).
+	var gotChat string
+	tool := NewMessageTool("", true)
+	tool.SetChannelSender(func(_ context.Context, ch, chatID, content string) error {
+		if ch != "telegram" {
+			t.Errorf("channel = %q", ch)
+		}
+		gotChat = chatID
+		return nil
+	})
+	ctx := context.Background()
+	r := tool.Execute(ctx, map[string]any{
+		"action":  "send",
+		"channel": "telegram",
+		"target":  float64(-1001847298537),
+		"message": "hello",
+	})
+	if r.IsError {
+		t.Fatalf("unexpected error: %s", r.ForLLM)
+	}
+	if gotChat != "-1001847298537" {
+		t.Errorf("sender saw chatID %q, want -1001847298537", gotChat)
+	}
+}
+
+func TestArgString(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		key  string
+		want string
+	}{
+		{"string value", map[string]any{"k": "hello"}, "k", "hello"},
+		{"string with spaces", map[string]any{"k": "  hi  "}, "k", "hi"},
+		{"empty string", map[string]any{"k": ""}, "k", ""},
+		{"missing key", map[string]any{}, "k", ""},
+		{"nil value", map[string]any{"k": nil}, "k", ""},
+		{"float64 integer", map[string]any{"k": float64(-1001847298537)}, "k", "-1001847298537"},
+		{"float64 positive", map[string]any{"k": float64(42)}, "k", "42"},
+		{"float64 zero", map[string]any{"k": float64(0)}, "k", "0"},
+		{"float64 NaN", map[string]any{"k": math.NaN()}, "k", ""},
+		{"int", map[string]any{"k": 123}, "k", "123"},
+		{"int64", map[string]any{"k": int64(-999)}, "k", "-999"},
+		{"json.Number", map[string]any{"k": json.Number("7654321")}, "k", "7654321"},
+		{"bool fallback", map[string]any{"k": true}, "k", "true"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := argString(tt.args, tt.key)
+			if got != tt.want {
+				t.Errorf("argString(%v, %q) = %q, want %q", tt.args, tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeliveredMedia(t *testing.T) {
+	dm := NewDeliveredMedia()
+
+	if dm.IsDelivered("/tmp/test.csv") {
+		t.Fatal("expected empty tracker to report false")
+	}
+
+	dm.Mark("/tmp/test.csv")
+	if !dm.IsDelivered("/tmp/test.csv") {
+		t.Fatal("expected marked path to be delivered")
+	}
+
+	if dm.IsDelivered("/tmp/other.csv") {
+		t.Fatal("expected unmarked path to report false")
+	}
+}
+
+func TestMessageToolCrossTargetGuard(t *testing.T) {
+	type scenario struct {
+		name         string
+		sessionKey   string
+		ctxChannel   string
+		ctxChatID    string
+		peerKind     string
+		args         map[string]any
+		wantErr      bool
+		wantOutbound int // number of outbound messages published
+		wantTargets  []string
+	}
+
+	const (
+		agentDM    = "agent:a:telegram:direct:U1"
+		agentGroup = "agent:a:telegram:group:-100G"
+		agentCron  = "agent:a:cron:job-1"
+		agentHB    = "agent:a:heartbeat"
+		agentSub   = "agent:a:subagent:child-1"
+		agentTeam  = "agent:a:team:T1:U1"
+	)
+
+	baseArgs := func(extra map[string]any) map[string]any {
+		m := map[string]any{"action": "send", "message": "hello"}
+		maps.Copy(m, extra)
+		return m
+	}
+
+	scenarios := []scenario{
+		{
+			name:         "1_dm_same_target_pass",
+			sessionKey:   agentDM,
+			ctxChannel:   "telegram",
+			ctxChatID:    "U1",
+			peerKind:     "direct",
+			args:         baseArgs(map[string]any{"channel": "telegram", "target": "U1"}),
+			wantOutbound: 1,
+			wantTargets:  []string{"U1"},
+		},
+		{
+			name:       "2_dm_cross_target_blocked",
+			sessionKey: agentDM,
+			ctxChannel: "telegram",
+			ctxChatID:  "U1",
+			peerKind:   "direct",
+			args:       baseArgs(map[string]any{"channel": "telegram", "target": "-1003787954683"}),
+			wantErr:    true,
+		},
+		{
+			name:         "3_dm_cross_target_forward_pass",
+			sessionKey:   agentDM,
+			ctxChannel:   "telegram",
+			ctxChatID:    "U1",
+			peerKind:     "direct",
+			args:         baseArgs(map[string]any{"channel": "telegram", "target": "-100G", "forward": true, "forward_reason": "user asked to forward"}),
+			wantOutbound: 2,
+			wantTargets:  []string{"-100G", "U1"},
+		},
+		{
+			name:         "4_group_same_target_pass",
+			sessionKey:   agentGroup,
+			ctxChannel:   "telegram",
+			ctxChatID:    "-100G",
+			peerKind:     "group",
+			args:         baseArgs(map[string]any{"channel": "telegram", "target": "-100G"}),
+			wantOutbound: 1,
+			wantTargets:  []string{"-100G"},
+		},
+		{
+			name:       "5_group_cross_target_blocked",
+			sessionKey: agentGroup,
+			ctxChannel: "telegram",
+			ctxChatID:  "-100G",
+			peerKind:   "group",
+			args:       baseArgs(map[string]any{"channel": "telegram", "target": "-100G2"}),
+			wantErr:    true,
+		},
+		{
+			name:         "6_cron_free",
+			sessionKey:   agentCron,
+			ctxChannel:   "telegram",
+			ctxChatID:    "U1",
+			peerKind:     "direct",
+			args:         baseArgs(map[string]any{"channel": "telegram", "target": "-100X"}),
+			wantOutbound: 1,
+			wantTargets:  []string{"-100X"},
+		},
+		{
+			name:         "7_heartbeat_free",
+			sessionKey:   agentHB,
+			ctxChannel:   "telegram",
+			ctxChatID:    "U1",
+			peerKind:     "direct",
+			args:         baseArgs(map[string]any{"channel": "telegram", "target": "-100X"}),
+			wantOutbound: 1,
+			wantTargets:  []string{"-100X"},
+		},
+		{
+			name:         "7b_subagent_free",
+			sessionKey:   agentSub,
+			ctxChannel:   "telegram",
+			ctxChatID:    "U1",
+			peerKind:     "direct",
+			args:         baseArgs(map[string]any{"channel": "telegram", "target": "-100X"}),
+			wantOutbound: 1,
+			wantTargets:  []string{"-100X"},
+		},
+		{
+			name:         "7c_team_free",
+			sessionKey:   agentTeam,
+			ctxChannel:   "telegram",
+			ctxChatID:    "U1",
+			peerKind:     "direct",
+			args:         baseArgs(map[string]any{"channel": "telegram", "target": "-100X"}),
+			wantOutbound: 1,
+			wantTargets:  []string{"-100X"},
+		},
+	}
+
+	// For same-target DM/group scenarios, text self-sends are blocked by the
+	// pre-existing self-send guard (different from our new cross-target guard).
+	// Use MEDIA: to bypass that — our guard doesn't care about message kind.
+	sharedTmp := t.TempDir()
+	mediaPath := filepath.Join(sharedTmp, "note.png")
+	if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mediaMsg := "MEDIA:" + mediaPath
+	// Apply MEDIA bypass to same-target scenarios.
+	for i := range scenarios {
+		if scenarios[i].name == "1_dm_same_target_pass" || scenarios[i].name == "4_group_same_target_pass" {
+			scenarios[i].args["message"] = mediaMsg
+		}
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			tool := NewMessageTool(sharedTmp, false)
+			mb := bus.New()
+			tool.SetMessageBus(mb)
+
+			ctx := context.Background()
+			ctx = WithToolSessionKey(ctx, sc.sessionKey)
+			ctx = WithToolChannel(ctx, sc.ctxChannel)
+			ctx = WithToolChatID(ctx, sc.ctxChatID)
+			ctx = WithToolPeerKind(ctx, sc.peerKind)
+
+			res := tool.Execute(ctx, sc.args)
+			if sc.wantErr {
+				if res == nil || !res.IsError {
+					t.Fatalf("expected error result, got: %+v", res)
+				}
+				// Guard must not publish when blocked.
+				got := drainBusNow(mb)
+				if len(got) != 0 {
+					t.Fatalf("expected 0 outbound on block, got %d: %+v", len(got), got)
+				}
+				return
+			}
+			if res != nil && res.IsError {
+				t.Fatalf("unexpected error: %s", res.ForLLM)
+			}
+			got := drainBusNow(mb)
+			if len(got) != sc.wantOutbound {
+				t.Fatalf("outbound count: got %d want %d (%+v)", len(got), sc.wantOutbound, got)
+			}
+			for i, want := range sc.wantTargets {
+				if got[i].ChatID != want {
+					t.Errorf("outbound[%d].ChatID = %q, want %q", i, got[i].ChatID, want)
+				}
+			}
+		})
+	}
+}
+
+// drainBusNow reads all buffered outbound messages using a short timeout per
+// read. Pre-cancelled ctx can't be used: select{msg,ctx.Done} picks randomly
+// when both are ready, so buffered messages would be lost ~50% of the time.
+func drainBusNow(mb *bus.MessageBus) []bus.OutboundMessage {
+	var out []bus.OutboundMessage
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		msg, ok := mb.SubscribeOutbound(ctx)
+		cancel()
+		if !ok {
+			return out
+		}
+		out = append(out, msg)
+	}
+}
+
+// Test 10 — replay of production trace 019d9fcf-b433-7550-a9a6-62efa140128d:
+// DM session, agent tried to send to a group topic ID. Guard must block.
+func TestMessageToolCrossTargetGuard_TraceReplay(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	mb := bus.New()
+	tool.SetMessageBus(mb)
+
+	ctx := context.Background()
+	ctx = WithToolSessionKey(ctx, "agent:a:telegram:direct:U1")
+	ctx = WithToolChannel(ctx, "telegram")
+	ctx = WithToolChatID(ctx, "U1")
+	ctx = WithToolPeerKind(ctx, "direct")
+
+	res := tool.Execute(ctx, map[string]any{
+		"action":  "send",
+		"channel": "telegram",
+		"target":  "-1003787954683:topic:1",
+		"message": "here is the image",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("trace replay: expected ErrorResult, got: %+v", res)
+	}
+	if got := drainBusNow(mb); len(got) != 0 {
+		t.Fatalf("trace replay: expected 0 outbound, got %d", len(got))
+	}
+}
+
+// Sender-only deployment (no msgBus): notice falls back through t.sender so
+// the origin chat still gets the audit breadcrumb. Verifies P1 fix.
+func TestMessageToolCrossTargetGuard_NoticeFallbackSender(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	type sent struct{ channel, target, message string }
+	var calls []sent
+	tool.SetChannelSender(func(_ context.Context, ch, tgt, msg string) error {
+		calls = append(calls, sent{ch, tgt, msg})
+		return nil
+	})
+
+	ctx := context.Background()
+	ctx = WithToolSessionKey(ctx, "agent:a:telegram:direct:U1")
+	ctx = WithToolChannel(ctx, "telegram")
+	ctx = WithToolChatID(ctx, "U1")
+	ctx = WithToolPeerKind(ctx, "direct")
+
+	res := tool.Execute(ctx, map[string]any{
+		"action": "send", "channel": "telegram", "target": "-100G",
+		"forward": true, "forward_reason": "user asked forward",
+		"message": "hello group",
+	})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got: %+v", res)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 sender calls (forward + notice), got %d: %+v", len(calls), calls)
+	}
+	if calls[0].target != "-100G" {
+		t.Errorf("forward target: got %q want -100G", calls[0].target)
+	}
+	if calls[1].target != "U1" {
+		t.Errorf("notice target: got %q want U1 (origin)", calls[1].target)
+	}
+	if !strings.Contains(calls[1].message, "user asked forward") {
+		t.Errorf("notice missing reason: %q", calls[1].message)
+	}
+}
+
+// Notice must NOT post when the forward itself fails. Verifies P2 fix.
+func TestMessageToolCrossTargetGuard_NoNoticeOnSendFailure(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), false)
+	var calls int
+	tool.SetChannelSender(func(_ context.Context, _, _, _ string) error {
+		calls++
+		return fmt.Errorf("boom")
+	})
+
+	ctx := context.Background()
+	ctx = WithToolSessionKey(ctx, "agent:a:telegram:direct:U1")
+	ctx = WithToolChannel(ctx, "telegram")
+	ctx = WithToolChatID(ctx, "U1")
+	ctx = WithToolPeerKind(ctx, "direct")
+
+	res := tool.Execute(ctx, map[string]any{
+		"action": "send", "channel": "telegram", "target": "-100G",
+		"forward": true, "forward_reason": "r",
+		"message": "hi",
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected ErrorResult on send failure, got: %+v", res)
+	}
+	if calls != 1 {
+		t.Errorf("expected only 1 sender call (forward, no notice), got %d", calls)
+	}
+}
+
+func TestMessageTargetEnforced(t *testing.T) {
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		{"", true},
+		{"agent:a:telegram:direct:U1", true},
+		{"agent:a:telegram:group:-100G", true},
+		{"agent:a:ws:direct:conv-1", true},
+		{"agent:a:main", true},
+		{"agent:a:cron:job-1", false},
+		{"agent:a:heartbeat", false},
+		{"agent:a:heartbeat:12345", false},
+		{"agent:a:subagent:child", false},
+		{"agent:a:team:T1:U1", false},
+	}
+	for _, tc := range cases {
+		if got := MessageTargetEnforced(tc.key); got != tc.want {
+			t.Errorf("MessageTargetEnforced(%q) = %v, want %v", tc.key, got, tc.want)
+		}
+	}
 }

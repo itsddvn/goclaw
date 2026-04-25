@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Bot, ChevronDown } from "lucide-react";
 import { useHttp } from "@/hooks/use-ws";
+import { usePortalDropdownClose } from "@/hooks/use-portal-dropdown-close";
 import { useAuthStore } from "@/stores/use-auth-store";
 import type { AgentData } from "@/types/agent";
 
@@ -11,9 +12,9 @@ interface AgentSelectorProps {
   onChange: (agentId: string) => void;
 }
 
-/** Extract emoji from agent's other_config JSONB */
+/** Extract emoji from agent top-level field */
 function agentEmoji(agent: AgentData): string | undefined {
-  return (agent.other_config?.emoji as string) || undefined;
+  return agent.emoji || undefined;
 }
 
 export function AgentSelector({ value, onChange }: AgentSelectorProps) {
@@ -33,12 +34,8 @@ export function AgentSelector({ value, onChange }: AgentSelectorProps) {
       .then((res) => {
         const active = (res.agents ?? []).filter((a) => a.status === "active");
         setAgents(active);
-        if (active.length > 0 && !active.some((a) => a.agent_key === value)) {
-          const defaultAgent = active.find((a) => a.is_default) ?? active[0]!;
-          onChange(defaultAgent.agent_key);
-        }
       })
-      .catch(() => {});
+      .catch((err) => console.error("[AgentSelector] fetch agents failed:", err));
   }, [http, connected]);
 
   useLayoutEffect(() => {
@@ -53,20 +50,11 @@ export function AgentSelector({ value, onChange }: AgentSelectorProps) {
     });
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        containerRef.current && !containerRef.current.contains(target) &&
-        (!dropdownRef.current || !dropdownRef.current.contains(target))
-      ) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
+  usePortalDropdownClose({
+    open,
+    onClose: () => setOpen(false),
+    ignore: [containerRef, dropdownRef],
+  });
 
   const selected = agents.find((a) => a.agent_key === value);
   const selectedEmoji = selected ? agentEmoji(selected) : undefined;

@@ -1,25 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { getWsClient } from '../../lib/ws'
+import { agentService } from '../../services/agent-service'
+import { SummoningProgressSteps } from './summoning-progress-steps'
 
-const SUMMONING_FILE_KEYS = [
-  { name: 'SOUL.md', required: true, labelKey: 'summoning.fileLabelSOUL' },
-  { name: 'IDENTITY.md', required: true, labelKey: 'summoning.fileLabelIDENTITY' },
-]
+const SUMMONING_REQUIRED_FILES = ['SOUL.md', 'IDENTITY.md']
 
 interface SummoningModalProps {
   agentId: string
   agentName: string
   onContinue: () => void
+  onCancel?: (agentId: string) => Promise<void>
 }
 
-export function SummoningModal({ agentId, agentName, onContinue }: SummoningModalProps) {
+const CANCEL_THRESHOLD_SEC = 60
+
+export function SummoningModal({ agentId, agentName, onContinue, onCancel }: SummoningModalProps) {
   const { t } = useTranslation(['desktop', 'common'])
   const [generatedFiles, setGeneratedFiles] = useState<string[]>([])
   const [status, setStatus] = useState<'summoning' | 'completed' | 'failed'>('summoning')
   const [errorMsg, setErrorMsg] = useState('')
   const [retrying, setRetrying] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -51,8 +54,7 @@ export function SummoningModal({ agentId, agentName, onContinue }: SummoningModa
         )
       }
       if (data.type === 'completed') {
-        const required = SUMMONING_FILE_KEYS.filter((f) => f.required).map((f) => f.name)
-        setGeneratedFiles((prev) => [...new Set([...prev, ...required])])
+        setGeneratedFiles((prev) => [...new Set([...prev, ...SUMMONING_REQUIRED_FILES])])
         setStatus('completed')
       }
       if (data.type === 'failed') {
@@ -74,8 +76,7 @@ export function SummoningModal({ agentId, agentName, onContinue }: SummoningModa
   const handleRetry = async () => {
     setRetrying(true)
     try {
-      const ws = getWsClient()
-      await ws.call('agents.resummon', { agentId })
+      await agentService.resummonWs(agentId)
       setGeneratedFiles([])
       setStatus('summoning')
       setErrorMsg('')
@@ -84,6 +85,19 @@ export function SummoningModal({ agentId, agentName, onContinue }: SummoningModa
       // stay in failed state
     } finally {
       setRetrying(false)
+    }
+  }
+
+  const handleCancel = async () => {
+    if (!onCancel) return
+    setCancelling(true)
+    try {
+      await onCancel(agentId)
+      // BE emits WS type=failed → listener above switches to failed state
+    } catch {
+      // keep modal open
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -159,54 +173,25 @@ export function SummoningModal({ agentId, agentName, onContinue }: SummoningModa
           </p>
 
           {/* File progress */}
-          <div className="w-full space-y-2">
-            <AnimatePresence>
-              {SUMMONING_FILE_KEYS.map((file, i) => {
-                const done = generatedFiles.includes(file.name)
-                return (
-                  <motion.div
-                    key={file.name}
-                    initial={{ opacity: 1 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 0.3 }}
-                    className="flex items-center gap-3 rounded-md px-3 py-1.5"
-                  >
-                    <motion.div
-                      className={`flex h-5 w-5 items-center justify-center rounded-full text-xs ${
-                        done
-                          ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/40 dark:text-orange-400'
-                          : 'bg-surface-tertiary text-text-muted'
-                      }`}
-                      animate={done ? { scale: [0.8, 1.2, 1] } : {}}
-                      transition={{ duration: 0.3 }}
-                    >
-                      {done ? '✓' : i + 1}
-                    </motion.div>
-                    <div className="flex-1">
-                      <span className={`text-sm ${done ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
-                        {file.name}
-                      </span>
-                      <span className="ml-2 text-xs text-text-muted">{t(`desktop:${file.labelKey}`)}</span>
-                    </div>
-                    {done && (
-                      <motion.span
-                        initial={{ opacity: 0, scale: 0.5 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        className="text-xs text-orange-600 dark:text-orange-400"
-                      >
-                        Done
-                      </motion.span>
-                    )}
-                  </motion.div>
-                )
-              })}
-            </AnimatePresence>
-          </div>
+          <SummoningProgressSteps generatedFiles={generatedFiles} />
 
           {status === 'summoning' && (
             <p className="text-center text-xs text-text-muted tabular-nums">
               Please wait... ({Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')})
             </p>
+          )}
+
+          {status === 'summoning' && elapsed >= CANCEL_THRESHOLD_SEC && onCancel && (
+            <div className="flex flex-col items-center gap-1">
+              <p className="text-xs text-text-muted">{t('desktop:summoning.takingTooLong')}</p>
+              <button
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="px-3 py-1.5 text-sm text-text-secondary hover:bg-surface-tertiary rounded-md transition-colors disabled:opacity-50"
+              >
+                {cancelling ? t('desktop:summoning.cancelling') : t('desktop:summoning.cancel')}
+              </button>
+            </div>
           )}
 
           {status === 'completed' && (

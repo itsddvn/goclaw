@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
+	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/audio"
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
@@ -41,6 +43,19 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 		CompactionConfig json.RawMessage `json:"compaction_config,omitempty"`
 		ContextPruning   json.RawMessage `json:"context_pruning,omitempty"`
 		OtherConfig      json.RawMessage `json:"other_config,omitempty"`
+		// Promoted config fields
+		Emoji               *string         `json:"emoji,omitempty"`
+		AgentDescription    *string         `json:"agent_description,omitempty"`
+		ThinkingLevel       *string         `json:"thinking_level,omitempty"`
+		MaxTokens           *int            `json:"max_tokens,omitempty"`
+		SelfEvolve          *bool           `json:"self_evolve,omitempty"`
+		SkillEvolve         *bool           `json:"skill_evolve,omitempty"`
+		SkillNudgeInterval  *int            `json:"skill_nudge_interval,omitempty"`
+		ReasoningConfig     json.RawMessage `json:"reasoning_config,omitempty"`
+		WorkspaceSharing    json.RawMessage `json:"workspace_sharing,omitempty"`
+		ChatGPTOAuthRouting json.RawMessage `json:"chatgpt_oauth_routing,omitempty"`
+		ShellDenyGroups     json.RawMessage `json:"shell_deny_groups,omitempty"`
+		KGDedupConfig       json.RawMessage `json:"kg_dedup_config,omitempty"`
 	}
 	if req.Params != nil {
 		json.Unmarshal(req.Params, &params)
@@ -112,7 +127,65 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 			updates["context_pruning"] = []byte(params.ContextPruning)
 		}
 		if len(params.OtherConfig) > 0 {
+			// Validate v3 flag values (must be boolean) before persisting.
+			var otherMap map[string]any
+			if json.Unmarshal(params.OtherConfig, &otherMap) == nil {
+				if err := store.ValidateV3Flags(otherMap); err != nil {
+					client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, err.Error()))
+					return
+				}
+				// Finding #5: validate tts_params allow-list via shared audio validator
+				// (Action D: single source of truth in internal/audio).
+				if tp, ok := otherMap["tts_params"]; ok && tp != nil {
+					if tpMap, ok := tp.(map[string]any); ok {
+						if err := audio.ValidateAgentTTSParams(tpMap); err != nil {
+							client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, err.Error()))
+							return
+						}
+					}
+				}
+			}
 			updates["other_config"] = []byte(params.OtherConfig)
+		}
+		// Promoted config fields
+		if params.Emoji != nil {
+			updates["emoji"] = *params.Emoji
+		}
+		if params.AgentDescription != nil {
+			updates["agent_description"] = *params.AgentDescription
+		}
+		if params.ThinkingLevel != nil {
+			updates["thinking_level"] = *params.ThinkingLevel
+		}
+		if params.MaxTokens != nil {
+			updates["max_tokens"] = *params.MaxTokens
+		}
+		if params.SelfEvolve != nil {
+			updates["self_evolve"] = *params.SelfEvolve
+		}
+		if params.SkillEvolve != nil {
+			updates["skill_evolve"] = *params.SkillEvolve
+		}
+		if params.SkillNudgeInterval != nil {
+			v := max(*params.SkillNudgeInterval,
+				// DB column is NOT NULL DEFAULT 0
+				0)
+			updates["skill_nudge_interval"] = v
+		}
+		if len(params.ReasoningConfig) > 0 {
+			updates["reasoning_config"] = []byte(params.ReasoningConfig)
+		}
+		if len(params.WorkspaceSharing) > 0 {
+			updates["workspace_sharing"] = []byte(params.WorkspaceSharing)
+		}
+		if len(params.ChatGPTOAuthRouting) > 0 {
+			updates["chatgpt_oauth_routing"] = []byte(params.ChatGPTOAuthRouting)
+		}
+		if len(params.ShellDenyGroups) > 0 {
+			updates["shell_deny_groups"] = []byte(params.ShellDenyGroups)
+		}
+		if len(params.KGDedupConfig) > 0 {
+			updates["kg_dedup_config"] = []byte(params.KGDedupConfig)
 		}
 
 		if len(updates) > 0 {
@@ -122,101 +195,63 @@ func (m *AgentsMethods) handleUpdate(ctx context.Context, client *gateway.Client
 			}
 		}
 
-		// Update identity in DB bootstrap — preserve existing fields not being changed.
+		// Update identity in DB bootstrap — targeted field replacement to preserve all other fields.
 		if params.Avatar != "" || params.Name != "" {
-			// Read existing identity to preserve emoji and other fields.
-			existingEmoji, existingAvatar, existingName := "", "", ""
+			// Read existing agent-level IDENTITY.md content.
+			existingContent := ""
 			if dbFiles, err := m.agentStore.GetAgentContextFiles(ctx, ag.ID); err == nil {
 				for _, f := range dbFiles {
 					if f.FileName == "IDENTITY.md" {
-						if identity := parseIdentityContent(f.Content); identity != nil {
-							existingEmoji = identity["Emoji"]
-							existingAvatar = identity["Avatar"]
-							existingName = identity["Name"]
-						}
+						existingContent = f.Content
 						break
 					}
 				}
 			}
-			name := params.Name
-			if name == "" {
-				name = existingName
+
+			// Apply targeted replacements, preserving all other fields (Creature, Purpose, Vibe, etc.).
+			newContent := existingContent
+			if params.Name != "" {
+				newContent = bootstrap.UpdateIdentityField(newContent, "Name", params.Name)
 			}
-			avatar := params.Avatar
-			if avatar == "" {
-				avatar = existingAvatar
+			if params.Avatar != "" {
+				newContent = bootstrap.UpdateIdentityField(newContent, "Avatar", params.Avatar)
 			}
-			content := buildIdentityContent(name, existingEmoji, avatar)
-			if err := m.agentStore.SetAgentContextFile(ctx, ag.ID, "IDENTITY.md", content); err != nil {
-				slog.Warn("failed to update IDENTITY.md", "agent", params.AgentID, "error", err)
+			// Fallback: if content was empty (no IDENTITY.md yet), build minimal content.
+			if strings.TrimSpace(newContent) == "" {
+				newContent = buildIdentityContent(params.Name, "", params.Avatar)
 			}
-			// Invalidate interceptor cache so updated IDENTITY.md is served immediately
+
+			if err := m.agentStore.SetAgentContextFile(ctx, ag.ID, "IDENTITY.md", newContent); err != nil {
+				slog.Warn("failed to update agent IDENTITY.md", "agent", params.AgentID, "error", err)
+			}
+
+			// For open agents: also update Name in all per-user IDENTITY.md copies.
+			// Per-user files take precedence in LoadContextFiles, so they must be updated too.
+			if params.Name != "" && ag.AgentType == store.AgentTypeOpen {
+				if userFiles, err := m.agentStore.ListUserContextFilesByName(ctx, ag.ID, "IDENTITY.md"); err == nil {
+					for _, uf := range userFiles {
+						updated := bootstrap.UpdateIdentityField(uf.Content, "Name", params.Name)
+						if updated == uf.Content {
+							continue // no change needed
+						}
+						if err := m.agentStore.SetUserContextFile(ctx, ag.ID, uf.UserID, "IDENTITY.md", updated); err != nil {
+							slog.Warn("failed to update user IDENTITY.md on rename", "agent", params.AgentID, "user", uf.UserID, "error", err)
+						}
+					}
+				}
+			}
+
+			// Invalidate interceptor cache so updated IDENTITY.md is served immediately.
 			if m.interceptor != nil {
 				m.interceptor.InvalidateAgent(ag.ID)
 			}
 		}
 
+		// Post-Phase-2 canonicalization: router cache entries are always keyed
+		// as `tenantID:agent_key`. The previous belt-and-suspenders UUID-based
+		// invalidation was dead code — exact-segment match never matches a
+		// UUID as the final segment of a canonical cache key.
 		m.agents.InvalidateAgent(params.AgentID)
-		// Also invalidate by UUID — heartbeat/cron sessions cached under UUID key
-		// before the agentKey fix may still be in the router cache.
-		m.agents.InvalidateAgent(ag.ID.String())
-	} else {
-		// --- Fallback: config.json ---
-		spec, ok := m.cfg.Agents.List[params.AgentID]
-		if !ok {
-			if params.AgentID != "default" {
-				client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound, i18n.T(locale, i18n.MsgAgentNotFound, params.AgentID)))
-				return
-			}
-		}
-
-		if params.Name != "" {
-			spec.DisplayName = params.Name
-		}
-		if params.Workspace != "" {
-			spec.Workspace = config.ExpandHome(params.Workspace)
-			os.MkdirAll(spec.Workspace, 0755)
-		}
-		if params.Provider != "" {
-			spec.Provider = params.Provider
-		}
-		if params.Model != "" {
-			spec.Model = params.Model
-		}
-		if params.ContextWindow != nil {
-			spec.ContextWindow = *params.ContextWindow
-		}
-		if params.MaxToolIterations != nil {
-			spec.MaxToolIterations = *params.MaxToolIterations
-		}
-
-		if params.AgentID == "default" {
-			if params.Provider != "" {
-				m.cfg.Agents.Defaults.Provider = params.Provider
-			}
-			if params.Model != "" {
-				m.cfg.Agents.Defaults.Model = params.Model
-			}
-			if params.Workspace != "" {
-				m.cfg.Agents.Defaults.Workspace = params.Workspace
-			}
-		} else {
-			m.cfg.Agents.List[params.AgentID] = spec
-		}
-
-		if params.Avatar != "" {
-			ws := spec.Workspace
-			if ws == "" {
-				ws = config.ExpandHome(m.cfg.Agents.Defaults.Workspace)
-			}
-			identityPath := filepath.Join(ws, "IDENTITY.md")
-			appendIdentityFields(identityPath, "", "", params.Avatar)
-		}
-
-		if err := config.Save(m.cfgPath, m.cfg); err != nil {
-			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToSave, "config", err.Error())))
-			return
-		}
 	}
 
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{

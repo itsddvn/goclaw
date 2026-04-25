@@ -29,6 +29,22 @@ export interface ProviderInput {
 export interface ModelInfo {
   id: string;
   name?: string;
+  reasoning?: ReasoningCapability;
+}
+
+export interface ProviderReasoningDefaults {
+  effort?: string;
+  fallback?: "downgrade" | "provider_default" | "off";
+}
+
+export interface ProviderModelsResponse {
+  models: ModelInfo[];
+  reasoning_defaults?: ProviderReasoningDefaults;
+}
+
+export interface ReasoningCapability {
+  levels?: string[];
+  default_effort?: string;
 }
 
 export interface EmbeddingSettings {
@@ -65,8 +81,54 @@ export function normalizeChatGPTOAuthStrategy(
   strategy: unknown,
 ): EffectiveChatGPTOAuthRoutingStrategy {
   if (strategy === "round_robin") return "round_robin";
-  if (strategy === "priority_order") return "priority_order";
-  return "primary_first";
+  return "priority_order";
+}
+
+export function normalizeReasoningEffort(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim().toLowerCase();
+  return [
+    "off", "auto", "none", "minimal", "low", "medium", "high", "xhigh",
+  ].includes(normalized) ? normalized : "";
+}
+
+export function normalizeReasoningFallback(
+  value: unknown,
+): "downgrade" | "provider_default" | "off" {
+  if (value === "provider_default" || value === "off") {
+    return value;
+  }
+  return "downgrade";
+}
+
+/** Maps advanced reasoning effort levels to the legacy three-tier thinking_level. */
+export function deriveLegacyThinkingLevel(effort: string): string {
+  switch (effort) {
+    case "low":
+    case "medium":
+    case "high":
+      return effort;
+    case "minimal":
+      return "low";
+    case "xhigh":
+      return "high";
+    default:
+      return "off";
+  }
+}
+
+export function getProviderReasoningDefaults(
+  settings?: Record<string, unknown>,
+): ProviderReasoningDefaults | null {
+  const raw = settings?.reasoning_defaults;
+  if (!raw || typeof raw !== "object") return null;
+  const reasoning = raw as Record<string, unknown>;
+  const effort = normalizeReasoningEffort(reasoning.effort) || "off";
+  const fallback = normalizeReasoningFallback(reasoning.fallback);
+  if (effort === "off" && fallback === "downgrade") {
+    return null;
+  }
+  return { effort, fallback };
 }
 
 export function getChatGPTOAuthProviderRouting(
@@ -77,7 +139,7 @@ export function getChatGPTOAuthProviderRouting(
   const pool = rawPool as Record<string, unknown>;
   const strategy = normalizeChatGPTOAuthStrategy(pool.strategy);
   const extraProviderNames = normalizeProviderNames(pool.extra_provider_names);
-  if (strategy === "primary_first" && extraProviderNames.length === 0) {
+  if (strategy === "priority_order" && extraProviderNames.length === 0) {
     return null;
   }
   return {
@@ -95,10 +157,29 @@ export function buildProviderSettingsWithChatGPTOAuthRouting(
   const extraProviderNames = normalizeProviderNames(routing.extra_provider_names);
 
   delete next.codex_pool;
-  if (strategy !== "primary_first" || extraProviderNames.length > 0) {
+  if (extraProviderNames.length > 0) {
     next.codex_pool = {
       strategy,
       extra_provider_names: extraProviderNames,
+    };
+  }
+
+  return next;
+}
+
+export function buildProviderSettingsWithReasoningDefaults(
+  settings: Record<string, unknown> | undefined,
+  reasoning: ProviderReasoningDefaults | null,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...(settings ?? {}) };
+  const effort = normalizeReasoningEffort(reasoning?.effort) || "off";
+  const fallback = normalizeReasoningFallback(reasoning?.fallback);
+
+  delete next.reasoning_defaults;
+  if (effort !== "off" || fallback !== "downgrade") {
+    next.reasoning_defaults = {
+      effort,
+      fallback,
     };
   }
 

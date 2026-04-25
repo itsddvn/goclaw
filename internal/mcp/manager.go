@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,9 +19,11 @@ import (
 
 const (
 	healthCheckInterval  = 30 * time.Second
+	healthFailThreshold  = 3 // consecutive ping failures before marking disconnected
 	initialBackoff       = 2 * time.Second
 	maxBackoff           = 60 * time.Second
 	maxReconnectAttempts = 10
+	reconnectCooldown    = 5 * time.Minute // wait after exhausting reconnect attempts before retrying
 
 	// mcpToolInlineMaxCount is the threshold above which MCP tools switch
 	// to search mode (deferred loading via mcp_tool_search) instead of
@@ -40,18 +40,39 @@ type ServerStatus struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// connParams stores connection parameters needed to re-establish a dead connection.
+// Populated during initial connectAndDiscover and used by tryReconnect.
+type connParams struct {
+	command string
+	args    []string
+	env     map[string]string
+	url     string
+	headers map[string]string
+}
+
 // serverState tracks a single MCP server connection.
+//
+// Dual-pointer design for the MCP client:
+//   - client: direct pointer used by healthLoop (single goroutine, no contention).
+//   - clientPtr: atomic pointer shared with all BridgeTools via NewBridgeTool.
+//     BridgeTools call clientPtr.Load() in Execute for race-safe access.
+//
+// On reconnect, fullReconnect() updates BOTH: ss.client for healthLoop and
+// ss.clientPtr.Store() for BridgeTools. The old client is closed AFTER the swap.
 type serverState struct {
 	name       string
 	transport  string
-	client     *mcpclient.Client
+	client     *mcpclient.Client               // direct ref for health checks (single-goroutine access)
+	clientPtr  atomic.Pointer[mcpclient.Client] // shared atomic ref for BridgeTools (multi-goroutine safe)
 	connected  atomic.Bool
 	toolNames  []string // registered tool names in the registry
 	timeoutSec int
 	cancel     context.CancelFunc
+	conn       connParams // connection params for reconnect
 
 	mu              sync.Mutex
 	reconnAttempts  int
+	healthFailures  int // consecutive ping failures (resets on success)
 	lastErr         string
 }
 
@@ -61,9 +82,10 @@ type serverState struct {
 //   - DB-backed: queries MCPServerStore per agent+user for permission-filtered servers
 //
 // When total MCP tool count exceeds mcpToolInlineMaxCount, the manager
-// enters "search mode": tools are kept in deferredTools instead of the
-// registry, and only mcp_tool_search is registered. Tools are activated
-// on demand via ActivateTools().
+// enters hybrid search mode: the first mcpToolInlineMaxCount tools stay
+// registered inline, while excess tools move to deferredTools and are
+// discovered via mcp_tool_search. Tools are activated on demand via
+// ActivateTools().
 type Manager struct {
 	mu       sync.RWMutex
 	servers  map[string]*serverState
@@ -74,6 +96,9 @@ type Manager struct {
 
 	// DB-backed servers
 	store store.MCPServerStore
+
+	// Grant checker for runtime grant verification (nil = skip check)
+	grantChecker GrantChecker
 
 	// Shared connection pool (nil = config-only mode)
 	pool          *Pool
@@ -117,6 +142,14 @@ func WithPool(p *Pool) ManagerOption {
 	}
 }
 
+// WithGrantChecker sets the grant checker for runtime grant verification.
+// When set, BridgeTool.Execute rechecks grants before executing tools.
+func WithGrantChecker(gc GrantChecker) ManagerOption {
+	return func(m *Manager) {
+		m.grantChecker = gc
+	}
+}
+
 // NewManager creates a new MCP Manager.
 func NewManager(registry *tools.Registry, opts ...ManagerOption) *Manager {
 	m := &Manager{
@@ -143,7 +176,14 @@ func (m *Manager) Start(ctx context.Context) error {
 			continue
 		}
 
-		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, resolveEnvVars(cfg.Headers), cfg.ToolPrefix, cfg.TimeoutSec); err != nil {
+		// Config-path servers have no DB ID — pass uuid.Nil
+		headers, err := resolveEnvVars(cfg.Headers)
+		if err != nil {
+			slog.Warn("security.mcp.env_var_rejected", "server", name, "err", err)
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, headers, cfg.ToolPrefix, cfg.TimeoutSec, uuid.Nil); err != nil {
 			slog.Warn("mcp.server.connect_failed", "server", name, "error", err)
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 		}
@@ -186,7 +226,11 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 
 	args := jsonBytesToStringSlice(srv.Args)
 	env := jsonBytesToStringMap(srv.Env)
-	headers := resolveEnvVars(jsonBytesToStringMap(srv.Headers))
+	headers, err := resolveEnvVars(jsonBytesToStringMap(srv.Headers))
+	if err != nil {
+		slog.Warn("security.mcp.env_var_rejected", "server", srv.Name, "err", err)
+		return nil
+	}
 
 	// Inject APIKey into headers if present (bug fix: was never passed to connections)
 	if srv.APIKey != "" && headers["Authorization"] == "" {
@@ -249,14 +293,14 @@ func (m *Manager) connectAndFilter(ctx context.Context, rs *resolvedServer) erro
 		// Pool mode: acquire shared connection, create per-agent BridgeTools
 		tid := store.TenantIDFromContext(ctx)
 		if err := m.connectViaPool(ctx, tid, srv.Name, srv.Transport, srv.Command,
-			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec); err != nil {
+			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec, srv.ID); err != nil {
 			return err
 		}
 	} else {
 		// Per-agent mode: create per-agent connection
 		if err := m.connectServer(ctx, srv.Name, srv.Transport, srv.Command,
 			rs.args, rs.env, srv.URL, rs.headers,
-			srv.ToolPrefix, srv.TimeoutSec); err != nil {
+			srv.ToolPrefix, srv.TimeoutSec, srv.ID); err != nil {
 			return err
 		}
 	}
@@ -309,21 +353,28 @@ func (m *Manager) LoadForAgent(ctx context.Context, agentID uuid.UUID, userID st
 	return nil
 }
 
-// maybeEnterSearchMode moves all registered BridgeTools to deferredTools
-// if total count exceeds the inline threshold.
+// maybeEnterSearchMode partially defers MCP tools when total count exceeds
+// the inline threshold. The first mcpToolInlineMaxCount tools stay registered
+// inline; the rest are moved to deferredTools and discovered via mcp_tool_search.
 func (m *Manager) maybeEnterSearchMode() {
 	allNames := m.ToolNames()
 	if len(allNames) <= mcpToolInlineMaxCount {
 		return
 	}
 
+	// Build a set of names to defer (everything beyond the threshold).
+	deferSet := make(map[string]struct{}, len(allNames)-mcpToolInlineMaxCount)
+	for _, name := range allNames[mcpToolInlineMaxCount:] {
+		deferSet[name] = struct{}{}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.deferredTools = make(map[string]*BridgeTool, len(allNames))
+	m.deferredTools = make(map[string]*BridgeTool, len(deferSet))
 	m.activatedTools = make(map[string]struct{})
 
-	// Move all tools to deferred — handle both pool-backed and standalone
+	// Move only excess tools to deferred, keep the rest inline.
 	for serverName := range m.servers {
 		var toolNames []string
 		if _, isPool := m.poolServers[serverName]; isPool {
@@ -332,7 +383,12 @@ func (m *Manager) maybeEnterSearchMode() {
 			toolNames = m.servers[serverName].toolNames
 		}
 
+		var kept []string
 		for _, name := range toolNames {
+			if _, shouldDefer := deferSet[name]; !shouldDefer {
+				kept = append(kept, name)
+				continue
+			}
 			if bt, ok := m.registry.Get(name); ok {
 				if bridge, ok := bt.(*BridgeTool); ok {
 					m.deferredTools[name] = bridge
@@ -341,18 +397,21 @@ func (m *Manager) maybeEnterSearchMode() {
 			}
 		}
 
-		// Clear tool names
+		// Update per-server tool names to only the kept inline tools.
 		if _, isPool := m.poolServers[serverName]; isPool {
-			m.poolToolNames[serverName] = nil
+			m.poolToolNames[serverName] = kept
 		} else {
-			m.servers[serverName].toolNames = nil
+			m.servers[serverName].toolNames = kept
 		}
 	}
 
-	tools.UnregisterToolGroup("mcp")
+	// Update "mcp" group to only the kept inline names.
+	inlineNames := allNames[:mcpToolInlineMaxCount]
+	m.registry.RegisterToolGroup("mcp", inlineNames)
 	m.searchMode = true
 
 	slog.Info("mcp.search_mode.enabled",
+		"inline_tools", len(inlineNames),
 		"deferred_tools", len(m.deferredTools),
 		"threshold", mcpToolInlineMaxCount)
 }
@@ -420,7 +479,7 @@ func (m *Manager) ActivateTools(names []string) {
 	}
 	m.mu.Unlock()
 
-	tools.RegisterToolGroup("mcp", activeNames)
+	m.registry.RegisterToolGroup("mcp", activeNames)
 	slog.Info("mcp.tools.activated", "tools", activated)
 }
 
@@ -451,7 +510,7 @@ func (m *Manager) ActivateToolIfDeferred(name string) bool {
 
 	// Register in registry outside lock (registry has its own sync).
 	m.registry.Register(bt)
-	tools.RegisterToolGroup("mcp", activeNames)
+	m.registry.RegisterToolGroup("mcp", activeNames)
 	slog.Info("mcp.tools.activated", "tools", []string{name})
 	return true
 }
@@ -477,8 +536,9 @@ func (m *Manager) Stop() {
 			if ss.cancel != nil {
 				ss.cancel()
 			}
-			if ss.client != nil {
-				if err := ss.client.Close(); err != nil {
+			// Use atomic pointer — health loop may swap client via fullReconnect concurrently.
+			if client := ss.clientPtr.Load(); client != nil {
+				if err := client.Close(); err != nil {
 					slog.Debug("mcp.server.close_error", "server", name, "error", err)
 				}
 			}
@@ -511,16 +571,17 @@ func (m *Manager) ServerStatus() []ServerStatus {
 }
 
 // resolveEnvVars returns a copy of m with "env:VARNAME" values resolved to os.Getenv("VARNAME").
-func resolveEnvVars(m map[string]string) map[string]string {
+// Uses fail-closed validation: only allowlisted env vars are permitted.
+func resolveEnvVars(m map[string]string) (map[string]string, error) {
 	out := make(map[string]string, len(m))
 	for k, v := range m {
-		if after, ok := strings.CutPrefix(v, "env:"); ok {
-			out[k] = os.Getenv(after)
-		} else {
-			out[k] = v
+		resolved, err := ValidateAndResolveEnvVar(v)
+		if err != nil {
+			return nil, fmt.Errorf("header %q: %w", k, err)
 		}
+		out[k] = resolved
 	}
-	return out
+	return out, nil
 }
 
 // requireUserCreds checks if an MCP server's settings mandate per-user credentials.

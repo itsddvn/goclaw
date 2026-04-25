@@ -69,15 +69,16 @@ func (t *SessionsSendTool) Execute(ctx context.Context, args map[string]any) *Re
 		return ErrorResult("either session_key or label is required")
 	}
 
-	// Security: fail-closed when agentID missing
-	agentID := resolveAgentIDString(ctx)
-	if agentID == "" {
+	// Security: fail-closed when agent key missing.
+	// Session keys use agent_key (e.g. "agent:victoria:..."), not UUID.
+	agentKey := ToolAgentKeyFromCtx(ctx)
+	if agentKey == "" {
 		return ErrorResult("agent context required")
 	}
 
 	// Resolve by label if needed
 	if sessionKey == "" && label != "" {
-		sessions := t.sessions.List(ctx, agentID)
+		sessions := t.sessions.List(ctx, agentKey)
 		for _, s := range sessions {
 			if s.Label == label {
 				sessionKey = s.Key
@@ -90,18 +91,31 @@ func (t *SessionsSendTool) Execute(ctx context.Context, args map[string]any) *Re
 	}
 
 	// Security: validate target session belongs to same agent
-	if !strings.HasPrefix(sessionKey, "agent:"+agentID+":") {
+	if !strings.HasPrefix(sessionKey, "agent:"+agentKey+":") {
 		return ErrorResult("access denied: target session belongs to a different agent")
+	}
+
+	// Scope check: group-scoped users cannot send to other groups' sessions.
+	currentSession := ToolSandboxKeyFromCtx(ctx)
+	if !isSessionInScope(ctx, sessionKey, currentSession) {
+		return ErrorResult("access denied: cannot send to session outside current scope")
 	}
 
 	// Block self-send: agent should not send to its own current session
 	// to prevent re-processing loops (same pattern as message tool).
-	currentSession := ToolSandboxKeyFromCtx(ctx)
 	if currentSession != "" && sessionKey == currentSession {
 		return ErrorResult("cannot send to your own current session — your response is already delivered to it")
 	}
 
-	// Publish as an inbound message (same mechanism as channels)
+	// Publish as an inbound message (same mechanism as channels).
+	// Propagate the calling agent's real sender so the target session's turn
+	// can still perform user-attributed actions (e.g. write_file permission
+	// in a group chat) instead of being blocked by the synthetic sender
+	// rule at config_permission_store.go (#915).
+	sendMeta := map[string]string{}
+	if actorSender := store.SenderIDFromContext(ctx); actorSender != "" {
+		sendMeta[MetaOriginSenderID] = actorSender
+	}
 	t.msgBus.PublishInbound(bus.InboundMessage{
 		Channel:  "system",
 		SenderID: "session_send_tool",
@@ -109,6 +123,7 @@ func (t *SessionsSendTool) Execute(ctx context.Context, args map[string]any) *Re
 		Content:  message,
 		PeerKind: "direct",
 		TenantID: store.TenantIDFromContext(ctx),
+		Metadata: sendMeta,
 	})
 
 	out, _ := json.Marshal(map[string]any{

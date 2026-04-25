@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -24,11 +25,18 @@ type ChannelInstancesHandler struct {
 	contactStore    store.ContactStore
 	tenantStore     store.TenantStore
 	msgBus          *bus.MessageBus
+	memberResolver  channels.MemberResolver // optional — enriches file_writer metadata on addwriter
 }
 
 // NewChannelInstancesHandler creates a handler for channel instance management endpoints.
 func NewChannelInstancesHandler(s store.ChannelInstanceStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, contactStore store.ContactStore, tenantStore store.TenantStore, msgBus *bus.MessageBus) *ChannelInstancesHandler {
 	return &ChannelInstancesHandler{store: s, agentStore: agentStore, configPermStore: configPermStore, contactStore: contactStore, tenantStore: tenantStore, msgBus: msgBus}
+}
+
+// SetMemberResolver wires a channel member resolver so addwriter can auto-fill
+// metadata when the caller supplies neither DisplayName nor Username.
+func (h *ChannelInstancesHandler) SetMemberResolver(r channels.MemberResolver) {
+	h.memberResolver = r
 }
 
 // RegisterRoutes registers all channel instance routes on the given mux.
@@ -321,7 +329,7 @@ func (h *ChannelInstancesHandler) handleWriterGroups(w http.ResponseWriter, r *h
 	if !ok {
 		return
 	}
-	perms, err := h.configPermStore.List(r.Context(), agentID, "file_writer", "")
+	perms, err := h.configPermStore.List(r.Context(), agentID, store.ConfigTypeFileWriter, "")
 	if err != nil {
 		slog.Error("channel_instances.writer_groups", "error", err)
 		locale := store.LocaleFromContext(r.Context())
@@ -357,7 +365,7 @@ func (h *ChannelInstancesHandler) handleListWriters(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "group_id"))
 		return
 	}
-	perms, err := h.configPermStore.List(r.Context(), agentID, "file_writer", groupID)
+	perms, err := h.configPermStore.List(r.Context(), agentID, store.ConfigTypeFileWriter, groupID)
 	if err != nil {
 		slog.Error("channel_instances.list_writers", "error", err)
 		writeError(w, http.StatusInternalServerError, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToList, "writers"))
@@ -412,10 +420,18 @@ func (h *ChannelInstancesHandler) handleAddWriter(w http.ResponseWriter, r *http
 		return
 	}
 	meta, _ := json.Marshal(map[string]string{"displayName": body.DisplayName, "username": body.Username})
+	// Auto-enrich when caller supplied neither display name nor username.
+	// Best-effort — any resolver error leaves the metadata as-is so the
+	// store's fallback ({}) applies and the grant still succeeds.
+	if body.DisplayName == "" && body.Username == "" {
+		if enriched, ok := channels.EnrichFileWriterMetadata(r.Context(), h.memberResolver, body.GroupID, body.UserID); ok {
+			meta = enriched
+		}
+	}
 	if err := h.configPermStore.Grant(r.Context(), &store.ConfigPermission{
 		AgentID:    agentID,
 		Scope:      body.GroupID,
-		ConfigType: "file_writer",
+		ConfigType: store.ConfigTypeFileWriter,
 		UserID:     body.UserID,
 		Permission: "allow",
 		Metadata:   meta,
@@ -440,7 +456,7 @@ func (h *ChannelInstancesHandler) handleRemoveWriter(w http.ResponseWriter, r *h
 		return
 	}
 	// Prevent removing the last writer (same guard as Telegram /removewriter)
-	writers, _ := h.configPermStore.List(r.Context(), agentID, "file_writer", groupID)
+	writers, _ := h.configPermStore.List(r.Context(), agentID, store.ConfigTypeFileWriter, groupID)
 	allowCount := 0
 	for _, p := range writers {
 		if p.Permission == "allow" {
@@ -451,7 +467,7 @@ func (h *ChannelInstancesHandler) handleRemoveWriter(w http.ResponseWriter, r *h
 		writeError(w, http.StatusConflict, protocol.ErrFailedPrecondition, i18n.T(locale, i18n.MsgCannotRemoveLastWriter))
 		return
 	}
-	if err := h.configPermStore.Revoke(r.Context(), agentID, groupID, "file_writer", userID); err != nil {
+	if err := h.configPermStore.Revoke(r.Context(), agentID, groupID, store.ConfigTypeFileWriter, userID); err != nil {
 		slog.Error("channel_instances.remove_writer", "error", err)
 		writeError(w, http.StatusInternalServerError, protocol.ErrInternal, i18n.T(locale, i18n.MsgFailedToDelete, "writer", "internal error"))
 		return
@@ -475,6 +491,9 @@ func (h *ChannelInstancesHandler) handleListContacts(w http.ResponseWriter, r *h
 	}
 	if v := r.URL.Query().Get("peer_kind"); v != "" {
 		opts.PeerKind = v
+	}
+	if v := r.URL.Query().Get("contact_type"); v != "" {
+		opts.ContactType = v
 	}
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
@@ -537,7 +556,7 @@ func (h *ChannelInstancesHandler) handleResolveContacts(w http.ResponseWriter, r
 // isValidChannelType checks if the channel type is supported.
 func isValidChannelType(ct string) bool {
 	switch ct {
-	case "telegram", "discord", "slack", "whatsapp", "zalo_oa", "zalo_personal", "feishu":
+	case "telegram", "discord", "slack", "whatsapp", "zalo_oa", "zalo_personal", "feishu", "facebook", "pancake":
 		return true
 	}
 	return false

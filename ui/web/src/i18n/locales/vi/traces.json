@@ -15,6 +15,14 @@
     "spans": "Khoảng",
     "time": "Thời gian"
   },
+  "source": {
+    "direct": "Trực tiếp",
+    "group": "Nhóm",
+    "cron": "Cron",
+    "team": "Team",
+    "ws": "Web",
+    "unknown": "Khác"
+  },
   "unnamed": "Không tên",
   "stopRun": "Dừng chạy",
   "cached": "đã cache",
@@ -43,6 +51,19 @@
   "span": {
     "model": "Model:",
     "tokens": "Token:",
+    "reasoning": "Reasoning:",
+    "source": "source",
+    "requested": "yêu cầu",
+    "effective": "thực tế",
+    "fallback": "fallback",
+    "modelDefault": "mặc định model",
+    "supportedLevels": "hỗ trợ:",
+    "sourceValue": {
+      "provider_default": "provider default",
+      "reasoning": "agent advanced",
+      "thinking_level": "legacy thinking level",
+      "unset": "unset"
+    },
     "createdAt": "Tạo lúc:",
     "input": "Đầu vào:",
     "output": "Đầu ra:",
@@ -56,8 +77,11 @@
   },
   "toast": {
     "failedLoad": "Không thể tải dữ liệu theo dõi",
-    "abortSent": "Đã dừng chạy",
-    "abortFailed": "Không thể dừng chạy",
-    "abortNotFound": "Lệnh đã hoàn tất hoặc không tìm thấy"
+    "abortStopped": "Đã dừng tác vụ",
+    "abortForced": "Đã buộc dừng tác vụ (đang dọn dẹp ở nền)",
+    "abortAlreadyAborting": "Đang dừng tác vụ",
+    "abortNotFound": "Tác vụ đã kết thúc",
+    "abortUnauthorized": "Không có quyền dừng tác vụ này",
+    "abortFailed": "Không thể dừng tác vụ"
   }
 }

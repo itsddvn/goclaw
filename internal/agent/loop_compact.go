@@ -10,6 +10,33 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
+// compactionSummaryPrompt is the structured summarization instruction used by both
+// mid-loop compaction and background summarization. Matching OpenClaw TS compaction.ts
+// MERGE_SUMMARIES_INSTRUCTIONS + IDENTIFIER_PRESERVATION_INSTRUCTIONS.
+const compactionSummaryPrompt = `Summarize this conversation concisely for the AI agent to resume work.
+
+MUST PRESERVE:
+- Active tasks and their current status (in-progress, blocked, pending)
+- Pending subagent tasks (IDs, labels, statuses) — agent needs to know what is still running
+- Pending team task results awaiting delivery (task IDs, assignees, statuses)
+- Any "waiting for..." state — do NOT drop expectations of future results
+- Batch operation progress (e.g., "5/17 items completed")
+- The last thing the user requested and what was being done about it
+- Decisions made and their rationale
+- TODOs, open questions, and constraints
+- Any commitments or follow-ups promised
+
+IDENTIFIER PRESERVATION:
+Preserve all opaque identifiers exactly as written (no shortening or reconstruction),
+including UUIDs, hashes, IDs, tokens, API keys, hostnames, IPs, ports, URLs, and file names.
+
+PRIORITIZE recent context over older history. The agent needs to know
+what it was doing, not just what was discussed.
+
+Conversation to summarize:
+
+`
+
 // compactMessagesInPlace summarizes the first ~70% of messages into a condensed
 // summary, keeping the last ~30% intact. Operates purely on the local messages
 // slice — no session state touched, no locks needed.
@@ -60,22 +87,37 @@ func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	inTokens := l.estimateSummaryInputTokens(toSummarize)
+	slog.Info("compact_budget", "agent", l.id, "in_tokens", inTokens, "out_tokens", dynamicSummaryMax(inTokens))
 	resp, err := l.provider.Chat(sctx, providers.ChatRequest{
 		Messages: []providers.Message{{
 			Role:    "user",
-			Content: "Provide a concise summary of this conversation, preserving key findings, data, and context:\n\n" + sb.String(),
+			Content: compactionSummaryPrompt + sb.String(),
 		}},
 		Model:   l.model,
-		Options: map[string]any{"max_tokens": 1024, "temperature": 0.3},
+		Options: map[string]any{"max_tokens": dynamicSummaryMax(inTokens), "temperature": 0.3},
 	})
 	if err != nil {
 		slog.Warn("mid_loop_compaction_failed", "agent", l.id, "error", err)
 		return nil
 	}
 
+	// Collect MediaRefs from compacted messages (keep up to 30 most recent).
+	const maxPreservedMediaRefs = 30
+	var preservedRefs []providers.MediaRef
+	for i := len(toSummarize) - 1; i >= 0 && len(preservedRefs) < maxPreservedMediaRefs; i-- {
+		for _, ref := range toSummarize[i].MediaRefs {
+			preservedRefs = append(preservedRefs, ref)
+			if len(preservedRefs) >= maxPreservedMediaRefs {
+				break
+			}
+		}
+	}
+
 	summary := providers.Message{
-		Role:    "user",
-		Content: "[Summary of earlier conversation]\n" + SanitizeAssistantContent(resp.Content),
+		Role:      "user",
+		Content:   "[Summary of earlier conversation]\n" + SanitizeAssistantContent(resp.Content),
+		MediaRefs: preservedRefs,
 	}
 	result := make([]providers.Message, 0, 1+keepCount)
 	result = append(result, summary)
@@ -88,4 +130,29 @@ func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.
 		"kept", len(result))
 
 	return result
+}
+
+// dynamicSummaryMax returns the output-token budget for a compaction or
+// summarization call, scaled to input size. Formula: in/25 (~4% compression),
+// clamped to [1024, 8192]. Floor keeps short summaries coherent; cap prevents
+// runaway output billing on pathological inputs.
+func dynamicSummaryMax(inputTokens int) int {
+	out := max(inputTokens/25, 1024)
+	if out > 8192 {
+		out = 8192
+	}
+	return out
+}
+
+// estimateSummaryInputTokens returns a best-effort input-token count. Prefers
+// TokenCounter when attached; else rune/3 fallback (~±15% for UTF-8).
+func (l *Loop) estimateSummaryInputTokens(messages []providers.Message) int {
+	if l.tokenCounter != nil {
+		return l.tokenCounter.CountMessages(l.model, messages)
+	}
+	total := 0
+	for _, m := range messages {
+		total += len([]rune(m.Content)) / 3
+	}
+	return total
 }

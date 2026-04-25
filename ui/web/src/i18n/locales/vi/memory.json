@@ -143,10 +143,16 @@
       "source": "Nguồn:",
       "properties": "Thuộc tính:",
       "relations": "Quan hệ",
-      "traverse": "Duyệt (2 bước)",
+      "traverse": "Duyệt",
+      "depthOption": "{{depth}} bước",
+      "tabs": {
+        "table": "Bảng",
+        "graph": "Đồ thị"
+      },
       "traversing": "Đang duyệt...",
       "loading": "Đang tải...",
       "noRelations": "Không tìm thấy quan hệ.",
+      "showAll": "Hiện tất cả",
       "traversalResults": "Kết quả duyệt ({{count}})",
       "direction": {
         "outgoing": "→ đi ra",

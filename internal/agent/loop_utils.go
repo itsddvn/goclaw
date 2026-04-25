@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -62,10 +64,29 @@ func (l *Loop) shouldShareKnowledgeGraph() bool {
 	return l.workspaceSharing != nil && l.workspaceSharing.ShareKnowledgeGraph
 }
 
+// shouldShareSessions returns true if sessions should be shared across
+// all users/groups of the agent (no per-group session scoping).
+func (l *Loop) shouldShareSessions() bool {
+	return l.workspaceSharing != nil && l.workspaceSharing.ShareSessions
+}
+
+// buildChannelMeta extracts channel metadata from RunRequest for bootstrap decisions.
+// Returns nil when channel type is unknown (preserves normal bootstrap flow).
+func (l *Loop) buildChannelMeta(req *RunRequest) *bootstrap.ChannelMeta {
+	if req == nil || req.ChannelType == "" {
+		return nil
+	}
+	return &bootstrap.ChannelMeta{
+		ChannelType:     req.ChannelType,
+		DisplayName:     req.SenderName,
+		DefaultTimezone: l.defaultTimezone,
+	}
+}
+
 // getOrCreateUserSetup returns the cached userSetup for a user, creating it on first call.
 // On first call: seeds context files (non-team) and resolves workspace from user profile.
 // On subsequent calls: returns cached setup immediately (no DB calls).
-func (l *Loop) getOrCreateUserSetup(ctx context.Context, userID, channel string, isTeamSession bool) *userSetup {
+func (l *Loop) getOrCreateUserSetup(ctx context.Context, userID, channel string, isTeamSession bool, channelMeta *bootstrap.ChannelMeta) *userSetup {
 	if userID == "" {
 		return &userSetup{workspace: l.workspace}
 	}
@@ -90,7 +111,7 @@ func (l *Loop) getOrCreateUserSetup(ctx context.Context, userID, channel string,
 			}
 			// Step 2: Seed context files (must run before buildMessages reads them).
 			// Passes isNew so SeedUserFiles knows whether to skip existing files.
-			if err := l.seedUserFiles(ctx, l.agentUUID, userID, l.agentType, isNew); err != nil {
+			if err := l.seedUserFiles(ctx, l.agentUUID, userID, l.agentType, isNew, channelMeta); err != nil {
 				slog.Warn("failed to seed user context files", "error", err)
 				// Seeding failed (e.g. SQLITE_BUSY after retries). Inject
 				// embedded bootstrap templates in-memory so the first turn
@@ -153,8 +174,11 @@ func (l *Loop) ProviderName() string {
 }
 
 // uniquifyToolCallIDs ensures all tool call IDs are globally unique across the
-// transcript by appending a short run-ID prefix and iteration index.
+// transcript by hashing the original ID with run-ID, iteration, and index.
 // Returns a new slice (does not mutate the input).
+//
+// IDs are capped at 40 characters to comply with the OpenAI/Azure API limit
+// on tool_calls[].id and tool_call_id fields (undocumented, returns HTTP 400).
 //
 // Some OpenAI-compatible APIs (OpenRouter, vLLM, DeepSeek) return duplicate IDs
 // within a single response or reuse IDs from earlier turns, causing HTTP 400.
@@ -163,18 +187,14 @@ func uniquifyToolCallIDs(calls []providers.ToolCall, runID string, iteration int
 	if len(calls) == 0 {
 		return calls
 	}
-	short := runID
-	if len(short) > 8 {
-		short = short[:8]
-	}
 	out := make([]providers.ToolCall, len(calls))
 	copy(out, calls)
 	for i := range out {
-		if out[i].ID == "" {
-			out[i].ID = fmt.Sprintf("call_%s_%d_%d", short, iteration, i)
-		} else {
-			out[i].ID = fmt.Sprintf("%s_%s_%d_%d", out[i].ID, short, iteration, i)
-		}
+		// Hash all discriminating components into a fixed-length ID:
+		// "call_" (5 chars) + hex(sha256(id:runID:iter:idx))[:35] = 40 chars exactly.
+		raw := fmt.Sprintf("%s:%s:%d:%d", out[i].ID, runID, iteration, i)
+		h := sha256.Sum256([]byte(raw))
+		out[i].ID = "call_" + hex.EncodeToString(h[:])[:35]
 	}
 	return out
 }

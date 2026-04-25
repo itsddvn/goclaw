@@ -103,13 +103,15 @@ export function ChatGPTOAuthRoutingSection({
   if (!currentOAuthProvider) return null;
 
   const allExtraProviders = oauthProviders.filter((p) => p.name !== currentProvider);
-  const readyExtraProviders = allExtraProviders.filter(
-    (p) => getAvailabilityFromMap(p, statusByName) === "ready",
+  const selectedExtras = new Set(value.extra_provider_names ?? []);
+  const selectableExtraProviders = allExtraProviders.filter(
+    (p) =>
+      selectedExtras.has(p.name) ||
+      getAvailabilityFromMap(p, statusByName) === "ready",
   );
   const mode = value.override_mode === "inherit" ? "inherit" : "custom";
   const providerDefaultsAvailable =
     defaultRouting != null && defaultRouting.extraProviderNames.length > 0;
-  const selectedExtras = new Set(value.extra_provider_names ?? []);
 
   const selectedEntries = entries.map((entry) => ({
     ...entry,
@@ -123,10 +125,17 @@ export function ChatGPTOAuthRoutingSection({
   const blockedEntries = selectedEntries.filter((e) => e.routeReadiness === "blocked");
   const routerActiveEntries = healthyEntries;
 
-  const selectedStrategy: EffectiveChatGPTOAuthRoutingStrategy =
+  // When the agent inherits from the provider, paint the Traffic Policy
+  // buttons with the provider's effective strategy so the UI reflects what
+  // will actually run. Otherwise derive from the draft (custom override).
+  const draftStrategy: EffectiveChatGPTOAuthRoutingStrategy =
     value.strategy === "round_robin" || value.strategy === "priority_order"
       ? value.strategy
-      : "primary_first";
+      : "priority_order";
+  const selectedStrategy: EffectiveChatGPTOAuthRoutingStrategy =
+    mode === "inherit" && defaultRouting
+      ? defaultRouting.strategy
+      : draftStrategy;
   const canEditMembership = canManageProviders && membershipEditable;
   const canUsePoolStrategies =
     canManageProviders &&
@@ -172,7 +181,7 @@ export function ChatGPTOAuthRoutingSection({
             {showOverrideMode ? (
               <Badge
                 variant={mode === "inherit" ? "secondary" : "outline"}
-                className="h-6 px-2 text-[11px] [@media(max-height:860px)]:h-5"
+                className="h-6 px-2 text-xs-plus [@media(max-height:860px)]:h-5"
               >
                 {mode === "inherit"
                   ? t("chatgptOAuthRouting.mode.inherit")
@@ -180,17 +189,17 @@ export function ChatGPTOAuthRoutingSection({
               </Badge>
             ) : null}
             {!canManageProviders ? (
-              <Badge variant="outline" className="h-6 px-2 text-[11px] [@media(max-height:860px)]:h-5">
+              <Badge variant="outline" className="h-6 px-2 text-xs-plus [@media(max-height:860px)]:h-5">
                 {t("chatgptOAuthRouting.viewerMode")}
               </Badge>
             ) : null}
             {isDirty ? (
-              <Badge variant="warning" className="h-6 px-2 text-[11px] [@media(max-height:860px)]:h-5">
+              <Badge variant="warning" className="h-6 px-2 text-xs-plus [@media(max-height:860px)]:h-5">
                 {t("chatgptOAuthRouting.draftBadge")}
               </Badge>
             ) : null}
             {(quotaLoading || isLoading) ? (
-              <Badge variant="outline" className="h-6 px-2 text-[11px] [@media(max-height:860px)]:h-5">
+              <Badge variant="outline" className="h-6 px-2 text-xs-plus [@media(max-height:860px)]:h-5">
                 {t("chatgptOAuthRouting.quota.checking")}
               </Badge>
             ) : null}
@@ -214,7 +223,7 @@ export function ChatGPTOAuthRoutingSection({
                 type="button"
                 variant={mode === "inherit" ? "default" : "outline"}
                 onClick={() => setMode("inherit")}
-                disabled={!canManageProviders || !providerDefaultsAvailable}
+                disabled={!canManageProviders}
                 className="h-9 [@media(max-height:760px)]:h-8"
               >
                 {t("chatgptOAuthRouting.mode.inherit")}
@@ -241,16 +250,7 @@ export function ChatGPTOAuthRoutingSection({
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             {t("chatgptOAuthRouting.strategyLabel")}
           </p>
-          <div className="grid gap-2 sm:grid-cols-3">
-            <Button
-              type="button"
-              variant={selectedStrategy === "primary_first" ? "default" : "outline"}
-              onClick={() => setStrategy("primary_first")}
-              disabled={!canManageProviders || mode === "inherit"}
-              className="h-9 text-xs sm:text-sm [@media(max-height:760px)]:h-8"
-            >
-              {t("chatgptOAuthRouting.strategy.primaryFirst")}
-            </Button>
+          <div className="grid gap-2 sm:grid-cols-2">
             <Button
               type="button"
               variant={selectedStrategy === "round_robin" ? "default" : "outline"}
@@ -277,7 +277,7 @@ export function ChatGPTOAuthRoutingSection({
           membershipManagedByLabel={membershipManagedByLabel}
           currentProvider={currentProvider}
           selectedEntries={selectedEntries}
-          readyExtraProviders={readyExtraProviders}
+          selectableExtraProviders={selectableExtraProviders}
           selectedExtras={selectedExtras}
           quotaByName={quotaByName}
           canEditMembership={canEditMembership}
