@@ -289,7 +289,6 @@ func runCommandCronJob(cfg *config.Config, job *store.CronJob, tenantStore store
 	deliverCronOutput(msgBus, job, res.Summary, nil, peerKind)
 	return &store.CronJobResult{Content: res.Summary}, nil
 }
-
 func cronOutputContainsNoReplySentinel(content string) bool {
 	return agent.IsSilentReply(content)
 }
