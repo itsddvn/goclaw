@@ -813,6 +813,7 @@ func (h *ProvidersHandler) handleUpdateProvider(w http.ResponseWriter, r *http.R
 			return
 		}
 		candidate.Settings = rawSettings
+		updates["settings"] = rawSettings
 	}
 
 	// Re-validate URLs against the (possibly new) provider type.
