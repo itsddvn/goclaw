@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
@@ -83,4 +85,22 @@ func TestApplyUserAllowedPaths_EmptyIsNoop(t *testing.T) {
 	reg.Register(tools.NewReadFileTool(t.TempDir(), true))
 	applyUserAllowedPaths(reg, nil)
 	applyUserAllowedPaths(reg, []string{})
+}
+
+func TestWorkstationIDFromEventPrefersMutationPayload(t *testing.T) {
+	want := uuid.New()
+	got, ok := workstationIDFromEvent(eventbus.DomainEvent{
+		Payload: map[string]any{"workstation_id": want.String()},
+	})
+	if !ok || got != want {
+		t.Fatalf("workstationIDFromEvent() = %s, %v; want %s, true", got, ok, want)
+	}
+}
+
+func TestWorkstationIDFromEventSupportsLegacySourceID(t *testing.T) {
+	want := uuid.New()
+	got, ok := workstationIDFromEvent(eventbus.DomainEvent{SourceID: want.String()})
+	if !ok || got != want {
+		t.Fatalf("workstationIDFromEvent() = %s, %v; want %s, true", got, ok, want)
+	}
 }

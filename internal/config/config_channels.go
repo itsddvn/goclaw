@@ -450,20 +450,30 @@ type GatewayConfig struct {
 
 // ToolsConfig controls tool availability, policy, and web search.
 type ToolsConfig struct {
-	Profile                 string                        `json:"profile,omitempty"`                 // global profile: "minimal", "coding", "messaging", "full"
-	Allow                   []string                      `json:"allow,omitempty"`                   // global allow list (tool names or "group:xxx")
-	Deny                    []string                      `json:"deny,omitempty"`                    // global deny list
-	AlsoAllow               []string                      `json:"alsoAllow,omitempty"`               // additive: adds without removing existing
-	ByProvider              map[string]*ToolPolicySpec    `json:"byProvider,omitempty"`              // per-provider overrides
-	ShellDenyGroups         map[string]bool               `json:"shellDenyGroups,omitempty"`         // global shell deny-group toggles (group name -> denied); per-agent overrides win per-key
-	CommandKeywordAllowlist []CommandKeywordAllowlistRule `json:"commandKeywordAllowlist,omitempty"` // scoped bypass for credentialed CLI content keywords
-	ExecApproval            ExecApprovalCfg               `json:"execApproval"`                      // exec command approval settings
-	WebFetch                WebFetchPolicyConfig          `json:"web_fetch"`                         // domain policy for URL fetching
-	Browser                 BrowserToolConfig             `json:"browser"`
-	RateLimitPerHour        int                           `json:"rate_limit_per_hour,omitempty"` // max tool executions per hour per session (0 = disabled)
-	ScrubCredentials        *bool                         `json:"scrub_credentials,omitempty"`   // auto-redact API keys/tokens in tool output (default true)
-	McpServers              map[string]*MCPServerConfig   `json:"mcp_servers,omitempty"`         // external MCP server connections
-	DocumentParser          DocumentParserConfig          `json:"document_parser"`               // local-first document text extraction
+	Profile                     string                        `json:"profile,omitempty"`                     // global profile: "minimal", "coding", "messaging", "full"
+	Allow                       []string                      `json:"allow,omitempty"`                       // global allow list (tool names or "group:xxx")
+	Deny                        []string                      `json:"deny,omitempty"`                        // global deny list
+	AlsoAllow                   []string                      `json:"alsoAllow,omitempty"`                   // additive: adds without removing existing
+	ByProvider                  map[string]*ToolPolicySpec    `json:"byProvider,omitempty"`                  // per-provider overrides
+	ShellDenyGroups             map[string]bool               `json:"shellDenyGroups,omitempty"`             // global shell deny-group toggles (group name -> denied); per-agent overrides win per-key
+	CommandKeywordAllowlist     []CommandKeywordAllowlistRule `json:"commandKeywordAllowlist,omitempty"`     // scoped bypass for credentialed CLI content keywords
+	TrustedDelegationHostAgents []TrustedDelegationHostAgent  `json:"trustedDelegationHostAgents,omitempty"` // exact tenant/agent UUID pairs permitted to use host exec when delegated
+	DelegateAsyncTimeoutSeconds int                           `json:"delegateAsyncTimeoutSeconds,omitempty"` // async delegate deadline in seconds (0 = default 1800; range 60-3600)
+	ExecApproval                ExecApprovalCfg               `json:"execApproval"`                          // exec command approval settings
+	WebFetch                    WebFetchPolicyConfig          `json:"web_fetch"`                             // domain policy for URL fetching
+	Browser                     BrowserToolConfig             `json:"browser"`
+	RateLimitPerHour            int                           `json:"rate_limit_per_hour,omitempty"` // max tool executions per hour per session (0 = disabled)
+	ScrubCredentials            *bool                         `json:"scrub_credentials,omitempty"`   // auto-redact API keys/tokens in tool output (default true)
+	McpServers                  map[string]*MCPServerConfig   `json:"mcp_servers,omitempty"`         // external MCP server connections
+	DocumentParser              DocumentParserConfig          `json:"document_parser"`               // local-first document text extraction
+}
+
+// TrustedDelegationHostAgent identifies one tenant-scoped agent that may run
+// delegated exec commands on the host. Both fields must be exact, non-nil UUIDs
+// before the exec layer honors this high-trust grant.
+type TrustedDelegationHostAgent struct {
+	TenantID string `json:"tenant_id"`
+	AgentID  string `json:"agent_id"`
 }
 
 // DocumentParserConfig controls local-first document text extraction in the

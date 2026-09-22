@@ -139,12 +139,22 @@ func (ch *Channel) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Best-effort: subscribe app to webhooks.
-	if err := ch.graphClient.SubscribeApp(ctx); err != nil {
-		slog.Warn("facebook: webhook subscription failed (check app install on page)", "err", err)
+	fields := ch.subscriptionFields()
+	if len(fields) > 0 {
+		if err := ch.graphClient.SubscribeApp(ctx, fields); err != nil {
+			startErr := fmt.Errorf(
+				"facebook: page webhook subscription failed for fields %v; check Page permissions and app webhook subscriptions: %w",
+				fields, err,
+			)
+			ch.MarkFailed("webhook subscription failed", startErr.Error(), channels.ChannelFailureKindAuth, false)
+			return startErr
+		}
 	}
 
-	globalRouter.register(ch)
+	if err := globalRouter.register(ch); err != nil {
+		ch.MarkFailed("duplicate Page registration", err.Error(), channels.ChannelFailureKindConfig, false)
+		return err
+	}
 	ch.MarkHealthy("connected to page " + ch.pageID)
 	ch.SetRunning(true)
 
@@ -155,9 +165,20 @@ func (ch *Channel) Start(ctx context.Context) error {
 	return nil
 }
 
+func (ch *Channel) subscriptionFields() []string {
+	fields := make([]string, 0, 4)
+	if ch.config.Features.MessengerAutoReply {
+		fields = append(fields, "messages", "message_echoes", "messaging_postbacks")
+	}
+	if ch.config.Features.CommentReply {
+		fields = append(fields, "feed")
+	}
+	return fields
+}
+
 // Stop gracefully shuts down the channel.
 func (ch *Channel) Stop(_ context.Context) error {
-	globalRouter.unregister(ch.pageID)
+	globalRouter.unregister(ch)
 	ch.stopFn()      // cancel stopCtx → cancels inflight Graph API calls
 	close(ch.stopCh) // stop background goroutines
 	ch.SetRunning(false)
@@ -256,10 +277,9 @@ func (ch *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	return nil
 }
 
-// WebhookHandler returns the shared webhook path and the global router as handler.
-// Only the first facebook instance mounts the route; others return ("", nil).
+// WebhookHandler claims the shared fixed route for manager-based discovery.
 func (ch *Channel) WebhookHandler() (string, http.Handler) {
-	return globalRouter.webhookRoute()
+	return ClaimWebhookRoute()
 }
 
 // handleAPIError maps Graph API errors to channel health states.

@@ -19,6 +19,8 @@ import { ToolsProfileSection } from "./sections/tools-profile-section";
 import { ToolsBrowserSection } from "./sections/tools-browser-section";
 import { ToolsExecSection } from "./sections/tools-exec-section";
 import { ShellSecuritySection } from "./sections/shell-security-section";
+import { TrustedDelegationSection } from "./sections/trusted-delegation-section";
+import { AsyncDelegationSection } from "./sections/async-delegation-section";
 import { TtsSection } from "./sections/tts-section";
 import { CronSection } from "./sections/cron-section";
 import { TelemetrySection } from "./sections/telemetry-section";
@@ -142,6 +144,16 @@ export function ConfigPage() {
         </TabsContent>
 
         <TabsContent value="tools" className="space-y-4">
+          <TrustedDelegationSection
+            data={config.tools}
+            onSave={(v) => patch({ tools: v })}
+            saving={saving}
+          />
+          <AsyncDelegationSection
+            data={config.tools}
+            onSave={(v) => patch({ tools: v })}
+            saving={saving}
+          />
           <ToolsProfileSection
             data={config.tools as any}
             onSave={(v) => patch({ tools: v })}

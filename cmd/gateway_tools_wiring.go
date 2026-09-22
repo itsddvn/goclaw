@@ -188,12 +188,12 @@ func applyUserAllowedPaths(toolsReg *tools.Registry, allowedPaths []string) {
 }
 
 // wireWorkstationTools registers workstation_exec and claude_remote tools (Standard edition only).
-// Phase 6: wires the real AllowlistChecker permission check replacing the deny-all sentinel.
-// Phase 7: wires the activity sink for exec audit logging.
+// It wires the real AllowlistChecker and the activity sink for exec audit logging.
 //
-// Security model (argv-exec, no sh -c):
-//   - C1 fix: cmd is the binary name (argv[0]), not a shell command string — no shell injection possible.
-//   - C2 fix: NFKC normalization applied before any check — collapses Unicode lookalikes.
+// Security model:
+//   - cmd is one executable (argv[0]), never a caller-provided shell command string.
+//   - NFKC normalization runs before policy checks to collapse Unicode lookalikes.
+//   - Agent assignment: explicit and implicit targets require a tenant-scoped link.
 //   - Default-deny: AllowlistChecker rejects any cmd not in workstation's allowlist.
 //   - Rate limit: 30 exec/min per agent+workstation, 300/hr per workstation.
 //
@@ -203,13 +203,13 @@ func wireWorkstationTools(
 	pgStores *store.Stores,
 	toolsReg *tools.Registry,
 	domainBus eventbus.DomainEventBus,
-) func() {
+) (cleanup func(), invalidateBackend func(uuid.UUID), invalidatePermissions func(uuid.UUID)) {
 	if edition.Current().Name != "standard" {
-		return func() {}
+		return func() {}, nil, nil
 	}
 	if pgStores.Workstations == nil || pgStores.WorkstationLinks == nil {
 		slog.Warn("workstation tools skipped: workstation stores not initialised")
-		return func() {}
+		return func() {}, nil, nil
 	}
 
 	backendCache := workstation.NewBackendCache(pgStores.Workstations, 10*time.Minute)
@@ -220,11 +220,13 @@ func wireWorkstationTools(
 		backendCache,
 		domainBus,
 	)
+	workstationExecTool.SetContactGrantStore(pgStores.WorkstationContactGrants)
 	claudeRemoteTool := tools.NewClaudeRemoteTool(workstationExecTool)
 
-	// Phase 6: wire real permission checker (AllowlistChecker + rate limiter).
+	// Wire the real permission checker (AllowlistChecker + rate limiter).
 	if pgStores.WorkstationPermissions != nil {
 		allowlistChecker := security.NewAllowlistChecker(pgStores.WorkstationPermissions, 30*time.Second)
+		invalidatePermissions = allowlistChecker.Invalidate
 		rateLimiter := security.NewWorkstationRateLimiter()
 
 		workstationExecTool.SetPermCheck(func(ctx context.Context, ws *store.Workstation, cmd string, args []string, env map[string]string) error {
@@ -241,12 +243,12 @@ func wireWorkstationTools(
 			// Allowlist + input validation (NFKC normalize, NUL/CRLF, binary match).
 			return allowlistChecker.Check(ctx, ws, cmd, args)
 		})
-		slog.Info("workstation tools registered (Standard edition; Phase 6 AllowlistChecker active)")
+		slog.Info("workstation tools registered (Standard edition; AllowlistChecker active)")
 
 		// Invalidate allowlist cache on permission changes.
 		if domainBus != nil {
 			domainBus.Subscribe(eventbus.EventWorkstationPermChanged, func(_ context.Context, e eventbus.DomainEvent) error {
-				if id, err := uuid.Parse(e.SourceID); err == nil {
+				if id, ok := workstationIDFromEvent(e); ok {
 					allowlistChecker.Invalidate(id)
 					slog.Debug("workstation allowlist cache invalidated", "workstation_id", id)
 				}
@@ -263,29 +265,52 @@ func wireWorkstationTools(
 	// Subscribe to workstation update/delete events to evict stale BackendCache entries.
 	if domainBus != nil {
 		domainBus.Subscribe(eventbus.EventWorkstationUpdated, func(_ context.Context, e eventbus.DomainEvent) error {
-			if id, err := uuid.Parse(e.SourceID); err == nil {
+			if id, ok := workstationIDFromEvent(e); ok {
 				backendCache.Invalidate(id)
 				slog.Debug("workstation backend cache invalidated on update", "workstation_id", id)
 			}
 			return nil
 		})
 		domainBus.Subscribe(eventbus.EventWorkstationDeleted, func(_ context.Context, e eventbus.DomainEvent) error {
-			if id, err := uuid.Parse(e.SourceID); err == nil {
+			if id, ok := workstationIDFromEvent(e); ok {
 				backendCache.Invalidate(id)
 				slog.Debug("workstation backend cache invalidated on delete", "workstation_id", id)
 			}
 			return nil
 		})
 
-		// Phase 7: wire activity audit sink (persists exec done events + nightly prune).
+		// Wire the activity audit sink (persists exec done events + nightly prune).
 		if pgStores.WorkstationActivity != nil {
 			stopSink := workstation.WireActivitySink(domainBus, pgStores.WorkstationActivity)
 			slog.Info("workstation activity audit sink registered")
 			return func() {
 				stopSink()
 				pgStores.WorkstationActivity.Stop()
-			}
+			}, backendCache.Invalidate, invalidatePermissions
 		}
 	}
-	return func() {}
+	return func() {}, backendCache.Invalidate, invalidatePermissions
+}
+
+// workstationIDFromEvent reads the mutation target from payload first because
+// SourceID is a deduplication key. Mutation publishers intentionally leave it
+// empty so repeated edits to the same workstation are never suppressed.
+func workstationIDFromEvent(e eventbus.DomainEvent) (uuid.UUID, bool) {
+	var raw string
+	switch payload := e.Payload.(type) {
+	case map[string]any:
+		switch id := payload["workstation_id"].(type) {
+		case string:
+			raw = id
+		case uuid.UUID:
+			return id, id != uuid.Nil
+		}
+	case map[string]string:
+		raw = payload["workstation_id"]
+	}
+	if raw == "" {
+		raw = e.SourceID
+	}
+	id, err := uuid.Parse(raw)
+	return id, err == nil && id != uuid.Nil
 }

@@ -178,6 +178,45 @@ func TestLoad_WebhookTimeoutsFromFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestLoad_DelegateAsyncTimeoutValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		{name: "unset accepted", raw: `{"tools":{}}`},
+		{name: "zero accepted", raw: `{"tools":{"delegateAsyncTimeoutSeconds":0}}`},
+		{name: "minimum accepted", raw: `{"tools":{"delegateAsyncTimeoutSeconds":60}}`, want: 60},
+		{name: "maximum accepted", raw: `{"tools":{"delegateAsyncTimeoutSeconds":3600}}`, want: 3600},
+		{name: "below minimum rejected", raw: `{"tools":{"delegateAsyncTimeoutSeconds":59}}`, wantErr: true},
+		{name: "above maximum rejected", raw: `{"tools":{"delegateAsyncTimeoutSeconds":3601}}`, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfgPath := filepath.Join(t.TempDir(), "config.json5")
+			if err := os.WriteFile(cfgPath, []byte(tt.raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := Load(cfgPath)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load() error = nil, want range validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Tools.DelegateAsyncTimeoutSeconds != tt.want {
+				t.Fatalf("delegateAsyncTimeoutSeconds = %d, want %d", cfg.Tools.DelegateAsyncTimeoutSeconds, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_WebhookStreamFromFileAndEnv(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json5")

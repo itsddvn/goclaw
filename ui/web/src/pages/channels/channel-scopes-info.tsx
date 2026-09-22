@@ -1,16 +1,23 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronRight, Shield } from "lucide-react";
-import { requiredScopes } from "./channel-schemas";
+import { resolveRequiredScopes } from "./channel-schemas";
 
 interface ChannelScopesInfoProps {
   channelType: string;
+  configValues?: Record<string, unknown>;
 }
 
-export function ChannelScopesInfo({ channelType }: ChannelScopesInfoProps) {
+export function ChannelScopesInfo({ channelType, configValues }: ChannelScopesInfoProps) {
   const { t } = useTranslation("channels");
-  const scopes = requiredScopes[channelType];
+  const scopes = resolveRequiredScopes(channelType, configValues);
   const [expanded, setExpanded] = useState(false);
+  const description = t(`scopes.${channelType}.description`, {
+    defaultValue: t("scopes.description"),
+  });
+  const publishReminder = t(`scopes.${channelType}.publishReminder`, {
+    defaultValue: t("scopes.publishReminder"),
+  });
 
   if (!scopes || scopes.length === 0) return null;
 
@@ -30,7 +37,7 @@ export function ChannelScopesInfo({ channelType }: ChannelScopesInfoProps) {
       {expanded && (
         <div className="px-3 pb-3 space-y-2">
           <p className="text-xs text-amber-700 dark:text-amber-300">
-            {t("scopes.description")}
+            {description}
           </p>
           <div className="space-y-0.5">
             {scopes.map((s) => (
@@ -45,7 +52,7 @@ export function ChannelScopesInfo({ channelType }: ChannelScopesInfoProps) {
             ))}
           </div>
           <p className="text-xs text-amber-600 dark:text-amber-400 pt-1">
-            {t("scopes.publishReminder")}
+            {publishReminder}
           </p>
         </div>
       )}

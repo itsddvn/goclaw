@@ -100,3 +100,28 @@ func (s *PGContactStore) ResolveTenantUserID(ctx context.Context, channelType, s
 	}
 	return tenantUserID, nil
 }
+
+// ResolveContactID returns the exact user Contact for a channel sender without
+// following merged_id. Topic/group rows cannot become workstation principals.
+func (s *PGContactStore) ResolveContactID(ctx context.Context, channelType, senderID string) (uuid.UUID, error) {
+	tid := store.TenantIDFromContext(ctx)
+	if tid == uuid.Nil || channelType == "" || senderID == "" {
+		return uuid.Nil, nil
+	}
+
+	var contactID uuid.UUID
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id
+		 FROM channel_contacts
+		 WHERE tenant_id = $1 AND channel_type = $2 AND sender_id = $3
+		   AND contact_type = 'user'
+		 ORDER BY CASE WHEN COALESCE(thread_id, '') = '' THEN 0 ELSE 1 END,
+		          last_seen_at DESC
+		 LIMIT 1`,
+		tid, channelType, senderID,
+	).Scan(&contactID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, nil
+	}
+	return contactID, err
+}

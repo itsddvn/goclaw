@@ -80,6 +80,10 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 			ctx = store.WithCredentialUserID(ctx, credUserID)
 		}
 	}
+	// Workstation access is granted to an exact Contact. In groups this is the
+	// actual sender and never the shared group or merged tenant-user identity.
+	workstationContactID := l.resolveWorkstationContactID(ctx, *req)
+	ctx = store.WithWorkstationContactID(ctx, workstationContactID)
 	// Inject agent type into context for interceptor routing
 	if l.agentType != "" {
 		ctx = store.WithAgentType(ctx, l.agentType)
@@ -438,42 +442,44 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 		tenantAllowedPaths = nil
 	}
 	rc := &store.RunContext{
-		AgentID:             l.agentUUID,
-		AgentKey:            l.id,
-		TenantID:            l.tenantID,
-		UserID:              req.UserID,
-		RunID:               req.RunID,
-		SessionKey:          req.SessionKey,
-		CredentialUserID:    credUserID,
-		AgentType:           l.agentType,
-		SenderID:            req.SenderID,
-		SelfEvolve:          l.selfEvolve,
-		SharedMemory:        store.IsSharedMemory(ctx),
-		SharedKG:            store.IsSharedKG(ctx),
-		SharedSessions:      store.IsSharedSessions(ctx),
-		SharedContext:       store.IsSharedContext(ctx),
-		RestrictToWorkspace: l.restrictToWs != nil && *l.restrictToWs,
-		BuiltinToolSettings: l.builtinToolSettings,
-		Channel:             req.Channel,
-		ChannelType:         req.ChannelType,
-		SubagentsCfg:        l.subagentsCfg,
-		ParentModel:         l.model,
-		ParentProvider:      providerName,
-		MemoryCfg:           l.memoryCfg,
-		SandboxCfg:          l.sandboxCfg,
-		WaitToolCfg:         waitToolCfg,
-		ShellDenyGroups:     l.shellDenyGroups,
-		Workspace:           tools.ToolWorkspaceFromCtx(ctx),
-		TeamWorkspace:       tools.ToolTeamWorkspaceFromCtx(ctx),
-		TeamID:              tools.ToolTeamIDFromCtx(ctx),
-		WorkspaceChannel:    req.WorkspaceChannel,
-		WorkspaceChatID:     effectiveWorkspaceChatID,
-		TeamIsolated:        resolvedTeamSettings != nil && !tools.IsSharedWorkspace(resolvedTeamSettings),
-		TeamTaskID:          req.TeamTaskID,
-		DelegationID:        req.DelegationID,
-		LeaderAgentID:       tools.LeaderAgentIDFromCtx(ctx),
-		AgentToolKey:        l.id,
-		TenantAllowedPaths:  tenantAllowedPaths,
+		AgentID:                    l.agentUUID,
+		AgentKey:                   l.id,
+		TenantID:                   l.tenantID,
+		UserID:                     req.UserID,
+		RunID:                      req.RunID,
+		SessionKey:                 req.SessionKey,
+		CredentialUserID:           credUserID,
+		WorkstationContactID:       workstationContactID,
+		WorkstationContactResolved: true,
+		AgentType:                  l.agentType,
+		SenderID:                   req.SenderID,
+		SelfEvolve:                 l.selfEvolve,
+		SharedMemory:               store.IsSharedMemory(ctx),
+		SharedKG:                   store.IsSharedKG(ctx),
+		SharedSessions:             store.IsSharedSessions(ctx),
+		SharedContext:              store.IsSharedContext(ctx),
+		RestrictToWorkspace:        l.restrictToWs != nil && *l.restrictToWs,
+		BuiltinToolSettings:        l.builtinToolSettings,
+		Channel:                    req.Channel,
+		ChannelType:                req.ChannelType,
+		SubagentsCfg:               l.subagentsCfg,
+		ParentModel:                l.model,
+		ParentProvider:             providerName,
+		MemoryCfg:                  l.memoryCfg,
+		SandboxCfg:                 l.sandboxCfg,
+		WaitToolCfg:                waitToolCfg,
+		ShellDenyGroups:            l.shellDenyGroups,
+		Workspace:                  tools.ToolWorkspaceFromCtx(ctx),
+		TeamWorkspace:              tools.ToolTeamWorkspaceFromCtx(ctx),
+		TeamID:                     tools.ToolTeamIDFromCtx(ctx),
+		WorkspaceChannel:           req.WorkspaceChannel,
+		WorkspaceChatID:            effectiveWorkspaceChatID,
+		TeamIsolated:               resolvedTeamSettings != nil && !tools.IsSharedWorkspace(resolvedTeamSettings),
+		TeamTaskID:                 req.TeamTaskID,
+		DelegationID:               req.DelegationID,
+		LeaderAgentID:              tools.LeaderAgentIDFromCtx(ctx),
+		AgentToolKey:               l.id,
+		TenantAllowedPaths:         tenantAllowedPaths,
 	}
 	ctx = store.WithRunContext(ctx, rc)
 

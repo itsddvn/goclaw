@@ -66,7 +66,7 @@
     "selectAgent": "Chọn agent",
     "credentials": "Thông tin xác thực",
     "credentialsHint": "(để trống để giữ giá trị hiện tại)",
-    "credentialsEncrypted": "Được mã hóa phía máy chủ. Không bao giờ trả về trong phản hồi API.",
+    "credentialsEncrypted": "Giá trị thông tin xác thực được che trong phản hồi API. Mã hóa dữ liệu lưu trữ cần GOCLAW_ENCRYPTION_KEY (quy trình thiết lập tiêu chuẩn sẽ tạo khóa này).",
     "configuration": "Cấu hình",
     "enabled": "Bật",
     "cancel": "Hủy",
@@ -317,6 +317,59 @@
     }
   },
   "fieldConfig": {
+    "facebook": {
+      "page_access_token": {
+        "label": "Page Access Token",
+        "help": "Trong Meta App Dashboard, vào Customize “Engage with customers on Messenger” → Messenger API Setup → Generate access tokens → Connect. Bạn cũng có thể lấy Page token từ /me/accounts."
+      },
+      "app_secret": {
+        "label": "App Secret",
+        "help": "Lấy tại Meta App Dashboard → App settings/Settings → Basic → App Secret. GoClaw dùng giá trị này để xác minh X-Hub-Signature-256."
+      },
+      "verify_token": {
+        "label": "Webhook Verify Token",
+        "help": "Đây là giá trị ngẫu nhiên do bạn chọn, không phải do Meta cấp. Tạo trong GoClaw rồi dán đúng cùng giá trị vào Messenger API Setup → Configure webhooks → Verify token."
+      },
+      "page_id": {
+        "label": "Page ID",
+        "help": "ID dạng số của Facebook Page từ Page đã kết nối hoặc phản hồi /me/accounts. Đây không phải ID theo phạm vi người dùng (PSID)."
+      },
+      "features": {
+        "comment_reply": {
+          "label": "Tự động trả lời bình luận",
+          "help": "Trả lời bình luận trên Page qua agent đã chọn. Cần trường webhook feed và các quyền cho bình luận."
+        },
+        "messenger_auto_reply": {
+          "label": "Tự động trả lời Messenger",
+          "help": "Phải bật để tin nhắn đến Page được chuyển tới agent đã chọn. Khi tắt, GoClaw bỏ qua sự kiện hộp thư Messenger."
+        },
+        "first_inbox": {
+          "label": "Tin nhắn riêng đầu tiên",
+          "help": "Sau khi trả lời bình luận thành công, gửi một tin nhắn riêng cho mỗi người bình luận trong mỗi tiến trình GoClaw đang chạy. Dữ liệu trong bộ nhớ này bị đặt lại khi tiến trình khởi động lại; lần gửi lỗi có thể thử lại ở bình luận sau.",
+          "disabledHint": "Cần bật Tự động trả lời bình luận. Tính năng không có hiệu lực khi trả lời bình luận đang tắt."
+        }
+      },
+      "comment_reply_options": {
+        "include_post_context": {
+          "label": "Kèm ngữ cảnh bài viết",
+          "help": "Lấy nội dung bài viết gốc để cung cấp ngữ cảnh khi trả lời bình luận."
+        },
+        "max_thread_depth": {
+          "label": "Độ sâu luồng tối đa"
+        }
+      },
+      "post_context_cache_ttl": {
+        "label": "TTL bộ nhớ đệm bài viết"
+      },
+      "first_inbox_message": {
+        "label": "Nội dung tin nhắn riêng đầu tiên",
+        "help": "Tin nhắn riêng tùy chỉnh gửi cho người bình luận lần đầu. Hãy đặt theo ngôn ngữ của Page; để trống sẽ dùng nội dung mặc định của runtime."
+      },
+      "allow_from": {
+        "label": "Người dùng được phép",
+        "help": "ID người dùng Facebook được phép tương tác; để trống nếu không dùng danh sách cho phép."
+      }
+    },
     "token": {
       "label": "Bot Token",
       "help": "Từ @BotFather"
@@ -738,10 +791,73 @@
     "missingCredentialsHeadline": "Điền thông tin xác thực bắt buộc",
     "missingCredentialsHint": "Mở phần thông tin xác thực và điền các giá trị còn thiếu hoặc không hợp lệ cho channel này."
   },
+  "facebook": {
+    "setupGuide": {
+      "title": "Kết nối Facebook Page",
+      "intro": "Thực hiện theo luồng use case Messenger hiện tại của Meta. Giữ token đã tạo cho đến khi cùng một giá trị được lưu trong cả GoClaw và Meta.",
+      "steps": {
+        "connectTitle": "Kết nối Page và tạo token của Page.",
+        "connectDescription": "Chọn đúng Page có Page ID dạng số mà bạn sẽ nhập bên dưới; token phải là Page Access Token.",
+        "secretTitle": "Sao chép App Secret.",
+        "secretDescription": "Tìm tại App settings/Settings → Basic. Không dùng App Access Token.",
+        "verifyTitle": "Tạo Verify Token trong GoClaw.",
+        "verifyDescription": "Token này do người vận hành tạo, không phải do Meta cấp. Hãy sao chép trước khi đóng biểu mẫu.",
+        "saveTitle": "Tạo hoặc cập nhật phiên bản GoClaw.",
+        "saveDescription": "Bước này lưu thông tin xác thực của Page và kích hoạt callback cố định.",
+        "webhookTitle": "Cấu hình callback trong Meta.",
+        "webhookDescription": "Trong đăng ký webhook của Page, chọn các trường cấp ứng dụng",
+        "webhookComments": "khi bật Tự động trả lời bình luận, thêm"
+      },
+      "paths": {
+        "currentLabel": "Đường dẫn dashboard hiện tại",
+        "current": "Customize “Engage with customers on Messenger” → Messenger API Setup → Generate access tokens / Configure webhooks.",
+        "legacyLabel": "Đường dẫn dashboard cũ",
+        "legacy": "Messenger → Settings → Access Tokens / Webhooks."
+      },
+      "callback": {
+        "label": "Callback URL",
+        "ready": "HTTPS công khai",
+        "notReady": "Meta không thể truy cập",
+        "warningTitle": "Mở GoClaw qua URL HTTPS công khai",
+        "warningDescription": "Origin hiện tại là cục bộ, riêng tư hoặc không dùng HTTPS. Hãy mở lại Web UI bằng địa chỉ HTTPS công khai mà Meta có thể truy cập, rồi sao chép callback hiển thị tại đó. Cảnh báo này không chặn việc lưu biểu mẫu."
+      },
+      "verifyToken": {
+        "label": "Verify Token đã tạo",
+        "description": "Dùng 32 byte ngẫu nhiên mật mã trong trình duyệt này. Việc tạo token sẽ thay thế trường Verify Token bên dưới; token không được lưu ngoài lần gửi biểu mẫu thông thường.",
+        "placeholder": "Tạo token để điền vào trường thông tin xác thực",
+        "error": "Web Crypto không khả dụng nên GoClaw không thể tạo token an toàn trong trình duyệt này. Hãy dùng trình duyệt hiện đại và thử lại."
+      },
+      "actions": {
+        "copyCallback": "Sao chép callback",
+        "generateToken": "Tạo token",
+        "regenerateToken": "Tạo lại token",
+        "copyToken": "Sao chép token",
+        "copied": "Đã sao chép"
+      },
+      "permissions": {
+        "messengerTitle": "Quyền Messenger/Page",
+        "useCasePrefix": "Use case Messenger cũng đánh dấu các quyền sau là bắt buộc:",
+        "commentsTitle": "Chỉ dành cho Tự động trả lời bình luận",
+        "commentsDescription": "Các quyền này và trường webhook feed chỉ cần khi dùng tính năng bình luận.",
+        "accessReview": "Người tạo Page token phải có nhiệm vụ hoặc vai trò trên Page đã được chấp nhận. Khi thử nghiệm với người có vai trò trên app/Page có thể dùng quyền truy cập tiêu chuẩn; phục vụ khách hàng không có vai trò cần Business Verification, Advanced Access cho các quyền và App Review."
+      },
+      "messengerRequired": "Phải bật Tự động trả lời Messenger bên dưới, nếu không tin nhắn đến Page sẽ không tới agent đã chọn.",
+      "links": {
+        "label": "Tài liệu Meta chính thức",
+        "useCase": "Use case Messenger",
+        "getStarted": "Bắt đầu",
+        "webhooks": "Webhook"
+      }
+    }
+  },
   "scopes": {
     "title": "Quyền API cần thiết",
-    "description": "Ứng dụng Lark/Feishu cần bật các scope này trong Developer Console. Publish phiên bản mới sau khi thêm quyền.",
-    "publishReminder": "Sau khi thêm scope, đặt Contact Range thành \"All members\" và publish phiên bản mới để thay đổi có hiệu lực."
+    "description": "Bật các scope hoặc quyền này trong developer console của nền tảng. Xem hướng dẫn thiết lập channel để biết yêu cầu về cấp truy cập và xét duyệt.",
+    "publishReminder": "Publish hoặc áp dụng thay đổi quyền theo yêu cầu. Với Lark/Feishu, đặt Contact Range thành \"All members\" và publish phiên bản ứng dụng mới.",
+    "facebook": {
+      "description": "Bật các quyền này trong Meta App Dashboard. Quyền cho bình luận chỉ xuất hiện khi bật Tự động trả lời bình luận.",
+      "publishReminder": "Để phục vụ người dùng production không có vai trò trên app/Page, hãy hoàn tất Business Verification, yêu cầu Advanced Access cho các quyền, vượt qua App Review rồi publish ứng dụng."
+    }
   },
   "toast": {
     "created": "Đã tạo channel",

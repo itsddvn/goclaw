@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+var allowedBinaryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+\-]*\*?$`)
 
 // blockedEnvKeys is the set of environment variable names that are always rejected.
 // These can be used for privilege escalation, path hijacking, or leaking GoClaw internals.
@@ -35,9 +38,9 @@ type allowlistEntry struct {
 
 // AllowlistChecker validates exec requests against a per-workstation binary allowlist.
 // Architecture:
-//   - C1 fix: argv-exec model — cmd is the binary name (argv[0]), not a shell command string.
-//     Shell injection is impossible because the SSH backend never invokes sh -c.
-//   - C2 fix: NFKC normalization applied to cmd and each arg before any check.
+//   - Structured input: cmd is the binary name (argv[0]), not a shell command string.
+//     SSH safely quotes each element because its wire protocol accepts one command string.
+//   - NFKC normalization is applied to cmd and each arg before any check.
 //   - Default-deny: if no enabled pattern matches cmd's binary name → deny.
 //   - Cache: allowlist loaded from DB with configurable TTL (default 30s).
 //     Event-driven invalidation via Invalidate() called on permission changes.
@@ -47,15 +50,19 @@ type AllowlistChecker struct {
 
 	mu    sync.Mutex
 	cache map[uuid.UUID]*allowlistEntry // keyed by workstation ID
+	// generations prevents an in-flight DB load from repopulating a cache entry
+	// after a synchronous permission mutation invalidated it.
+	generations map[uuid.UUID]uint64
 }
 
 // NewAllowlistChecker creates an AllowlistChecker with the given store and cache TTL.
 // Typical TTL: 30s (balances freshness vs. DB load).
 func NewAllowlistChecker(permStore store.WorkstationPermissionStore, cacheTTL time.Duration) *AllowlistChecker {
 	return &AllowlistChecker{
-		permStore: permStore,
-		cacheTTL:  cacheTTL,
-		cache:     make(map[uuid.UUID]*allowlistEntry),
+		permStore:   permStore,
+		cacheTTL:    cacheTTL,
+		cache:       make(map[uuid.UUID]*allowlistEntry),
+		generations: make(map[uuid.UUID]uint64),
 	}
 }
 
@@ -63,6 +70,10 @@ func NewAllowlistChecker(permStore store.WorkstationPermissionStore, cacheTTL ti
 // Call this when permissions are added, removed, or toggled for that workstation.
 func (c *AllowlistChecker) Invalidate(workstationID uuid.UUID) {
 	c.mu.Lock()
+	if c.generations == nil {
+		c.generations = make(map[uuid.UUID]uint64)
+	}
+	c.generations[workstationID]++
 	delete(c.cache, workstationID)
 	c.mu.Unlock()
 }
@@ -85,7 +96,7 @@ func (c *AllowlistChecker) Check(
 	locale := store.LocaleFromContext(ctx)
 
 	// ── Step 1: NFKC normalize ───────────────────────────────────────────────
-	// C2 fix: must happen before ANY matching or byte-level validation.
+	// Normalization must happen before matching or byte-level validation.
 	cmd = NormalizeCmd(cmd)
 	for i, a := range args {
 		args[i] = NormalizeCmd(a)
@@ -160,10 +171,9 @@ func (c *AllowlistChecker) CheckEnv(ctx context.Context, ws *store.Workstation, 
 //   - Prefix glob:   "python*" matches "python3", "python3.11", "python"
 //   - No catch-all:  "*" alone is rejected as too permissive — returns false
 //
-// This is intentionally simple. Matching only the binary name is safe because:
-//   - Shell injection requires a shell; the SSH backend uses argv exec (no sh -c).
-//   - Argument validation is the remote shell's / OS's responsibility once the
-//     binary is allowed.
+// This is intentionally executable-level policy. The SSH backend shell-quotes
+// every structured element, while an explicitly allowed interpreter or shell
+// remains as powerful as that executable normally is.
 func MatchAllowedBinary(pattern, binaryName string) bool {
 	// Reject the lone wildcard — it would allow everything including shells.
 	if pattern == "*" {
@@ -179,6 +189,22 @@ func MatchAllowedBinary(pattern, binaryName string) bool {
 		return prefix != "" && strings.HasPrefix(binaryName, prefix)
 	}
 	return false
+}
+
+// ValidateAllowedBinaryPattern accepts an exact executable name or one trailing
+// prefix wildcard. Paths, whitespace, shell operators and catch-all patterns are
+// rejected because permissions apply to argv[0], never to a shell command line.
+func ValidateAllowedBinaryPattern(pattern string) error {
+	if pattern == "" {
+		return errors.New("pattern is required")
+	}
+	if pattern != strings.TrimSpace(pattern) || len(pattern) > 255 {
+		return errors.New("pattern must be a trimmed executable name up to 255 bytes")
+	}
+	if pattern == "*" || !allowedBinaryPattern.MatchString(pattern) {
+		return errors.New("pattern must be an executable name with an optional trailing wildcard")
+	}
+	return nil
 }
 
 // isBlockedEnvKey returns true if the (NFKC-normalized) key should be rejected.
@@ -203,36 +229,49 @@ func validateLauncherArgs(binaryName string, args []string) string {
 // loadAllowlist returns the enabled binary name patterns for workstationID.
 // Results are cached for cacheTTL; evicted by Invalidate().
 func (c *AllowlistChecker) loadAllowlist(ctx context.Context, workstationID uuid.UUID) ([]string, error) {
-	c.mu.Lock()
-	entry, ok := c.cache[workstationID]
-	if ok && time.Since(entry.fetchedAt) < c.cacheTTL {
-		patterns := entry.patterns
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		c.mu.Lock()
+		entry, ok := c.cache[workstationID]
+		if ok && time.Since(entry.fetchedAt) < c.cacheTTL {
+			patterns := entry.patterns
+			c.mu.Unlock()
+			return patterns, nil
+		}
+		generation := c.generations[workstationID]
 		c.mu.Unlock()
+
+		// Fetch from DB outside the lock. If a mutation invalidates this
+		// workstation while the query is running, discard the stale result and
+		// load again against the new generation.
+		perms, err := c.permStore.ListForWorkstation(ctx, workstationID)
+		if err != nil {
+			return nil, err
+		}
+
+		patterns := make([]string, 0, len(perms))
+		for _, p := range perms {
+			if p.Enabled {
+				patterns = append(patterns, p.Pattern)
+			}
+		}
+
+		c.mu.Lock()
+		if c.generations[workstationID] != generation {
+			c.mu.Unlock()
+			continue
+		}
+		c.cache[workstationID] = &allowlistEntry{
+			patterns:  patterns,
+			fetchedAt: time.Now(),
+		}
+		c.mu.Unlock()
+
 		return patterns, nil
 	}
-	c.mu.Unlock()
-
-	// Fetch from DB (outside lock to avoid holding lock during I/O).
-	perms, err := c.permStore.ListForWorkstation(ctx, workstationID)
-	if err != nil {
-		return nil, err
-	}
-
-	var patterns []string
-	for _, p := range perms {
-		if p.Enabled {
-			patterns = append(patterns, p.Pattern)
-		}
-	}
-
-	c.mu.Lock()
-	c.cache[workstationID] = &allowlistEntry{
-		patterns:  patterns,
-		fetchedAt: time.Now(),
-	}
-	c.mu.Unlock()
-
-	return patterns, nil
 }
 
 // auditDeny emits a structured security log entry on every deny.

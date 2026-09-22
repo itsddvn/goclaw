@@ -5,24 +5,31 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/workstation"
+	workstationsecurity "github.com/nextlevelbuilder/goclaw/internal/workstation/security"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 // WorkstationsMethods handles workstations.* RPC methods over WebSocket.
 // Routes are only registered when !edition.IsLite() — callers must gate at registration.
 type WorkstationsMethods struct {
-	wsStore       store.WorkstationStore
-	linkStore     store.AgentWorkstationLinkStore
-	permStore     store.WorkstationPermissionStore     // may be nil if Phase 6 not wired
-	activityStore store.WorkstationActivityStore       // may be nil if Phase 7 not wired
+	wsStore               store.WorkstationStore
+	linkStore             store.AgentWorkstationLinkStore
+	permStore             store.WorkstationPermissionStore // optional; methods fail closed when absent
+	activityStore         store.WorkstationActivityStore   // optional activity audit store
+	contactGrantStore     store.WorkstationContactGrantStore
+	eventBus              eventbus.DomainEventBus
+	invalidateBackend     func(uuid.UUID)
+	invalidatePermissions func(uuid.UUID)
 }
 
 // NewWorkstationsMethods creates WorkstationsMethods with the given stores.
@@ -35,9 +42,27 @@ func (m *WorkstationsMethods) SetPermStore(ps store.WorkstationPermissionStore) 
 	m.permStore = ps
 }
 
-// SetActivityStore wires the activity store for audit log methods (Phase 7).
+// SetActivityStore wires the activity store for audit log methods.
 func (m *WorkstationsMethods) SetActivityStore(as store.WorkstationActivityStore) {
 	m.activityStore = as
+}
+
+func (m *WorkstationsMethods) SetContactGrantStore(s store.WorkstationContactGrantStore) {
+	m.contactGrantStore = s
+}
+
+func (m *WorkstationsMethods) SetEventBus(bus eventbus.DomainEventBus) {
+	m.eventBus = bus
+}
+
+// SetCacheInvalidators wires the runtime caches that must be synchronously
+// evicted before a successful admin mutation is acknowledged.
+func (m *WorkstationsMethods) SetCacheInvalidators(
+	backend func(uuid.UUID),
+	permissions func(uuid.UUID),
+) {
+	m.invalidateBackend = backend
+	m.invalidatePermissions = permissions
 }
 
 // Register wires the workstations.* methods onto the router.
@@ -51,12 +76,15 @@ func (m *WorkstationsMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodWorkstationsTest, m.adminOnly(m.handleTestConnection))
 	router.Register(protocol.MethodWorkstationsLinkAgent, m.adminOnly(m.handleLinkAgent))
 	router.Register(protocol.MethodWorkstationsUnlinkAgent, m.adminOnly(m.handleUnlinkAgent))
-	// Phase 6: permission allowlist CRUD
+	router.Register(protocol.MethodWorkstationsContactGrantList, m.adminOnly(m.handleContactGrantList))
+	router.Register(protocol.MethodWorkstationsContactGrant, m.adminOnly(m.handleContactGrant))
+	router.Register(protocol.MethodWorkstationsContactRevoke, m.adminOnly(m.handleContactRevoke))
+	// Permission allowlist CRUD.
 	router.Register(protocol.MethodWorkstationsPermList, m.adminOnly(m.handlePermList))
 	router.Register(protocol.MethodWorkstationsPermAdd, m.adminOnly(m.handlePermAdd))
 	router.Register(protocol.MethodWorkstationsPermRemove, m.adminOnly(m.handlePermRemove))
 	router.Register(protocol.MethodWorkstationsPermToggle, m.adminOnly(m.handlePermToggle))
-	// Phase 7: activity audit log
+	// Activity audit log.
 	router.Register(protocol.MethodWorkstationsListActivity, m.adminOnly(m.handleListActivity))
 }
 
@@ -91,7 +119,8 @@ func (m *WorkstationsMethods) handleList(ctx context.Context, client *gateway.Cl
 func (m *WorkstationsMethods) handleGet(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	locale := store.LocaleFromContext(ctx)
 	var params struct {
-		ID string `json:"id"`
+		ID            string `json:"id"`
+		WorkstationID string `json:"workstationId"`
 	}
 	if req.Params != nil {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -122,13 +151,13 @@ func (m *WorkstationsMethods) handleGet(ctx context.Context, client *gateway.Cli
 func (m *WorkstationsMethods) handleCreate(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	locale := store.LocaleFromContext(ctx)
 	var params struct {
-		WorkstationKey string                     `json:"workstationKey"`
-		Name           string                     `json:"name"`
-		BackendType    store.WorkstationBackend   `json:"backendType"`
-		Metadata       json.RawMessage            `json:"metadata"`
-		DefaultCWD     string                     `json:"defaultCwd"`
-		DefaultEnv     json.RawMessage            `json:"defaultEnv"`
-		CreatedBy      string                     `json:"createdBy"`
+		WorkstationKey string                   `json:"workstationKey"`
+		Name           string                   `json:"name"`
+		BackendType    store.WorkstationBackend `json:"backendType"`
+		Metadata       json.RawMessage          `json:"metadata"`
+		DefaultCWD     string                   `json:"defaultCwd"`
+		DefaultEnv     json.RawMessage          `json:"defaultEnv"`
+		CreatedBy      string                   `json:"createdBy"`
 	}
 	if req.Params != nil {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -184,8 +213,8 @@ func (m *WorkstationsMethods) handleCreate(ctx context.Context, client *gateway.
 func (m *WorkstationsMethods) handleUpdate(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	locale := store.LocaleFromContext(ctx)
 	var params struct {
-		ID      string         `json:"id"`
-		Updates map[string]any `json:"updates"`
+		ID      string                  `json:"id"`
+		Updates workstation.AdminUpdate `json:"updates"`
 	}
 	if req.Params != nil {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -199,43 +228,39 @@ func (m *WorkstationsMethods) handleUpdate(ctx context.Context, client *gateway.
 			i18n.T(locale, i18n.MsgInvalidID, "workstation")))
 		return
 	}
-	if len(params.Updates) == 0 {
-		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
-			i18n.T(locale, i18n.MsgNoUpdatesProvided)))
+	current, err := m.wsStore.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound,
+				i18n.T(locale, i18n.MsgWorkstationNotFound, params.ID)))
+			return
+		}
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgInternalError, err.Error())))
 		return
 	}
-	// I2 fix: validate metadata shape when metadata is being updated.
-	// Fetch current workstation to obtain backend_type for validation.
-	if _, hasMetadata := params.Updates["metadata"]; hasMetadata {
-		current, err := m.wsStore.GetByID(ctx, id)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound,
-					i18n.T(locale, i18n.MsgWorkstationNotFound, params.ID)))
-				return
-			}
-			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
-				i18n.T(locale, i18n.MsgInternalError, err.Error())))
-			return
-		}
-		metaBytes, err := json.Marshal(params.Updates["metadata"])
-		if err != nil {
-			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
-				i18n.T(locale, i18n.MsgInvalidMetadataShape, string(current.BackendType), err.Error())))
-			return
-		}
-		if err := store.ValidateMetadata(current.BackendType, metaBytes); err != nil {
-			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
-				i18n.T(locale, i18n.MsgInvalidMetadataShape, string(current.BackendType), err.Error())))
-			return
-		}
+	updates, err := workstation.BuildAdminUpdates(current, params.Updates)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
+			i18n.T(locale, i18n.MsgInvalidRequest, err.Error())))
+		return
 	}
-	if err := m.wsStore.Update(ctx, id, params.Updates); err != nil {
+	if err := m.wsStore.Update(ctx, id, updates); err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
 			i18n.T(locale, i18n.MsgFailedToUpdate, "workstation", err.Error())))
 		return
 	}
-	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"id": id}))
+	if m.invalidateBackend != nil {
+		m.invalidateBackend(id)
+	}
+	m.publishWorkstationEvent(ctx, eventbus.EventWorkstationUpdated, id)
+	updated, err := m.wsStore.GetByID(ctx, id)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgInternalError, err.Error())))
+		return
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"workstation": updated.SanitizedView()}))
 }
 
 func (m *WorkstationsMethods) handleDelete(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -260,14 +285,56 @@ func (m *WorkstationsMethods) handleDelete(ctx context.Context, client *gateway.
 			i18n.T(locale, i18n.MsgFailedToDelete, "workstation", err.Error())))
 		return
 	}
+	if m.invalidateBackend != nil {
+		m.invalidateBackend(id)
+	}
+	m.publishWorkstationEvent(ctx, eventbus.EventWorkstationDeleted, id)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"id": id}))
 }
 
-// handleTestConnection is a stub — real implementation in Phase 2/3.
 func (m *WorkstationsMethods) handleTestConnection(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	locale := store.LocaleFromContext(ctx)
-	client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotImplemented,
-		i18n.T(locale, i18n.MsgNotImplemented, "workstations.testConnection")))
+	var params struct {
+		ID string `json:"id"`
+	}
+	if req.Params != nil {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "invalid params"))
+			return
+		}
+	}
+	id, err := uuid.Parse(params.ID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
+			i18n.T(locale, i18n.MsgInvalidID, "workstation")))
+		return
+	}
+	ws, err := m.wsStore.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrNotFound,
+				i18n.T(locale, i18n.MsgWorkstationNotFound, params.ID)))
+			return
+		}
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgInternalError, err.Error())))
+		return
+	}
+	backend, err := workstation.Open(ws)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgWorkstationConnectionFailed, err.Error())))
+		return
+	}
+	defer func() { _ = backend.Close() }()
+	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := backend.HealthCheck(testCtx); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgWorkstationConnectionFailed, err.Error())))
+		return
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"ok": true}))
 }
 
 func (m *WorkstationsMethods) handleLinkAgent(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -340,7 +407,7 @@ func (m *WorkstationsMethods) handleUnlinkAgent(ctx context.Context, client *gat
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"unlinked": true}))
 }
 
-// --- Phase 6: workstation permission allowlist CRUD ---
+// --- Workstation permission allowlist CRUD ---
 
 func (m *WorkstationsMethods) requirePermStore(locale string, client *gateway.Client, req *protocol.RequestFrame) bool {
 	if m.permStore == nil {
@@ -413,7 +480,7 @@ func (m *WorkstationsMethods) handlePermAdd(ctx context.Context, client *gateway
 			i18n.T(locale, i18n.MsgInvalidID, "workstation")))
 		return
 	}
-	// I5 fix: verify workstation belongs to caller's tenant before adding permission.
+	// Verify workstation belongs to caller's tenant before adding permission.
 	// GetByID scopes the query by tenant_id in the WHERE clause — returns ErrNoRows if
 	// the workstation exists in a different tenant.
 	if _, err := m.wsStore.GetByID(ctx, wsID); err != nil {
@@ -431,6 +498,11 @@ func (m *WorkstationsMethods) handlePermAdd(ctx context.Context, client *gateway
 			i18n.T(locale, i18n.MsgRequired, "pattern")))
 		return
 	}
+	if err := workstationsecurity.ValidateAllowedBinaryPattern(params.Pattern); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
+			i18n.T(locale, i18n.MsgInvalidRequest, err.Error())))
+		return
+	}
 	perm := &store.WorkstationPermission{
 		WorkstationID: wsID,
 		Pattern:       params.Pattern,
@@ -442,6 +514,10 @@ func (m *WorkstationsMethods) handlePermAdd(ctx context.Context, client *gateway
 			i18n.T(locale, i18n.MsgFailedToCreate, "permission", err.Error())))
 		return
 	}
+	if m.invalidatePermissions != nil {
+		m.invalidatePermissions(wsID)
+	}
+	m.publishWorkstationEvent(ctx, eventbus.EventWorkstationPermChanged, wsID)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"permission": perm}))
 }
 
@@ -451,7 +527,8 @@ func (m *WorkstationsMethods) handlePermRemove(ctx context.Context, client *gate
 		return
 	}
 	var params struct {
-		ID string `json:"id"`
+		ID            string `json:"id"`
+		WorkstationID string `json:"workstationId"`
 	}
 	if req.Params != nil {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -463,6 +540,15 @@ func (m *WorkstationsMethods) handlePermRemove(ctx context.Context, client *gate
 	if err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
 			i18n.T(locale, i18n.MsgInvalidID, "permission")))
+		return
+	}
+	wsID, err := uuid.Parse(params.WorkstationID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
+			i18n.T(locale, i18n.MsgInvalidID, "workstation")))
+		return
+	}
+	if !m.requirePermissionForWorkstation(ctx, client, req, wsID, id) {
 		return
 	}
 	if err := m.permStore.Remove(ctx, id); err != nil {
@@ -475,6 +561,10 @@ func (m *WorkstationsMethods) handlePermRemove(ctx context.Context, client *gate
 			i18n.T(locale, i18n.MsgFailedToDelete, "permission", err.Error())))
 		return
 	}
+	if m.invalidatePermissions != nil {
+		m.invalidatePermissions(wsID)
+	}
+	m.publishWorkstationEvent(ctx, eventbus.EventWorkstationPermChanged, wsID)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"id": id}))
 }
 
@@ -484,8 +574,9 @@ func (m *WorkstationsMethods) handlePermToggle(ctx context.Context, client *gate
 		return
 	}
 	var params struct {
-		ID      string `json:"id"`
-		Enabled bool   `json:"enabled"`
+		ID            string `json:"id"`
+		WorkstationID string `json:"workstationId"`
+		Enabled       bool   `json:"enabled"`
 	}
 	if req.Params != nil {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -499,15 +590,28 @@ func (m *WorkstationsMethods) handlePermToggle(ctx context.Context, client *gate
 			i18n.T(locale, i18n.MsgInvalidID, "permission")))
 		return
 	}
+	wsID, err := uuid.Parse(params.WorkstationID)
+	if err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest,
+			i18n.T(locale, i18n.MsgInvalidID, "workstation")))
+		return
+	}
+	if !m.requirePermissionForWorkstation(ctx, client, req, wsID, id) {
+		return
+	}
 	if err := m.permStore.SetEnabled(ctx, id, params.Enabled); err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInternal,
 			i18n.T(locale, i18n.MsgFailedToUpdate, "permission", err.Error())))
 		return
 	}
+	if m.invalidatePermissions != nil {
+		m.invalidatePermissions(wsID)
+	}
+	m.publishWorkstationEvent(ctx, eventbus.EventWorkstationPermChanged, wsID)
 	client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"id": id, "enabled": params.Enabled}))
 }
 
-// --- Phase 7: activity audit log ---
+// --- Workstation activity audit log ---
 
 func (m *WorkstationsMethods) handleListActivity(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
 	locale := store.LocaleFromContext(ctx)

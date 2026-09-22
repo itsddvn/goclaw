@@ -293,6 +293,35 @@ func TestAbortRunsForSession_ReturnsResults(t *testing.T) {
 	}
 }
 
+func TestAbortAllRuns_CancelsOwnedRunsConcurrently(t *testing.T) {
+	r := NewRouter()
+	runIDs := []string{"run-shutdown-1", "run-shutdown-2", "run-shutdown-3"}
+
+	for _, runID := range runIDs {
+		runCtx, cancel := context.WithCancel(context.Background())
+		r.RegisterRun(context.Background(), runID, "session-"+runID, "agent-1", cancel)
+		go func() {
+			<-runCtx.Done()
+			r.UnregisterRun(runID)
+		}()
+	}
+
+	results := r.AbortAllRuns()
+	if len(results) != len(runIDs) {
+		t.Fatalf("AbortAllRuns returned %d results, want %d", len(results), len(runIDs))
+	}
+	for _, result := range results {
+		if !result.Stopped {
+			t.Fatalf("run %q was not stopped: %+v", result.RunID, result)
+		}
+	}
+	for _, runID := range runIDs {
+		if _, ok := r.activeRuns.Load(runID); ok {
+			t.Fatalf("run %q remains registered after AbortAllRuns", runID)
+		}
+	}
+}
+
 // TestSetRunTraceID verifies SetRunTraceID stores the traceID in the active run.
 func TestSetRunTraceID(t *testing.T) {
 	r := NewRouter()

@@ -123,6 +123,10 @@ func (s *contactRefreshStore) ResolveTenantUserID(context.Context, string, strin
 	return "", nil
 }
 
+func (s *contactRefreshStore) ResolveContactID(context.Context, string, string) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
+
 func TestRefreshContactCacheStoresDiscordChannelTitles(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

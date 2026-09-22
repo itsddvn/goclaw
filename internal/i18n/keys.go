@@ -209,10 +209,10 @@ const (
 	MsgFailedToDeleteFile    = "error.failed_to_delete_file"    // "failed to delete"
 
 	// --- OAuth ---
-	MsgNoPendingOAuth        = "error.no_pending_oauth"        // "no pending OAuth flow"
-	MsgFailedToSaveToken     = "error.failed_to_save_token"    // "failed to save token"
-	MsgOAuthCallbackSuccess  = "oauth.callback_success"        // "Authorization successful. You may close this window."
-	MsgOAuthCallbackFailed   = "oauth.callback_failed"         // "Authorization failed. You may close this window."
+	MsgNoPendingOAuth       = "error.no_pending_oauth"     // "no pending OAuth flow"
+	MsgFailedToSaveToken    = "error.failed_to_save_token" // "failed to save token"
+	MsgOAuthCallbackSuccess = "oauth.callback_success"     // "Authorization successful. You may close this window."
+	MsgOAuthCallbackFailed  = "oauth.callback_failed"      // "Authorization failed. You may close this window."
 
 	// --- Intent Classify (channel-facing status replies) ---
 	MsgStatusWorking       = "status.working"         // "🔄 I'm working on your request... Please wait."
@@ -340,14 +340,21 @@ const (
 	MsgWorkstationActionDeny    = "ui.workstations.activity.action_deny" // "Denied"
 
 	// --- Workstation ---
-	MsgWorkstationNotFound     = "error.workstation_not_found"     // "workstation not found: %s"
-	MsgWorkstationKeyExists    = "error.workstation_key_exists"    // "workstation key already in use: %s"
-	MsgInvalidBackend          = "error.invalid_backend"           // "invalid backend type: %s (must be ssh|docker)"
-	MsgWorkstationInactive     = "error.workstation_inactive"      // "workstation is inactive: %s"
-	MsgInvalidMetadataShape    = "error.invalid_metadata_shape"    // "invalid metadata for %s backend: %s"
-	MsgWorkstationRequired     = "error.workstation_required"      // "no workstation bound to agent; pass workstation_id"
-	MsgWorkstationAccessDenied = "error.workstation_access_denied" // "agent %s not authorized for workstation %s"
-	MsgBackendNotReady         = "error.backend_not_ready"         // "workstation backend not ready: %s"
+	MsgWorkstationNotFound                   = "error.workstation_not_found"                      // "workstation not found: %s"
+	MsgWorkstationKeyExists                  = "error.workstation_key_exists"                     // "workstation key already in use: %s"
+	MsgInvalidBackend                        = "error.invalid_backend"                            // "invalid backend type: %s (must be ssh|docker)"
+	MsgWorkstationInactive                   = "error.workstation_inactive"                       // "workstation is inactive: %s"
+	MsgInvalidMetadataShape                  = "error.invalid_metadata_shape"                     // "invalid metadata for %s backend: %s"
+	MsgWorkstationRequired                   = "error.workstation_required"                       // "no workstation assigned to agent"
+	MsgWorkstationDefaultRequired            = "error.workstation_default_required"               // "multiple workstations assigned; choose one or set a default"
+	MsgWorkstationAccessCheckFailed          = "error.workstation_access_check_failed"            // "could not verify workstation assignment"
+	MsgWorkstationGrantTargetNotFound        = "error.workstation_grant_target_not_found"         // "agent or workstation not found in tenant"
+	MsgWorkstationContactGrantTargetNotFound = "error.workstation_contact_grant_target_not_found" // "contact or workstation not found in tenant"
+	MsgWorkstationAccessDenied               = "error.workstation_access_denied"                  // "agent %s not authorized for workstation %s"
+	MsgWorkstationContactAccessDenied        = "error.workstation_contact_access_denied"          // "current contact is not authorized for workstation %s"
+	MsgWorkstationContactAccessCheckFailed   = "error.workstation_contact_access_check_failed"    // "could not verify contact access to workstation"
+	MsgWorkstationConnectionFailed           = "error.workstation_connection_failed"              // "workstation connection failed: %s"
+	MsgBackendNotReady                       = "error.backend_not_ready"                          // "workstation backend not ready: %s"
 
 	// --- Hooks ---
 	MsgHookInvalidMatcher          = "hook.invalid_matcher"           // "invalid matcher regex: %s"

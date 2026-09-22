@@ -284,3 +284,48 @@ func TestImageGenToolDef_FunctionNonNil(t *testing.T) {
 		t.Errorf("sentinel Function.Name = %q, want image_generation", imageGenToolDef.Function.Name)
 	}
 }
+
+func TestMakeBuildFilteredToolsRefreshesAfterRegistryMutation(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(&mockExecTool{name: "mcp_lark__task_v2_task_create"})
+
+	loop := &Loop{
+		id:            "test-agent",
+		tools:         registry,
+		maxIterations: 8,
+	}
+	build := loop.makeBuildFilteredTools(&RunRequest{})
+	state := &pipeline.RunState{
+		Input:     &pipeline.RunInput{},
+		Ctx:       context.Background(),
+		Messages:  pipeline.NewMessageBuffer(providers.Message{}),
+		Iteration: 0,
+	}
+
+	defs, err := build(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasToolDefinition(defs, "mcp_lark__task_v2_tasklist_list") {
+		t.Fatal("deferred tool must not be present before activation")
+	}
+
+	registry.Register(&mockExecTool{name: "mcp_lark__task_v2_tasklist_list"})
+	state.Iteration = 1
+	defs, err = build(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasToolDefinition(defs, "mcp_lark__task_v2_tasklist_list") {
+		t.Fatal("registry mutation must invalidate cached tool definitions within the same run")
+	}
+}
+
+func hasToolDefinition(defs []providers.ToolDefinition, name string) bool {
+	for _, def := range defs {
+		if def.Function != nil && def.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}

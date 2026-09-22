@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestNew_RejectsMissingCredentials(t *testing.T) {
 // creds+config JSON and hands off to New.
 func TestFactory_ValidInputsProducesChannel(t *testing.T) {
 	creds := []byte(`{"page_access_token":"tok","app_secret":"sec","verify_token":"vt"}`)
-	cfg := []byte(`{"page_id":"111","features":{"comment_reply":true}}`)
+	cfg := []byte(`{"page_id":"111","features":{"comment_reply":true},"messenger_options":{"session_timeout":"30m"}}`)
 	ch, err := Factory("fb-test", creds, cfg, bus.New(), nil)
 	if err != nil {
 		t.Fatalf("Factory: %v", err)
@@ -111,6 +112,116 @@ func TestWebhookHandler_ReturnsRouteFirstCallOnly(t *testing.T) {
 	path2, h2 := ch.WebhookHandler()
 	if path2 != "" || h2 != nil {
 		t.Errorf("subsequent call should return empty, got %q / %v", path2, h2)
+	}
+}
+
+func TestSubscriptionFields_DerivedDeterministically(t *testing.T) {
+	tests := []struct {
+		name      string
+		messenger bool
+		comments  bool
+		want      []string
+	}{
+		{name: "none"},
+		{name: "messenger", messenger: true, want: []string{"messages", "message_echoes", "messaging_postbacks"}},
+		{name: "comments", comments: true, want: []string{"feed"}},
+		{
+			name: "both", messenger: true, comments: true,
+			want: []string{"messages", "message_echoes", "messaging_postbacks", "feed"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := facebookInstanceConfig{}
+			cfg.Features.MessengerAutoReply = tc.messenger
+			cfg.Features.CommentReply = tc.comments
+			ch := &Channel{config: cfg}
+			got := ch.subscriptionFields()
+			if len(got) != len(tc.want) {
+				t.Fatalf("fields = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("fields = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestStart_SubscriptionFailurePreventsHealthyRegistration(t *testing.T) {
+	globalRouter = &webhookRouter{instances: make(map[string]*Channel)}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"id":"111","name":"Page"}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":200,"message":"missing pages_manage_metadata permission"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	swapGraphBase(t, srv.URL)
+
+	cfg := facebookInstanceConfig{PageID: "111"}
+	cfg.Features.CommentReply = true
+	ch, err := New(cfg, facebookCreds{
+		PageAccessToken: "token",
+		AppSecret:       "secret",
+		VerifyToken:     "verify",
+	}, bus.New(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(ch.stopFn)
+
+	startErr := ch.Start(t.Context())
+	if startErr == nil {
+		t.Fatal("expected subscription startup failure")
+	}
+	if !strings.Contains(startErr.Error(), "Page permissions") {
+		t.Fatalf("startup error lacks permission guidance: %v", startErr)
+	}
+	if ch.IsRunning() {
+		t.Fatal("channel marked running after subscription failure")
+	}
+	globalRouter.mu.RLock()
+	_, registered := globalRouter.instances["111"]
+	globalRouter.mu.RUnlock()
+	if registered {
+		t.Fatal("channel registered after subscription failure")
+	}
+}
+
+func TestStart_NoInboundFeaturesSkipsSubscription(t *testing.T) {
+	globalRouter = &webhookRouter{instances: make(map[string]*Channel)}
+	postCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postCalls++
+			_, _ = w.Write([]byte(`{"success":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"111","name":"Page"}`))
+	}))
+	t.Cleanup(srv.Close)
+	swapGraphBase(t, srv.URL)
+
+	ch, err := New(facebookInstanceConfig{PageID: "111"}, facebookCreds{
+		PageAccessToken: "token",
+		AppSecret:       "secret",
+		VerifyToken:     "verify",
+	}, bus.New(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := ch.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := ch.Stop(t.Context()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if postCalls != 0 {
+		t.Fatalf("subscription POST calls = %d, want 0", postCalls)
 	}
 }
 
@@ -270,7 +381,6 @@ func TestHandleMessagingEvent_ReceiptsDropped(t *testing.T) {
 func TestHandleMessagingEvent_TextAndPostback(t *testing.T) {
 	cfg := facebookInstanceConfig{}
 	cfg.Features.MessengerAutoReply = true
-	cfg.MessengerOptions.SessionTimeout = "15m"
 	ch := newTestChannel(t, "111", cfg)
 
 	// Text message
@@ -565,14 +675,16 @@ func TestStop_ClosesDependencies(t *testing.T) {
 func TestWebhookRouter_RegisterUnregister(t *testing.T) {
 	r := &webhookRouter{instances: make(map[string]*Channel)}
 	ch := &Channel{pageID: "111"}
-	r.register(ch)
+	if err := r.register(ch); err != nil {
+		t.Fatalf("register: %v", err)
+	}
 	r.mu.RLock()
 	_, present := r.instances["111"]
 	r.mu.RUnlock()
 	if !present {
 		t.Error("register did not insert")
 	}
-	r.unregister("111")
+	r.unregister(ch)
 	r.mu.RLock()
 	_, present = r.instances["111"]
 	r.mu.RUnlock()

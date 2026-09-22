@@ -148,14 +148,25 @@ func (l *Loop) buildGroupWriterPrompt(ctx context.Context, groupID, senderID str
 	}
 
 	numericID := strings.SplitN(senderID, "|", 2)[0]
-	isWriter := false
-	var senderLabel string
+	checkCtx := store.WithUserID(ctx, groupID)
+	checkCtx = store.WithAgentID(checkCtx, l.agentUUID)
+	checkCtx = store.WithSenderID(checkCtx, senderID)
+
+	// The roster is display-only. Effective access must use the same
+	// wildcard- and deny-aware check that protects write tools.
+	isWriter := store.CheckFileWriterPermission(checkCtx, l.configPermStore) == nil
+	senderLabel := ""
 	for _, w := range writers {
 		if w.UserID == numericID {
-			isWriter = true
 			senderLabel = channels.WriterLabel(w.Metadata, w.UserID)
 			break
 		}
+	}
+	if senderLabel == "" {
+		senderLabel = channels.SanitizeWriterLabel(store.SenderNameFromContext(ctx))
+	}
+	if senderLabel == "" {
+		senderLabel = "User " + numericID
 	}
 
 	// Build writer display names from metadata JSON. Rows with empty metadata

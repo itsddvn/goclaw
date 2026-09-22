@@ -389,6 +389,11 @@ func (d *gatewayDeps) wireHTTPHandlersOnServer(
 			if d.pgStores.WorkstationActivity != nil {
 				wsH.SetActivityStore(d.pgStores.WorkstationActivity)
 			}
+			if d.pgStores.WorkstationContactGrants != nil {
+				wsH.SetContactGrantStore(d.pgStores.WorkstationContactGrants)
+			}
+			wsH.SetCacheInvalidators(d.workstationBackendInvalidate, d.workstationPermissionInvalidate)
+			wsH.SetEventBus(d.domainBus)
 			d.server.SetWorkstationsHandler(wsH)
 		}
 	}

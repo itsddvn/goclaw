@@ -2174,6 +2174,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_workstation_default
     ON agent_workstation_links(agent_id) WHERE is_default = 1;
 CREATE INDEX IF NOT EXISTS idx_agent_workstation_tenant ON agent_workstation_links(tenant_id);
 
+-- Contacts must be explicitly granted before they can request an agent action
+-- on a workstation. Agent assignment and Contact access are independent.
+CREATE TABLE IF NOT EXISTS workstation_contact_grants (
+    workstation_id TEXT NOT NULL REFERENCES workstations(id) ON DELETE CASCADE,
+    contact_id     TEXT NOT NULL REFERENCES channel_contacts(id) ON DELETE CASCADE,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_by     VARCHAR(255) NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (workstation_id, contact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workstation_contact_grants_contact
+    ON workstation_contact_grants(tenant_id, contact_id, workstation_id);
+CREATE INDEX IF NOT EXISTS idx_workstation_contact_grants_workstation
+    ON workstation_contact_grants(tenant_id, workstation_id);
+
 -- ============================================================
 -- Table: workstation_permissions (migration 000063)
 -- Per-workstation binary allowlist. Default-deny: no matching

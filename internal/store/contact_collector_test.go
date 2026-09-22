@@ -53,6 +53,10 @@ func (m *mockContactStore) ResolveTenantUserID(_ context.Context, _, _ string) (
 	return "", nil
 }
 
+func (m *mockContactStore) ResolveContactID(_ context.Context, _, _ string) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
+
 // Stub methods to satisfy ContactStore interface (not used in these tests).
 func (m *mockContactStore) ListContacts(_ context.Context, _ ContactListOpts) ([]ChannelContact, error) {
 	return nil, nil

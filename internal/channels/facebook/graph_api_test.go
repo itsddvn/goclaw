@@ -72,7 +72,7 @@ func TestVerifyToken_Success(t *testing.T) {
 	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"id":"111","name":"TestPage"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"TestPage"}`))
 	}))
 	if err := g.VerifyToken(context.Background()); err != nil {
 		t.Fatalf("VerifyToken: %v", err)
@@ -108,16 +108,31 @@ func TestVerifyToken_ParseError(t *testing.T) {
 	}
 }
 
+func TestVerifyToken_PageIDMismatch(t *testing.T) {
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"999888777","name":"OtherPage"}`))
+	}))
+	err := g.VerifyToken(context.Background())
+	if err == nil {
+		t.Fatal("expected page_id mismatch error")
+	}
+	if !strings.Contains(err.Error(), "configured page_id") {
+		t.Fatalf("err = %v, want configured page_id context", err)
+	}
+}
+
 // --- SubscribeApp ---
 
 func TestSubscribeApp_Success(t *testing.T) {
-	var gotPath, gotMethod string
+	var gotPath, gotMethod, gotFields string
 	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotMethod = r.Method
+		gotFields = r.URL.Query().Get("subscribed_fields")
 		_, _ = w.Write([]byte(`{"success":true}`))
 	}))
-	if err := g.SubscribeApp(context.Background()); err != nil {
+	fields := []string{"messages", "message_echoes", "messaging_postbacks", "feed"}
+	if err := g.SubscribeApp(context.Background(), fields); err != nil {
 		t.Fatalf("SubscribeApp: %v", err)
 	}
 	if !strings.Contains(gotPath, "/subscribed_apps") {
@@ -125,6 +140,9 @@ func TestSubscribeApp_Success(t *testing.T) {
 	}
 	if gotMethod != http.MethodPost {
 		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotFields != "messages,message_echoes,messaging_postbacks,feed" {
+		t.Errorf("subscribed_fields = %q", gotFields)
 	}
 }
 
@@ -135,12 +153,36 @@ func TestSubscribeApp_InvalidPageID(t *testing.T) {
 		pageAccessToken: "tok",
 		pageID:          "bad id", // space not allowed
 	}
-	err := g.SubscribeApp(context.Background())
+	err := g.SubscribeApp(context.Background(), []string{"feed"})
 	if err == nil {
 		t.Fatal("expected error for invalid pageID, got nil")
 	}
 	if !strings.Contains(err.Error(), "invalid facebook ID") {
 		t.Errorf("err = %v, want ID validation error", err)
+	}
+}
+
+func TestSubscribeApp_SuccessFalse(t *testing.T) {
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":false}`))
+	}))
+	err := g.SubscribeApp(context.Background(), []string{"feed"})
+	if err == nil || !strings.Contains(err.Error(), "success=false") {
+		t.Fatalf("err = %v, want success=false failure", err)
+	}
+}
+
+func TestSubscribeApp_EmptyFieldsSkipsRequest(t *testing.T) {
+	var calls int32
+	g := newFakeGraph(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	if err := g.SubscribeApp(context.Background(), nil); err != nil {
+		t.Fatalf("SubscribeApp empty fields: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("requests = %d, want 0", got)
 	}
 }
 
@@ -354,7 +396,7 @@ func TestDoRequest_500RetriesThenSucceeds(t *testing.T) {
 			_, _ = w.Write([]byte(`{}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"n"}`))
 	}))
 	// Use a long context so backoff sleeps don't exceed the deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -428,7 +470,7 @@ func TestDoRequest_429RetriesWithBackoff(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"code":4,"message":"rate limited"}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111222333","name":"n"}`))
 	}))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -476,7 +518,7 @@ func TestDoRequest_TransportErrorThenSuccess(t *testing.T) {
 			conn.Close()
 			return
 		}
-		_, _ = w.Write([]byte(`{"id":"ok","name":"n"}`))
+		_, _ = w.Write([]byte(`{"id":"111","name":"n"}`))
 	}))
 	t.Cleanup(srv.Close)
 	swapGraphBase(t, srv.URL)

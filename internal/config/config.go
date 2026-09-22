@@ -44,7 +44,7 @@ func (f *FlexibleStringSlice) UnmarshalJSON(data []byte) error {
 // Config is the root configuration for the GoClaw Gateway.
 type Config struct {
 	DataDir   string          `json:"data_dir,omitempty"` // persistent data directory (default: ~/.goclaw/data)
-	Branding  BrandingConfig  `json:"branding,omitempty"`
+	Branding  BrandingConfig  `json:"branding"`
 	Agents    AgentsConfig    `json:"agents"`
 	Channels  ChannelsConfig  `json:"channels"`
 	Providers ProvidersConfig `json:"providers"`
@@ -61,7 +61,7 @@ type Config struct {
 	Bindings  []AgentBinding  `json:"bindings,omitempty"`
 	Hooks     HooksConfig     `json:"hooks"`
 	Packages  PackagesConfig  `json:"packages"` // runtime package mgmt (GitHub updater)
-	Messages  SystemMsgConfig `json:"system_messages,omitempty"`
+	Messages  SystemMsgConfig `json:"system_messages"`
 	mu        sync.RWMutex
 }
 
@@ -141,9 +141,7 @@ func (s SystemMsgConfig) Clone() SystemMsgConfig {
 			continue
 		}
 		cp := make(LocalizedSystemMessage, len(byLocale))
-		for locale, template := range byLocale {
-			cp[locale] = template
-		}
+		maps.Copy(cp, byLocale)
 		out.Messages[key] = cp
 	}
 	return out

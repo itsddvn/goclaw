@@ -19,7 +19,7 @@ import { InfoLabel } from "@/components/shared/info-label";
 import { BitrixPortalSelect } from "./bitrix24/bitrix-portal-select";
 import { MCPServerSelect } from "./bitrix24/mcp-server-select";
 import { deliveryModelKey, isDeliveryModelKey, isDeliveryProviderKey } from "./channel-delivery-provider-fields";
-import type { FieldDef } from "./channel-schemas";
+import { fieldTranslationKey, type FieldDef } from "./channel-schemas";
 
 const INHERIT = "__inherit__";
 
@@ -178,9 +178,9 @@ function FieldRenderer({
   onPortalResumeAuthorize?: (portalName: string) => void;
 }) {
   const { t } = useTranslation("channels");
-  // i18n: try "fieldConfig.<key>.label" / "fieldConfig.<key>.help", fall back to hardcoded schema string
-  const label = t(`fieldConfig.${field.key}.label`, { defaultValue: field.label });
-  const help = field.help ? t(`fieldConfig.${field.key}.help`, { defaultValue: field.help }) : "";
+  // Channel-specific metadata takes precedence over the shared field key.
+  const label = t(fieldTranslationKey(field, "label"), { defaultValue: field.label });
+  const help = field.help ? t(fieldTranslationKey(field, "help"), { defaultValue: field.help }) : "";
   const tooltipHelp = isChatBehaviorField(field.key) && help ? help : undefined;
   const inlineHelp = tooltipHelp ? "" : help;
   const resolvedHint = disabledHint ? t(disabledHint, { defaultValue: disabledHint }) : undefined;

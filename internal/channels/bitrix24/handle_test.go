@@ -443,6 +443,9 @@ func (f *fakeContactStore) UpsertContact(_ context.Context, channelType, channel
 func (f *fakeContactStore) ResolveTenantUserID(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
+func (f *fakeContactStore) ResolveContactID(_ context.Context, _, _ string) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
 func (f *fakeContactStore) ListContacts(_ context.Context, _ store.ContactListOpts) ([]store.ChannelContact, error) {
 	return nil, nil
 }
@@ -561,17 +564,17 @@ func TestHandleMessage_ChatEntityForwardedAsMetadata(t *testing.T) {
 		wantIDMeta   string
 	}{
 		{
-			name: "crm_deal_chat",
+			name:       "crm_deal_chat",
 			entityType: "CRM", entityID: "DEAL|2064", messageType: "C",
 			wantTypeMeta: "CRM", wantIDMeta: "DEAL|2064",
 		},
 		{
-			name: "tasks_chat_X_type",
+			name:       "tasks_chat_X_type",
 			entityType: "TASKS_TASK", entityID: "2704", messageType: "X",
 			wantTypeMeta: "TASKS_TASK", wantIDMeta: "2704",
 		},
 		{
-			name: "plain_group_omits_keys",
+			name:       "plain_group_omits_keys",
 			entityType: "", entityID: "", messageType: "C",
 			wantTypeMeta: "", wantIDMeta: "",
 		},
@@ -584,15 +587,15 @@ func TestHandleMessage_ChatEntityForwardedAsMetadata(t *testing.T) {
 			ch.DispatchEvent(context.Background(), &Event{
 				Type: EventMessageAdd,
 				Params: EventParams{
-					FromUserID:     "42",
-					DialogID:       "chat999",
-					MessageID:      "m-entity",
-					MessageType:    tc.messageType,
-					Message:        "anything",
+					FromUserID:      "42",
+					DialogID:        "chat999",
+					MessageID:       "m-entity",
+					MessageType:     tc.messageType,
+					Message:         "anything",
 					MessageOriginal: "[USER=101]Bot[/USER] anything", // pass mention check for groups
-					MentionedList:  map[string]string{"101": "101"},
-					ChatEntityType: tc.entityType,
-					ChatEntityID:   tc.entityID,
+					MentionedList:   map[string]string{"101": "101"},
+					ChatEntityType:  tc.entityType,
+					ChatEntityID:    tc.entityID,
 				},
 			})
 			msg, ok := drainOne(mb, 500*time.Millisecond)
@@ -812,7 +815,7 @@ func TestHandleMessage_OpenChannel_InternalStaffMentionForwarded(t *testing.T) {
 			MessageID:       "m-ol-staff-mention",
 			MessageType:     "L",
 			ChatEntityType:  "LINES",
-			Message:         "tổng hợp khách này giúp",                                 // stripped form (Bitrix strips group mentions)
+			Message:         "tổng hợp khách này giúp", // stripped form (Bitrix strips group mentions)
 			MessageOriginal: "[USER=1058]Tiểu Hà[/USER] tổng hợp khách này giúp",
 			MentionedList:   map[string]string{"1058": "1058"},
 			FromIsConnector: false,

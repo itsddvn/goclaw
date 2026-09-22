@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 // mockResolver is a test double that returns pre-configured resolutions.
 type mockResolver struct {
-	mergedMap map[string]string // "channelType:senderID" → resolved tenant user ID
+	mergedMap  map[string]string    // "channelType:senderID" → resolved tenant user ID
+	contactMap map[string]uuid.UUID // "channelType:senderID" → exact Contact UUID
 }
 
 func (m *mockResolver) ResolveTenantUserID(_ context.Context, channelType, senderID string) (string, error) {
@@ -19,6 +22,14 @@ func (m *mockResolver) ResolveTenantUserID(_ context.Context, channelType, sende
 		return resolved, nil
 	}
 	return "", nil
+}
+
+func (m *mockResolver) ResolveContactID(_ context.Context, channelType, senderID string) (uuid.UUID, error) {
+	key := channelType + ":" + senderID
+	if resolved, ok := m.contactMap[key]; ok {
+		return resolved, nil
+	}
+	return uuid.Nil, nil
 }
 
 func TestResolveCredentialUserID(t *testing.T) {
@@ -121,16 +132,59 @@ func TestResolveCredentialUserID(t *testing.T) {
 	}
 }
 
+func TestResolveWorkstationContactID(t *testing.T) {
+	contactA := uuid.New()
+	loop := &Loop{userResolver: &mockResolver{
+		mergedMap: map[string]string{
+			"telegram:-100456": "shared-tenant-user",
+			"telegram:12345":   "shared-tenant-user",
+		},
+		contactMap: map[string]uuid.UUID{
+			"telegram:12345": contactA,
+		},
+	}}
+
+	t.Run("group uses exact individual Contact, not shared merged identity", func(t *testing.T) {
+		req := RunRequest{
+			UserID:      "group:telegram:-100456",
+			SenderID:    "12345|display-name",
+			ChannelType: "telegram",
+			PeerKind:    "group",
+		}
+		if got := loop.resolveWorkstationContactID(context.Background(), req); got != contactA {
+			t.Fatalf("resolveWorkstationContactID() = %s, want %s", got, contactA)
+		}
+	})
+
+	t.Run("group without attributable sender denies by returning empty", func(t *testing.T) {
+		req := RunRequest{
+			UserID:      "group:telegram:-100456",
+			ChannelType: "telegram",
+			PeerKind:    "group",
+		}
+		if got := loop.resolveWorkstationContactID(context.Background(), req); got != uuid.Nil {
+			t.Fatalf("resolveWorkstationContactID() = %s, want nil UUID", got)
+		}
+	})
+
+	t.Run("direct message resolves exact Contact instead of tenant user", func(t *testing.T) {
+		req := RunRequest{UserID: "12345", ChannelType: "telegram", PeerKind: "direct"}
+		if got := loop.resolveWorkstationContactID(context.Background(), req); got != contactA {
+			t.Fatalf("resolveWorkstationContactID() = %s, want %s", got, contactA)
+		}
+	})
+}
+
 func TestExtractGroupChatID(t *testing.T) {
 	tests := []struct {
 		input, want string
 	}{
 		{"group:telegram:-100456", "-100456"},
 		{"group:discord:123", "123"},
-		{"guild:123:user:456", ""},  // not group: prefix
-		{"12345", ""},               // plain user ID
-		{"group:", ""},              // incomplete
-		{"group:channel", ""},       // missing third part
+		{"guild:123:user:456", ""}, // not group: prefix
+		{"12345", ""},              // plain user ID
+		{"group:", ""},             // incomplete
+		{"group:channel", ""},      // missing third part
 		{"group:tg:-100456", "-100456"},
 	}
 
@@ -166,6 +220,35 @@ func TestCredentialUserIDFromContext(t *testing.T) {
 		got := store.CredentialUserIDFromContext(context.Background())
 		if got != "" {
 			t.Errorf("got %q, want empty", got)
+		}
+	})
+}
+
+func TestWorkstationContactIDFromContext(t *testing.T) {
+	contactID := uuid.New()
+	t.Run("explicit Contact is independent from shared credential identity", func(t *testing.T) {
+		ctx := store.WithCredentialUserID(context.Background(), "shared-group-user")
+		ctx = store.WithWorkstationContactID(ctx, contactID)
+		if got := store.WorkstationContactIDFromContext(ctx); got != contactID {
+			t.Fatalf("got %s, want %s", got, contactID)
+		}
+	})
+
+	t.Run("direct caller does not fall back to credential identity", func(t *testing.T) {
+		ctx := store.WithCredentialUserID(context.Background(), "direct-user")
+		if got := store.WorkstationContactIDFromContext(ctx); got != uuid.Nil {
+			t.Fatalf("got %s, want nil UUID", got)
+		}
+	})
+
+	t.Run("resolved empty principal remains denied after run context restoration", func(t *testing.T) {
+		ctx := store.WithCredentialUserID(context.Background(), "shared-group-user")
+		ctx = store.WithRunContext(ctx, &store.RunContext{
+			CredentialUserID:           "shared-group-user",
+			WorkstationContactResolved: true,
+		})
+		if got := store.WorkstationContactIDFromContext(ctx); got != uuid.Nil {
+			t.Fatalf("got %s, want nil UUID denied principal", got)
 		}
 	})
 }

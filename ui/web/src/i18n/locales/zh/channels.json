@@ -66,7 +66,7 @@
     "selectAgent": "选择Agent",
     "credentials": "凭据",
     "credentialsHint": "（留空以保留当前值）",
-    "credentialsEncrypted": "在服务器端加密，不会在 API 响应中返回。",
+    "credentialsEncrypted": "API 响应中的凭据值会被掩码。静态加密需要 GOCLAW_ENCRYPTION_KEY（标准初始化流程会生成该密钥）。",
     "configuration": "配置",
     "enabled": "已启用",
     "cancel": "取消",
@@ -317,6 +317,59 @@
     }
   },
   "fieldConfig": {
+    "facebook": {
+      "page_access_token": {
+        "label": "Page Access Token",
+        "help": "在 Meta App Dashboard 中依次进入 Customize “Engage with customers on Messenger” → Messenger API Setup → Generate access tokens → Connect。也可通过 /me/accounts 获取 Page token。"
+      },
+      "app_secret": {
+        "label": "App Secret",
+        "help": "在 Meta App Dashboard → App settings/Settings → Basic → App Secret 中获取。GoClaw 用它校验 X-Hub-Signature-256。"
+      },
+      "verify_token": {
+        "label": "Webhook Verify Token",
+        "help": "这是由您选择的随机值，并非 Meta 颁发。在 GoClaw 中生成后，将完全相同的值粘贴到 Messenger API Setup → Configure webhooks → Verify token。"
+      },
+      "page_id": {
+        "label": "Page ID",
+        "help": "已连接 Facebook Page 或 /me/accounts 响应中的数字 Page ID。这不是用户范围 ID（PSID）。"
+      },
+      "features": {
+        "comment_reply": {
+          "label": "评论自动回复",
+          "help": "通过所选 Agent 回复 Page 评论。需要 feed Webhook 字段和评论相关权限。"
+        },
+        "messenger_auto_reply": {
+          "label": "Messenger 自动回复",
+          "help": "必须启用，Page 收到的消息才会转交给所选 Agent。关闭时，GoClaw 会忽略 Messenger 收件箱事件。"
+        },
+        "first_inbox": {
+          "label": "首次私信",
+          "help": "成功回复评论后，在每个运行中的 GoClaw 进程内，每位评论者只发送一次私信。进程重启后此内存记录会重置；发送失败时可在后续评论中重试。",
+          "disabledHint": "需要启用评论自动回复。评论回复关闭时，此功能不会生效。"
+        }
+      },
+      "comment_reply_options": {
+        "include_post_context": {
+          "label": "包含帖子上下文",
+          "help": "获取原始帖子内容，为评论回复提供上下文。"
+        },
+        "max_thread_depth": {
+          "label": "最大评论层级"
+        }
+      },
+      "post_context_cache_ttl": {
+        "label": "帖子缓存 TTL"
+      },
+      "first_inbox_message": {
+        "label": "首次私信内容",
+        "help": "发送给首次评论者的自定义私信。请按 Page 使用的语言设置；留空则使用运行时默认内容。"
+      },
+      "allow_from": {
+        "label": "允许的用户",
+        "help": "允许交互的 Facebook 用户 ID；留空表示不使用允许列表过滤。"
+      }
+    },
     "token": {
       "label": "Bot Token",
       "help": "来自 @BotFather"
@@ -738,10 +791,73 @@
     "missingCredentialsHeadline": "补全必填凭据",
     "missingCredentialsHint": "打开凭据设置，补全缺失或无效的字段。"
   },
+  "facebook": {
+    "setupGuide": {
+      "title": "连接 Facebook Page",
+      "intro": "按照 Meta 当前的 Messenger 用例流程操作。在 GoClaw 和 Meta 中保存同一值前，请保留已生成的 Token。",
+      "steps": {
+        "connectTitle": "连接 Page 并生成 Page Token。",
+        "connectDescription": "请选择与下方所填数字 Page ID 相同的 Page；该 Token 必须是 Page Access Token。",
+        "secretTitle": "复制 App Secret。",
+        "secretDescription": "在 App settings/Settings → Basic 中查找。不要使用 App Access Token。",
+        "verifyTitle": "在 GoClaw 中生成 Verify Token。",
+        "verifyDescription": "该 Token 由运维人员生成，并非 Meta 提供。关闭表单前请先复制。",
+        "saveTitle": "创建或更新 GoClaw 实例。",
+        "saveDescription": "此步骤会保存 Page 凭据并启用固定 Callback。",
+        "webhookTitle": "在 Meta 中配置 Callback。",
+        "webhookDescription": "在 Page Webhook 订阅中选择以下应用级字段",
+        "webhookComments": "启用评论自动回复时还需添加"
+      },
+      "paths": {
+        "currentLabel": "当前控制台路径",
+        "current": "Customize “Engage with customers on Messenger” → Messenger API Setup → Generate access tokens / Configure webhooks。",
+        "legacyLabel": "旧版控制台路径",
+        "legacy": "Messenger → Settings → Access Tokens / Webhooks。"
+      },
+      "callback": {
+        "label": "Callback URL",
+        "ready": "公网 HTTPS",
+        "notReady": "Meta 无法访问",
+        "warningTitle": "请通过公网 HTTPS URL 打开 GoClaw",
+        "warningDescription": "当前 Origin 为本地、私网或非 HTTPS 地址。请使用 Meta 可以访问的公网 HTTPS 地址重新打开 Web UI，再复制该页面显示的 Callback。此提示不会阻止保存表单。"
+      },
+      "verifyToken": {
+        "label": "已生成的 Verify Token",
+        "description": "在当前浏览器中使用 32 个密码学随机字节。生成操作会替换下方 Verify Token 字段；除正常提交表单外，不会在其他位置保存。",
+        "placeholder": "生成 Token 并填入凭据字段",
+        "error": "Web Crypto 不可用，GoClaw 无法在当前浏览器中生成安全 Token。请改用较新的浏览器后重试。"
+      },
+      "actions": {
+        "copyCallback": "复制 Callback",
+        "generateToken": "生成 Token",
+        "regenerateToken": "重新生成 Token",
+        "copyToken": "复制 Token",
+        "copied": "已复制"
+      },
+      "permissions": {
+        "messengerTitle": "Messenger/Page 权限",
+        "useCasePrefix": "Messenger 用例还将以下权限标记为必需：",
+        "commentsTitle": "仅评论自动回复需要",
+        "commentsDescription": "这些权限和 feed Webhook 字段仅在启用评论功能时需要。",
+        "accessReview": "生成 Page Token 的人员必须拥有已接受的 Page 任务或角色。使用具有 App/Page 角色的用户测试时可使用标准访问权限；服务无角色客户则需要 Business Verification、相关权限的 Advanced Access，以及 App Review。"
+      },
+      "messengerRequired": "必须启用下方的 Messenger 自动回复，否则 Page 收到的消息不会到达所选 Agent。",
+      "links": {
+        "label": "Meta 官方文档",
+        "useCase": "Messenger 用例",
+        "getStarted": "入门",
+        "webhooks": "Webhook"
+      }
+    }
+  },
   "scopes": {
     "title": "所需API权限",
-    "description": "您的 Lark/飞书 应用需要在开发者控制台启用这些权限。添加权限后请发布新版本。",
-    "publishReminder": "添加权限后，将通讯录范围设置为「全部成员」，并发布新版本使更改生效。"
+    "description": "请在平台开发者控制台中启用这些 Scope 或权限。访问级别和审核要求请查看 Channel 设置指南。",
+    "publishReminder": "按平台要求发布或应用权限更改。对于 Lark/飞书，请将通讯录范围设为「全部成员」并发布新的应用版本。",
+    "facebook": {
+      "description": "请在 Meta App Dashboard 中启用这些权限。仅当启用评论自动回复时，评论权限才会显示。",
+      "publishReminder": "若要服务没有 App/Page 角色的正式用户，请先完成 Business Verification、为相关权限申请 Advanced Access、通过 App Review，然后发布应用。"
+    }
   },
   "toast": {
     "created": "Channel已创建",

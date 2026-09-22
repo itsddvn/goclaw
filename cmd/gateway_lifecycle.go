@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/cache"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/bitrix24"
+	"github.com/nextlevelbuilder/goclaw/internal/channels/facebook"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/heartbeat"
@@ -100,6 +102,13 @@ func drainDelegateToolWithRetry(
 			"attempt", attempt+1, "timeout", timeout, "error", err)
 	}
 	return fmt.Errorf("delegate completion drain failed after retry")
+}
+
+func mountFacebookWebhookRoute(mux *http.ServeMux) {
+	if path, handler := facebook.ClaimWebhookRoute(); path != "" && handler != nil {
+		mux.Handle(path, handler)
+		slog.Info("webhook route mounted on gateway", "path", path)
+	}
 }
 
 // runLifecycle wires config-reload subscribers, starts consumers, task recovery,
@@ -261,6 +270,9 @@ func (d *gatewayDeps) runLifecycle(
 
 		// Broadcast shutdown event
 		d.server.BroadcastEvent(*protocol.NewEvent(protocol.EventShutdown, nil))
+		if deps.sched != nil {
+			deps.sched.MarkDraining()
+		}
 
 		// Close child-run intake first. A drain timeout must terminate without
 		// unwinding runGateway defers under a still-live child callback.
@@ -287,6 +299,34 @@ func (d *gatewayDeps) runLifecycle(
 		// Stop webhook callback worker — signals Run() to drain in-flight and exit.
 		if webhookWorkerCancel != nil {
 			webhookWorkerCancel()
+		}
+
+		// Cancel process-owned agent runs while tracing and database resources are
+		// still available, so each run can persist a terminal status before exit.
+		if d.agentRouter != nil {
+			results := d.agentRouter.AbortAllRuns()
+			if len(results) > 0 {
+				var stopped, forced, alreadyAborting, notFound int
+				for _, result := range results {
+					switch {
+					case result.Stopped:
+						stopped++
+					case result.Forced:
+						forced++
+					case result.AlreadyAborting:
+						alreadyAborting++
+					case result.NotFound:
+						notFound++
+					}
+				}
+				slog.Info("gateway: aborted active runs for shutdown",
+					"total", len(results),
+					"stopped", stopped,
+					"forced", forced,
+					"already_aborting", alreadyAborting,
+					"finished_during_shutdown", notFound,
+				)
+			}
 		}
 
 		// Drain audit log queue before closing DB
@@ -366,6 +406,11 @@ func (d *gatewayDeps) runLifecycle(
 		mux.Handle(route.Path, route.Handler)
 		slog.Info("webhook route mounted on gateway", "path", route.Path)
 	}
+
+	// Facebook: claim the shared callback even when there are no configured
+	// instances yet. The claim is first-wins, so an instance discovered above
+	// prevents duplicate ServeMux registration.
+	mountFacebookWebhookRoute(mux)
 
 	// Bitrix24: also claim+mount the shared webhook router directly, even if
 	// no channel_instances row has finished setup yet (bot_code/bot_name

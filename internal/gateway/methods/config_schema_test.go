@@ -78,6 +78,68 @@ func TestConfigSchemaIncludesSystemMessageDefinitions(t *testing.T) {
 	}
 }
 
+func TestConfigSchemaIncludesDelegateAsyncTimeout(t *testing.T) {
+	t.Parallel()
+
+	methods := NewConfigMethods(config.Default(), "", nil, nil)
+	client, responses := gateway.NewCapturingTestClient(permissions.RoleOwner, store.MasterTenantID, "owner", 1)
+	methods.handleSchema(
+		store.WithTenantID(context.Background(), store.MasterTenantID),
+		client,
+		&protocol.RequestFrame{
+			Type:   protocol.FrameTypeRequest,
+			ID:     "schema-delegate-async-timeout",
+			Method: protocol.MethodConfigSchema,
+		},
+	)
+
+	res := readConfigSchemaResponse(t, responses)
+	if !res.OK {
+		t.Fatalf("config.schema failed: %#v", res.Error)
+	}
+	raw, err := json.Marshal(res.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		JSON struct {
+			Properties map[string]struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			} `json:"properties"`
+		} `json:"json"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	timeoutSchema, ok := payload.JSON.Properties["tools"].Properties["delegateAsyncTimeoutSeconds"]
+	if !ok {
+		t.Fatal("tools.delegateAsyncTimeoutSeconds missing from config.schema")
+	}
+	var timeout struct {
+		Type    string `json:"type"`
+		AnyOf   []struct {
+			Const   *int `json:"const"`
+			Minimum *int `json:"minimum"`
+			Maximum *int `json:"maximum"`
+		} `json:"anyOf"`
+		Default int `json:"default"`
+	}
+	if err := json.Unmarshal(timeoutSchema, &timeout); err != nil {
+		t.Fatal(err)
+	}
+	if timeout.Type != "integer" ||
+		timeout.Default != config.DefaultDelegateAsyncTimeoutSeconds ||
+		len(timeout.AnyOf) != 2 ||
+		timeout.AnyOf[0].Const == nil ||
+		*timeout.AnyOf[0].Const != 0 ||
+		timeout.AnyOf[1].Minimum == nil ||
+		*timeout.AnyOf[1].Minimum != config.MinDelegateAsyncTimeoutSeconds ||
+		timeout.AnyOf[1].Maximum == nil ||
+		*timeout.AnyOf[1].Maximum != config.MaxDelegateAsyncTimeoutSeconds {
+		t.Fatalf("delegate async timeout schema = %#v", timeout)
+	}
+}
+
 func readConfigSchemaResponse(t *testing.T, responses <-chan []byte) protocol.ResponseFrame {
 	t.Helper()
 	select {

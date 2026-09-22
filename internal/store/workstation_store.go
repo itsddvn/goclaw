@@ -45,8 +45,8 @@ type Workstation struct {
 	BackendType    WorkstationBackend `json:"backendType"`
 	// Metadata holds backend-specific config (SSH or Docker). Plaintext after decrypt.
 	// json:"-" prevents SSH keys/passwords from appearing in API responses.
-	Metadata   []byte    `json:"-"`
-	DefaultCWD string    `json:"defaultCwd"`
+	Metadata   []byte `json:"-"`
+	DefaultCWD string `json:"defaultCwd"`
 	// DefaultEnv holds a JSON map of env overrides. Plaintext after decrypt.
 	// json:"-" prevents env secrets from appearing in API responses.
 	DefaultEnv []byte    `json:"-"`
@@ -78,10 +78,11 @@ func (ws *Workstation) SanitizedView() *SanitizedWorkstation {
 	case BackendSSH:
 		if m, err := UnmarshalSSHMetadata(ws.Metadata); err == nil {
 			sv.MetadataSummary = map[string]any{
-				"host":   m.Host,
-				"port":   m.Port,
-				"user":   m.User,
-				"hasKey": m.PrivateKey != "",
+				"host":        m.Host,
+				"port":        m.Port,
+				"user":        m.User,
+				"hasKey":      m.PrivateKey != "",
+				"hasPassword": m.Password != "",
 			}
 		}
 	case BackendDocker:
@@ -89,6 +90,7 @@ func (ws *Workstation) SanitizedView() *SanitizedWorkstation {
 			sv.MetadataSummary = map[string]any{
 				"image":         m.Image,
 				"containerName": m.Host,
+				"socketPath":    m.SocketPath,
 			}
 		}
 	}
@@ -104,18 +106,32 @@ type AgentWorkstationLink struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
+// WorkstationContactGrant authorizes one exact channel Contact to request agent
+// actions on a workstation. Grants do not expand through merged tenant users.
+type WorkstationContactGrant struct {
+	WorkstationID uuid.UUID `json:"workstationId"`
+	ContactID     uuid.UUID `json:"contactId"`
+	TenantID      uuid.UUID `json:"tenantId"`
+	ChannelType   string    `json:"channelType"`
+	SenderID      string    `json:"senderId"`
+	DisplayName   *string   `json:"displayName,omitempty"`
+	Username      *string   `json:"username,omitempty"`
+	CreatedBy     string    `json:"createdBy"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
 // SSHMetadata contains SSH-specific connection parameters.
 // Either PrivateKey (inline PEM) or Password must be set for auth.
 // KnownHostsFingerprint is the SHA256 fingerprint of the host's public key (base64).
 // If empty on first connect, TOFU (Trust On First Use) accepts and logs the fingerprint.
 type SSHMetadata struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	User     string `json:"user"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	User string `json:"user"`
 	// PrivateKey holds inline PEM-encoded private key material (decrypted by store layer).
 	PrivateKey string `json:"privateKey,omitempty"`
 	// Password is optional; prefer key-based auth.
-	Password              string `json:"password,omitempty"`
+	Password string `json:"password,omitempty"`
 	// KnownHostsFingerprint is the expected SHA256 fingerprint (e.g. "SHA256:abc...").
 	// Empty → TOFU on first connect; subsequent calls must match.
 	KnownHostsFingerprint string `json:"knownHostsFingerprint,omitempty"`
@@ -125,9 +141,9 @@ type SSHMetadata struct {
 
 // DockerMetadata contains Docker-specific connection parameters.
 type DockerMetadata struct {
-	Host      string `json:"host"`
-	Image     string `json:"image"`
-	Network   string `json:"network,omitempty"`
+	Host       string `json:"host"`
+	Image      string `json:"image"`
+	Network    string `json:"network,omitempty"`
 	SocketPath string `json:"socketPath,omitempty"`
 }
 
@@ -194,7 +210,7 @@ type WorkstationStore interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*Workstation, error)
 	// GetByKey fetches by workstation_key within the caller's tenant.
 	GetByKey(ctx context.Context, key string) (*Workstation, error)
-	// List returns all active workstations for the caller's tenant.
+	// List returns all workstations for the caller's tenant, including inactive ones.
 	List(ctx context.Context) ([]Workstation, error)
 	// Update applies a field map to a workstation, enforcing tenant_id in WHERE.
 	Update(ctx context.Context, id uuid.UUID, updates map[string]any) error
@@ -206,14 +222,30 @@ type WorkstationStore interface {
 
 // AgentWorkstationLinkStore manages agent↔workstation bindings.
 type AgentWorkstationLinkStore interface {
-	// Link creates a binding between an agent and a workstation.
+	// Link upserts a binding after validating both entities in the caller's tenant.
+	// When IsDefault is true, it atomically replaces the agent's previous default.
 	Link(ctx context.Context, link *AgentWorkstationLink) error
 	// Unlink removes the binding.
 	Unlink(ctx context.Context, agentID, workstationID uuid.UUID) error
+	// HasAccess reports whether the tenant-scoped binding exists.
+	HasAccess(ctx context.Context, agentID, workstationID uuid.UUID) (bool, error)
 	// SetDefault marks a workstation as default for an agent (clears prior default).
 	SetDefault(ctx context.Context, agentID, workstationID uuid.UUID) error
 	// ListForAgent returns all workstations linked to an agent.
 	ListForAgent(ctx context.Context, agentID uuid.UUID) ([]AgentWorkstationLink, error)
 	// ListForWorkstation returns all agents linked to a workstation.
 	ListForWorkstation(ctx context.Context, workstationID uuid.UUID) ([]AgentWorkstationLink, error)
+}
+
+// WorkstationContactGrantStore manages exact Contact access to workstations.
+// Access is default-deny: the resolved Contact must have an explicit grant.
+type WorkstationContactGrantStore interface {
+	// Grant upserts a grant after validating both entities in the caller's tenant.
+	Grant(ctx context.Context, grant *WorkstationContactGrant) error
+	// Revoke removes a tenant-scoped grant.
+	Revoke(ctx context.Context, workstationID, contactID uuid.UUID) error
+	// HasAccess checks the exact Contact UUID. No merged-identity fallback applies.
+	HasAccess(ctx context.Context, workstationID, contactID uuid.UUID) (bool, error)
+	// ListForWorkstation returns grants with Contact identity fields populated.
+	ListForWorkstation(ctx context.Context, workstationID uuid.UUID) ([]WorkstationContactGrant, error)
 }

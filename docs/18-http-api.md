@@ -533,6 +533,28 @@ Notes:
 
 ---
 
+## 6.1 Workstations
+
+Workstations are tenant-owned SSH or Docker execution targets. Runtime access requires independent Agent, exact Contact and executable grants. All management routes below require tenant admin access; request/response schemas are authoritative in `internal/http/openapi_spec.json`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`, `POST` | `/v1/workstations` | List or create workstations |
+| `GET`, `PUT`, `DELETE` | `/v1/workstations/{id}` | Read sanitized data, safely edit mutable fields, or delete |
+| `POST` | `/v1/workstations/{id}/test` | Test the configured backend connection |
+| `GET` | `/v1/workstations/{id}/grants` | List assigned agents |
+| `POST` | `/v1/workstations/{id}/grants/agent` | Assign an agent; body `{ "agentId": "uuid", "isDefault": false }` |
+| `DELETE` | `/v1/workstations/{id}/grants/agent/{agentID}` | Revoke an assignment immediately |
+| `GET`, `POST` | `/v1/workstations/{id}/contact-grants` | List or grant allowed Contacts; body `{ "contactId": "uuid" }` |
+| `DELETE` | `/v1/workstations/{id}/contact-grants/{contactID}` | Revoke an allowed Contact |
+| `GET`, `POST` | `/v1/workstations/{id}/permissions` | List or add executable patterns |
+| `PUT` | `/v1/workstations/{id}/permissions/{permId}/toggle` | Enable or disable a pattern |
+| `DELETE` | `/v1/workstations/{id}/permissions/{permId}` | Remove a pattern |
+
+Setting an Agent assignment as default selects that workstation when the Agent omits `workstation_id`; assigning another default atomically replaces the prior default. Update responses never return raw metadata, passwords, private keys, or default environment values. Blank SSH credential fields in an update preserve the stored secret.
+
+---
+
 ## 7. MCP Servers
 
 Model Context Protocol server management.

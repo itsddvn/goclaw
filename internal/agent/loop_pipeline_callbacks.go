@@ -230,8 +230,9 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 	// of a run. Only the final iteration differs (strips all tools). Cache the
 	// result after the first call and reuse for iterations 0..maxIter-1.
 	var (
-		cachedToolDefs []providers.ToolDefinition
-		cacheValid     bool
+		cachedToolDefs         []providers.ToolDefinition
+		cachedRegistryRevision uint64
+		cacheValid             bool
 	)
 	return func(state *pipeline.RunState) ([]providers.ToolDefinition, error) {
 		maxIter := l.maxIterations
@@ -239,8 +240,10 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 			maxIter = req.MaxIterations
 		}
 
-		// Cache hit: reuse tool defs from first call for non-final iterations.
-		if cacheValid && state.Iteration != maxIter {
+		// Reuse the per-run definitions only while the registry is unchanged.
+		// Deferred MCP activation registers tools between iterations, so a stale
+		// cache would advertise discovery success without making the tool callable.
+		if cacheValid && state.Iteration != maxIter && toolExecutorRevision(l.tools) == cachedRegistryRevision {
 			return cachedToolDefs, nil
 		}
 
@@ -271,6 +274,7 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 			"sender_id", state.Input.SenderID,
 			"actor_user_id", actorUserID,
 			"user_tools_count", len(userTools))
+		registryRevision := toolExecutorRevision(l.tools)
 		allMsgs := state.Messages.All()
 		toolDefs, _, returnedMsgs := l.buildFilteredTools(req, state.Context.HadBootstrap,
 			state.Iteration, maxIter, allMsgs, userTools)
@@ -283,10 +287,14 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 			}
 		}
 
-		// Cache store after first successful non-final call.
-		if !cacheValid && state.Iteration != maxIter {
+		// Cache only a stable registry snapshot. If a concurrent registration
+		// happened while definitions were built, rebuild on the next iteration.
+		if state.Iteration != maxIter && registryRevision == toolExecutorRevision(l.tools) {
 			cachedToolDefs = toolDefs
+			cachedRegistryRevision = registryRevision
 			cacheValid = true
+		} else {
+			cacheValid = false
 		}
 
 		slog.Debug("mcp.filtered_tools",
@@ -295,6 +303,17 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 			"iteration", state.Iteration)
 		return toolDefs, nil
 	}
+}
+
+type revisionedToolExecutor interface {
+	Revision() uint64
+}
+
+func toolExecutorRevision(executor tools.ToolExecutor) uint64 {
+	if revisioned, ok := executor.(revisionedToolExecutor); ok {
+		return revisioned.Revision()
+	}
+	return 0
 }
 
 // countMCPToolDefs counts MCP-bridged tool definitions (name prefix "mcp_").

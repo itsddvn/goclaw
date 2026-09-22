@@ -11,12 +11,18 @@ export interface FieldDef {
   defaultValue?: string | number | boolean | string[];
   options?: { value: string; label: string }[];
   help?: string;
+  /** Optional channel-specific path below fieldConfig; defaults to the shared field key. */
+  i18nKey?: string;
   /** Only show this field when another field has a specific value (or one of several values) */
   showWhen?: { key: string; value: string | string[] };
   /** Disable this field when another field has a specific value */
   disabledWhen?: { key: string; value: string; hint?: string };
   /** Hide in an "Advanced" collapsible section — for rarely-needed fields */
   advanced?: boolean;
+}
+
+export function fieldTranslationKey(field: FieldDef, property: "label" | "help"): string {
+  return `fieldConfig.${field.i18nKey ?? field.key}.${property}`;
 }
 
 // --- Shared option lists ---
@@ -109,9 +115,30 @@ export const credentialsSchema: Record<string, FieldDef[]> = {
   zalo_personal: [],
   whatsapp: [],
   facebook: [
-    { key: "page_access_token", label: "Page Access Token", type: "password", required: true, help: "From Facebook Developer Console → Your App → Messenger → Page Access Token" },
-    { key: "app_secret", label: "App Secret", type: "password", required: true, help: "From Facebook Developer Console → Your App → Settings → Basic" },
-    { key: "verify_token", label: "Webhook Verify Token", type: "password", required: true, help: "A secret string you choose, used to verify the webhook URL" },
+    {
+      key: "page_access_token",
+      label: "Page Access Token",
+      type: "password",
+      required: true,
+      help: "Connect the Page in Messenger API Setup to generate a Page token; /me/accounts is an alternative.",
+      i18nKey: "facebook.page_access_token",
+    },
+    {
+      key: "app_secret",
+      label: "App Secret",
+      type: "password",
+      required: true,
+      help: "From Meta App Dashboard → App settings/Settings → Basic → App Secret.",
+      i18nKey: "facebook.app_secret",
+    },
+    {
+      key: "verify_token",
+      label: "Webhook Verify Token",
+      type: "password",
+      required: true,
+      help: "Generate this operator-chosen token in GoClaw, then paste the identical value into Configure webhooks.",
+      i18nKey: "facebook.verify_token",
+    },
   ],
   pancake: [
     { key: "api_key", label: "API Key", type: "password", required: true, help: "Pancake user-level API key from pages.fm account settings" },
@@ -231,16 +258,79 @@ export const configSchema: Record<string, FieldDef[]> = {
     ...chatBehaviorOverrideFields,
   ],
   facebook: [
-    { key: "page_id", label: "Page ID", type: "text", required: true, help: "Facebook Page numeric ID" },
-    { key: "features.comment_reply", label: "Comment Auto-Reply", type: "boolean", defaultValue: false },
-    { key: "features.messenger_auto_reply", label: "Messenger Auto-Reply", type: "boolean", defaultValue: false },
-    { key: "features.first_inbox", label: "First Inbox DM", type: "boolean", defaultValue: false, help: "Send a one-time DM to commenters after their first comment reply" },
-    { key: "comment_reply_options.include_post_context", label: "Include Post Context", type: "boolean", defaultValue: false, help: "Fetch original post content for comment context" },
-    { key: "comment_reply_options.max_thread_depth", label: "Max Thread Depth", type: "number", defaultValue: 10 },
-    { key: "messenger_options.session_timeout", label: "Messenger Session Timeout", type: "text", placeholder: "e.g. 30m" },
-    { key: "post_context_cache_ttl", label: "Post Cache TTL", type: "text", placeholder: "e.g. 15m" },
-    { key: "first_inbox_message", label: "First Inbox DM Text", type: "textarea", help: "Custom DM sent to first-time commenters. Defaults to Vietnamese if empty." },
-    { key: "allow_from", label: "Allowed Users", type: "tags", help: "Facebook user IDs" },
+    {
+      key: "page_id",
+      label: "Page ID",
+      type: "text",
+      required: true,
+      help: "Numeric Facebook Page ID from the connected Page or /me/accounts; this is not a PSID.",
+      i18nKey: "facebook.page_id",
+    },
+    {
+      key: "features.comment_reply",
+      label: "Comment Auto-Reply",
+      type: "boolean",
+      defaultValue: false,
+      help: "Reply to Page comments through the selected agent. Requires the feed webhook field and comment permissions.",
+      i18nKey: "facebook.features.comment_reply",
+    },
+    {
+      key: "features.messenger_auto_reply",
+      label: "Messenger Auto-Reply",
+      type: "boolean",
+      defaultValue: false,
+      help: "Must be enabled for inbound Page messages to reach the selected agent; when off, GoClaw ignores Messenger inbox events.",
+      i18nKey: "facebook.features.messenger_auto_reply",
+    },
+    {
+      key: "features.first_inbox",
+      label: "First Inbox DM",
+      type: "boolean",
+      defaultValue: false,
+      help: "After a successful comment reply, send one DM per commenter per running GoClaw process. The in-memory record resets when the process restarts.",
+      disabledWhen: {
+        key: "features.comment_reply",
+        value: "false",
+        hint: "fieldConfig.facebook.features.first_inbox.disabledHint",
+      },
+      i18nKey: "facebook.features.first_inbox",
+    },
+    {
+      key: "comment_reply_options.include_post_context",
+      label: "Include Post Context",
+      type: "boolean",
+      defaultValue: false,
+      help: "Fetch the original post content to provide context for comment replies.",
+      i18nKey: "facebook.comment_reply_options.include_post_context",
+    },
+    {
+      key: "comment_reply_options.max_thread_depth",
+      label: "Max Thread Depth",
+      type: "number",
+      defaultValue: 10,
+      i18nKey: "facebook.comment_reply_options.max_thread_depth",
+    },
+    {
+      key: "post_context_cache_ttl",
+      label: "Post Cache TTL",
+      type: "text",
+      placeholder: "e.g. 15m",
+      i18nKey: "facebook.post_context_cache_ttl",
+    },
+    {
+      key: "first_inbox_message",
+      label: "First Inbox DM Text",
+      type: "textarea",
+      help: "Custom DM sent to first-time commenters. Set this to the Page's language; an empty value uses the runtime default.",
+      i18nKey: "facebook.first_inbox_message",
+    },
+    {
+      key: "allow_from",
+      label: "Allowed Users",
+      type: "tags",
+      help: "Facebook user IDs allowed to interact; leave empty for no allowlist filter.",
+      i18nKey: "facebook.allow_from",
+    },
   ],
   pancake: [
     { key: "page_id", label: "Page ID", type: "text", required: true, help: "Pancake internal page ID (numeric, from Pancake dashboard)" },
@@ -332,7 +422,25 @@ export const groupOverrideSchema: FieldDef[] = [
 export interface ScopeEntry {
   scope: string;
   note?: string; // e.g. "Range: All members"
+  requiredWhen?: { key: string; value: boolean };
 }
+
+export const facebookMessengerScopes = [
+  "pages_show_list",
+  "pages_manage_metadata",
+  "pages_messaging",
+] as const;
+
+export const facebookCommentScopes = [
+  "pages_manage_engagement",
+  "pages_read_user_content",
+  "pages_read_engagement",
+] as const;
+
+export const facebookUseCaseScopes = [
+  "business_management",
+  "public_profile",
+] as const;
 
 export const requiredScopes: Partial<Record<string, ScopeEntry[]>> = {
   feishu: [
@@ -353,7 +461,24 @@ export const requiredScopes: Partial<Record<string, ScopeEntry[]>> = {
     { scope: "im:message:send_as_bot" },
     { scope: "im:resource" },
   ],
+  facebook: [
+    ...facebookMessengerScopes.map((scope) => ({ scope })),
+    ...facebookCommentScopes.map((scope) => ({
+      scope,
+      requiredWhen: { key: "features.comment_reply", value: true },
+    })),
+    ...facebookUseCaseScopes.map((scope) => ({ scope })),
+  ],
 };
+
+export function resolveRequiredScopes(
+  channelType: string,
+  configValues: Record<string, unknown> = {},
+): ScopeEntry[] {
+  return (requiredScopes[channelType] ?? []).filter((entry) => (
+    !entry.requiredWhen || configValues[entry.requiredWhen.key] === entry.requiredWhen.value
+  ));
+}
 
 // --- Post-create wizard configuration ---
 // Channels with multi-step create flows (e.g. auth then config).

@@ -126,6 +126,11 @@ func (m *ConfigMethods) handleApply(ctx context.Context, client *gateway.Client,
 		return
 	}
 
+	if err := config.ValidateToolsConfig(newCfg.Tools); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidRequest, err.Error())))
+		return
+	}
+
 	// Extract secrets → save to config_secrets table, strip all from file
 	m.saveSecretsToStore(ctx, newCfg)
 	newCfg.StripSecrets()
@@ -185,6 +190,11 @@ func (m *ConfigMethods) handlePatch(ctx context.Context, client *gateway.Client,
 
 	// Apply patch on top
 	if err := json5.Unmarshal([]byte(params.Raw), merged); err != nil {
+		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidRequest, err.Error())))
+		return
+	}
+
+	if err := config.ValidateToolsConfig(merged.Tools); err != nil {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgInvalidRequest, err.Error())))
 		return
 	}
@@ -313,6 +323,20 @@ func (m *ConfigMethods) handleSchema(_ context.Context, client *gateway.Client, 
 			"tools": map[string]any{
 				"type":        "object",
 				"description": "Tool configuration (browser, exec, web search)",
+				"properties": map[string]any{
+					"delegateAsyncTimeoutSeconds": map[string]any{
+						"type": "integer",
+						"anyOf": []map[string]int{
+							{"const": 0},
+							{
+								"minimum": config.MinDelegateAsyncTimeoutSeconds,
+								"maximum": config.MaxDelegateAsyncTimeoutSeconds,
+							},
+						},
+						"default":     config.DefaultDelegateAsyncTimeoutSeconds,
+						"description": "Deadline in seconds for new asynchronous delegate jobs; 0 uses the default",
+					},
+				},
 			},
 			"skills": map[string]any{
 				"type":        "object",

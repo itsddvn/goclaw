@@ -1,33 +1,82 @@
 import { useState, useEffect, useCallback } from "react";
-import { useWs } from "@/hooks/use-ws";
+import { useHttp, useWs } from "@/hooks/use-ws";
 import { useAuthStore } from "@/stores/use-auth-store";
 import { Methods } from "@/api/protocol";
 
+export type WorkstationBackendType = "ssh" | "docker";
+
 export interface Workstation {
   id: string;
-  workstation_key: string;
+  workstationKey: string;
+  tenantId?: string;
   name: string;
-  backend_type: "ssh" | "docker";
+  backendType: WorkstationBackendType;
+  defaultCwd: string;
   active: boolean;
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  metadataSummary?: WorkstationMetadataSummary;
+}
+
+export interface WorkstationMetadataSummary {
+  host?: string;
+  port?: number;
+  user?: string;
+  hasKey?: boolean;
+  hasPassword?: boolean;
+  image?: string;
+  containerName?: string;
+  socketPath?: string;
 }
 
 export interface CreateWorkstationParams {
-  workstation_key: string;
+  workstationKey: string;
   name: string;
-  backend_type: "ssh" | "docker";
+  backendType: WorkstationBackendType;
   metadata?: Record<string, unknown>;
 }
 
 export interface UpdateWorkstationParams {
   name?: string;
   active?: boolean;
+  defaultCwd?: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface WorkstationAgentGrant {
+  agentId: string;
+  workstationId: string;
+  tenantId: string;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export interface WorkstationPermission {
+  id: string;
+  workstationId: string;
+  tenantId: string;
+  pattern: string;
+  enabled: boolean;
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface WorkstationContactGrant {
+  workstationId: string;
+  tenantId: string;
+  contactId: string;
+  channelType: string;
+  senderId: string;
+  displayName?: string;
+  username?: string;
+  createdBy: string;
+  createdAt: string;
 }
 
 export function useWorkstations() {
   const ws = useWs();
+  const http = useHttp();
   const connected = useAuthStore((s) => s.connected);
   const [workstations, setWorkstations] = useState<Workstation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,10 +111,18 @@ export function useWorkstations() {
 
   const updateWorkstation = useCallback(
     async (id: string, params: UpdateWorkstationParams): Promise<void> => {
-      await ws.call(Methods.WORKSTATIONS_UPDATE, { id, ...params });
+      await http.put(`/v1/workstations/${id}`, params);
       await load();
     },
-    [ws, load],
+    [http, load],
+  );
+
+  const testWorkstation = useCallback(
+    async (id: string): Promise<boolean> => {
+      const res = await http.post<{ ok: boolean }>(`/v1/workstations/${id}/test`);
+      return res.ok;
+    },
+    [http],
   );
 
   const deleteWorkstation = useCallback(
@@ -76,6 +133,90 @@ export function useWorkstations() {
     [ws, load],
   );
 
+  const listAgentGrants = useCallback(
+    async (workstationId: string): Promise<WorkstationAgentGrant[]> => {
+      const res = await http.get<{ grants: WorkstationAgentGrant[] }>(
+        `/v1/workstations/${workstationId}/grants`,
+      );
+      return res.grants ?? [];
+    },
+    [http],
+  );
+
+  const grantAgent = useCallback(
+    async (workstationId: string, agentId: string, isDefault: boolean): Promise<void> => {
+      await http.post(`/v1/workstations/${workstationId}/grants/agent`, {
+        agentId,
+        isDefault,
+      });
+    },
+    [http],
+  );
+
+  const revokeAgent = useCallback(
+    async (workstationId: string, agentId: string): Promise<void> => {
+      await http.delete(`/v1/workstations/${workstationId}/grants/agent/${agentId}`);
+    },
+    [http],
+  );
+
+  const listPermissions = useCallback(
+    async (workstationId: string): Promise<WorkstationPermission[]> => {
+      const res = await http.get<{ permissions: WorkstationPermission[] }>(
+        `/v1/workstations/${workstationId}/permissions`,
+      );
+      return res.permissions ?? [];
+    },
+    [http],
+  );
+
+  const addPermission = useCallback(
+    async (workstationId: string, pattern: string): Promise<void> => {
+      await http.post(`/v1/workstations/${workstationId}/permissions`, { pattern });
+    },
+    [http],
+  );
+
+  const removePermission = useCallback(
+    async (workstationId: string, permissionId: string): Promise<void> => {
+      await http.delete(`/v1/workstations/${workstationId}/permissions/${permissionId}`);
+    },
+    [http],
+  );
+
+  const togglePermission = useCallback(
+    async (workstationId: string, permissionId: string, enabled: boolean): Promise<void> => {
+      await http.put(`/v1/workstations/${workstationId}/permissions/${permissionId}/toggle`, {
+        enabled,
+      });
+    },
+    [http],
+  );
+
+  const listContactGrants = useCallback(
+    async (workstationId: string): Promise<WorkstationContactGrant[]> => {
+      const res = await http.get<{ grants: WorkstationContactGrant[] }>(
+        `/v1/workstations/${workstationId}/contact-grants`,
+      );
+      return res.grants ?? [];
+    },
+    [http],
+  );
+
+  const grantContact = useCallback(
+    async (workstationId: string, contactId: string): Promise<void> => {
+      await http.post(`/v1/workstations/${workstationId}/contact-grants`, { contactId });
+    },
+    [http],
+  );
+
+  const revokeContact = useCallback(
+    async (workstationId: string, contactId: string): Promise<void> => {
+      await http.delete(`/v1/workstations/${workstationId}/contact-grants/${contactId}`);
+    },
+    [http],
+  );
+
   return {
     workstations,
     loading,
@@ -83,6 +224,17 @@ export function useWorkstations() {
     refresh: load,
     createWorkstation,
     updateWorkstation,
+    testWorkstation,
     deleteWorkstation,
+    listAgentGrants,
+    grantAgent,
+    revokeAgent,
+    listPermissions,
+    addPermission,
+    removePermission,
+    togglePermission,
+    listContactGrants,
+    grantContact,
+    revokeContact,
   };
 }

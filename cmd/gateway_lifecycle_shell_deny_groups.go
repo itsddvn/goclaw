@@ -25,6 +25,19 @@ func subscribeShellDenyGroupsReload(msgBus *bus.MessageBus, toolsReg *tools.Regi
 			return
 		}
 		snapshot := updatedCfg.Clone()
+
+		if delegateTool, ok := toolsReg.Get("delegate"); ok {
+			if dt, ok := delegateTool.(*tools.DelegateTool); ok {
+				timeoutSeconds := snapshot.Tools.DelegateAsyncTimeoutSeconds
+				if timeoutSeconds == 0 {
+					timeoutSeconds = config.DefaultDelegateAsyncTimeoutSeconds
+				}
+				dt.SetAsyncTimeoutSeconds(snapshot.Tools.DelegateAsyncTimeoutSeconds)
+				slog.Info("delegate async timeout reloaded via pub/sub",
+					"timeout_seconds", timeoutSeconds,
+				)
+			}
+		}
 		execTool, ok := toolsReg.Get("exec")
 		if !ok {
 			return
@@ -35,6 +48,7 @@ func subscribeShellDenyGroupsReload(msgBus *bus.MessageBus, toolsReg *tools.Regi
 		}
 		et.SetGlobalShellDenyGroups(snapshot.Tools.ShellDenyGroups)
 		et.SetCommandKeywordAllowlist(snapshot.Tools.CommandKeywordAllowlist)
+		et.SetTrustedDelegationHostAgents(snapshot.Tools.TrustedDelegationHostAgents)
 		slog.Info("shell deny groups reloaded via pub/sub",
 			"groups", len(snapshot.Tools.ShellDenyGroups),
 			"command_keyword_allowlist_rules", len(snapshot.Tools.CommandKeywordAllowlist),

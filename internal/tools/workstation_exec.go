@@ -23,13 +23,12 @@ import (
 )
 
 // PermCheckFn is the signature for workstation permission checks.
-// Phase 6 wires the real implementation; Phase 5 ships with a deny-all sentinel.
 // env is passed so the checker can also call CheckEnv to block forbidden env vars.
 type PermCheckFn func(ctx context.Context, ws *store.Workstation, cmd string, args []string, env map[string]string) error
 
-// denyAllSentinel is the default permCheck that blocks all exec until Phase 6 wires real checks.
+// denyAllSentinel blocks execution until the runtime wires a real checker.
 var denyAllSentinel PermCheckFn = func(_ context.Context, _ *store.Workstation, _ string, _ []string, _ map[string]string) error {
-	return errors.New("workstation permissions not configured; Phase 6 required")
+	return errors.New("workstation permissions are not configured")
 }
 
 const (
@@ -45,17 +44,18 @@ const (
 
 // WorkstationExecTool executes commands on a remote workstation backend.
 // Streams stdout/stderr as eventbus chunks; returns exit code + tails in *Result.
-// Registered Standard-edition only. Deny-all by default until Phase 6 wires permCheck.
+// Registered Standard-edition only. Deny-all by default until permCheck is wired.
 type WorkstationExecTool struct {
-	wsStore      store.WorkstationStore
-	linkStore    store.AgentWorkstationLinkStore
-	backendCache *workstation.BackendCache
-	eventBus     eventbus.DomainEventBus
-	permCheck    PermCheckFn
+	wsStore       store.WorkstationStore
+	linkStore     store.AgentWorkstationLinkStore
+	contactGrants store.WorkstationContactGrantStore
+	backendCache  *workstation.BackendCache
+	eventBus      eventbus.DomainEventBus
+	permCheck     PermCheckFn
 }
 
 // NewWorkstationExecTool creates a WorkstationExecTool.
-// permCheck defaults to deny-all sentinel — tools are non-functional until Phase 6 wires real checker.
+// permCheck defaults to deny-all sentinel so partial wiring fails closed.
 func NewWorkstationExecTool(
 	wsStore store.WorkstationStore,
 	linkStore store.AgentWorkstationLinkStore,
@@ -67,22 +67,28 @@ func NewWorkstationExecTool(
 		linkStore:    linkStore,
 		backendCache: backendCache,
 		eventBus:     eb,
-		// M7 fix: deny-all by default — tool is registered but non-functional until
-		// Phase 6 merges and calls SetPermCheck with a real implementation.
+		// Keep the tool non-functional until SetPermCheck installs a real policy.
 		permCheck: denyAllSentinel,
 	}
 }
 
 // SetPermCheck replaces the default deny-all sentinel with a real permission checker.
-// Called by Phase 6 during gateway wiring.
+// Called during gateway wiring.
 func (t *WorkstationExecTool) SetPermCheck(fn PermCheckFn) {
 	t.permCheck = fn
+}
+
+// SetContactGrantStore enables exact Contact authorization for workstation actions.
+// A nil store remains fail-closed so a partially wired gateway cannot bypass
+// the Contact access policy.
+func (t *WorkstationExecTool) SetContactGrantStore(contactGrants store.WorkstationContactGrantStore) {
+	t.contactGrants = contactGrants
 }
 
 func (t *WorkstationExecTool) Name() string { return "workstation_exec" }
 
 func (t *WorkstationExecTool) Description() string {
-	return "Execute a command on a remote user-owned workstation (SSH or Docker backend). " +
+	return "Execute a command on an assigned remote workstation (SSH or Docker backend). " +
 		"Streams stdout/stderr as events. Returns exit code and output tail."
 }
 
@@ -92,11 +98,11 @@ func (t *WorkstationExecTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"workstation_id": map[string]any{
 				"type":        "string",
-				"description": "Workstation UUID or workstation_key (optional if agent has a default binding)",
+				"description": "Assigned workstation UUID or key (optional with one assignment or a default)",
 			},
 			"command": map[string]any{
 				"type":        "string",
-				"description": "Command to execute",
+				"description": "Single executable name or path (for example curl). Pass every argument separately in args; shell command strings, pipes, redirects, and operators are not supported.",
 			},
 			"args": map[string]any{
 				"type":  "array",
@@ -118,7 +124,7 @@ func (t *WorkstationExecTool) Parameters() map[string]any {
 			"persistent": map[string]any{
 				"type":        "boolean",
 				"default":     false,
-				"description": "Use persistent tmux session (Phase 4 deferred; currently unsupported)",
+				"description": "Use a persistent tmux session (currently unsupported)",
 			},
 		},
 		"required": []string{"command"},
@@ -138,6 +144,9 @@ func (t *WorkstationExecTool) Execute(ctx context.Context, args map[string]any) 
 	}
 	if strings.ContainsRune(cmd, '\x00') {
 		return ErrorResult("command contains invalid NUL byte")
+	}
+	if err := validateWorkstationExecutable(cmd); err != nil {
+		return ErrorResult(err.Error())
 	}
 	if len(cmd) > execMaxCmdBytes {
 		return ErrorResult(fmt.Sprintf("command exceeds %d byte limit", execMaxCmdBytes))
@@ -161,9 +170,9 @@ func (t *WorkstationExecTool) Execute(ctx context.Context, args map[string]any) 
 		return ErrorResult("env: " + err.Error())
 	}
 
-	// Reject persistent=true until Phase 4 SessionManager is wired.
+	// Reject persistent sessions until a session manager is wired.
 	if persistent, _ := args["persistent"].(bool); persistent {
-		return ErrorResult("persistent sessions not yet supported (Phase 4 deferred)")
+		return ErrorResult("persistent sessions are not supported")
 	}
 
 	// 1. Resolve workstation.
@@ -172,7 +181,13 @@ func (t *WorkstationExecTool) Execute(ctx context.Context, args map[string]any) 
 		return ErrorResult(err.Error())
 	}
 
-	// 2. Permission check — deny-all by default until Phase 6.
+	// 2. The acting tenant user must also be explicitly granted. This is
+	// independent from the agent assignment above; both checks are required.
+	if err := t.requireWorkstationContactAccess(ctx, ws); err != nil {
+		return ErrorResult(err.Error())
+	}
+
+	// 3. Permission check — deny-all unless a real checker was wired.
 	// env is passed so the checker can invoke CheckEnv for env var blocklist.
 	if permErr := t.permCheck(ctx, ws, cmd, execArgs, envMap); permErr != nil {
 		slog.Warn("security.workstation_exec_denied",
@@ -180,16 +195,16 @@ func (t *WorkstationExecTool) Execute(ctx context.Context, args map[string]any) 
 			"agent_id", agentID,
 			"cmd_hash", fmt.Sprintf("%x", sha256.Sum256([]byte(cmd)))[:12],
 		)
-		return ErrorResult(i18n.T(locale, i18n.MsgWorkstationAccessDenied, agentID, ws.WorkstationKey))
+		return ErrorResult(permErr.Error())
 	}
 
-	// 3. Get backend from cache.
+	// 4. Get backend from cache.
 	backend, err := t.backendCache.Get(ctx, ws.ID)
 	if err != nil {
 		return ErrorResult(i18n.T(locale, i18n.MsgBackendNotReady, err.Error()))
 	}
 
-	// 4. Build timeout context.
+	// 5. Build timeout context.
 	timeoutSec, _ := args["timeout_sec"].(float64)
 	if timeoutSec <= 0 {
 		timeoutSec = 300
@@ -197,7 +212,7 @@ func (t *WorkstationExecTool) Execute(ctx context.Context, args map[string]any) 
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	// 5. Open session and exec.
+	// 6. Open session and exec.
 	sessionKey := ToolSessionKeyFromCtx(ctx)
 	if sessionKey == "" {
 		sessionKey = uuid.New().String()
@@ -222,8 +237,8 @@ func (t *WorkstationExecTool) Execute(ctx context.Context, args map[string]any) 
 		return ErrorResult(i18n.T(locale, i18n.MsgBackendNotReady, err.Error()))
 	}
 
-	// 6. Stream output and collect result.
-	// I3 fix: pass full command string so activity sink can compute meaningful cmd_hash/preview.
+	// 7. Stream output and collect result.
+	// Pass the full display command so the activity sink can compute a meaningful hash/preview.
 	cmdFull := cmd
 	if len(execArgs) > 0 {
 		cmdFull = cmd + " " + strings.Join(execArgs, " ")
@@ -239,8 +254,15 @@ func (t *WorkstationExecTool) Execute(ctx context.Context, args map[string]any) 
 	return result
 }
 
+func validateWorkstationExecutable(cmd string) error {
+	if strings.TrimSpace(cmd) != cmd || strings.ContainsAny(cmd, " \t\r\n;&|<>`$(){}[]*?!'\"\\") {
+		return errors.New("command must be a single executable; pass arguments via args (shell command strings are not supported)")
+	}
+	return nil
+}
+
 // resolveWorkstation resolves the target workstation from args or agent's default link.
-// Applies tenant check on all resolution paths (C3 fix).
+// Applies a tenant check on every resolution path.
 func (t *WorkstationExecTool) resolveWorkstation(ctx context.Context, args map[string]any, agentUUID uuid.UUID) (*store.Workstation, error) {
 	locale := store.LocaleFromContext(ctx)
 	tid := store.TenantIDFromContext(ctx)
@@ -251,9 +273,12 @@ func (t *WorkstationExecTool) resolveWorkstation(ctx context.Context, args map[s
 			if err != nil {
 				return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationNotFound, raw))
 			}
-			// C3 fix: tenant check on explicit UUID path.
+			// Explicit UUID targets still require tenant isolation.
 			if ws.TenantID != tid {
 				return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationAccessDenied, agentUUID.String(), raw))
+			}
+			if err := t.requireWorkstationAccess(ctx, agentUUID, ws); err != nil {
+				return nil, err
 			}
 			return ws, nil
 		}
@@ -261,6 +286,9 @@ func (t *WorkstationExecTool) resolveWorkstation(ctx context.Context, args map[s
 		ws, err := t.wsStore.GetByKey(ctx, raw)
 		if err != nil {
 			return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationNotFound, raw))
+		}
+		if err := t.requireWorkstationAccess(ctx, agentUUID, ws); err != nil {
+			return nil, err
 		}
 		return ws, nil
 	}
@@ -270,7 +298,14 @@ func (t *WorkstationExecTool) resolveWorkstation(ctx context.Context, args map[s
 		return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationRequired))
 	}
 	links, err := t.linkStore.ListForAgent(ctx, agentUUID)
-	if err != nil || len(links) == 0 {
+	if err != nil {
+		slog.Warn("security.workstation_assignment_check_failed",
+			"agent_id", agentUUID,
+			"error", err,
+		)
+		return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationAccessCheckFailed))
+	}
+	if len(links) == 0 {
 		return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationRequired))
 	}
 
@@ -286,14 +321,14 @@ func (t *WorkstationExecTool) resolveWorkstation(ctx context.Context, args map[s
 		chosen = &links[0]
 	}
 	if chosen == nil {
-		return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationRequired))
+		return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationDefaultRequired))
 	}
 
 	ws, err := t.wsStore.GetByID(ctx, chosen.WorkstationID)
 	if err != nil {
 		return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationNotFound, chosen.WorkstationID.String()))
 	}
-	// C3 fix: tenant check on default-link path prevents cross-tenant leak via stale cache / impersonation.
+	// Default links also require tenant isolation to contain stale or forged links.
 	if ws.TenantID != tid {
 		slog.Warn("security.workstation_cross_tenant_default_link",
 			"agent_id", agentUUID,
@@ -304,6 +339,68 @@ func (t *WorkstationExecTool) resolveWorkstation(ctx context.Context, args map[s
 		return nil, errors.New(i18n.T(locale, i18n.MsgWorkstationAccessDenied, agentUUID.String(), chosen.WorkstationID.String()))
 	}
 	return ws, nil
+}
+
+func (t *WorkstationExecTool) requireWorkstationAccess(ctx context.Context, agentID uuid.UUID, ws *store.Workstation) error {
+	locale := store.LocaleFromContext(ctx)
+	if agentID == uuid.Nil {
+		return errors.New(i18n.T(locale, i18n.MsgWorkstationRequired))
+	}
+	allowed, err := t.linkStore.HasAccess(ctx, agentID, ws.ID)
+	if err != nil {
+		slog.Warn("security.workstation_assignment_check_failed",
+			"agent_id", agentID,
+			"workstation_id", ws.ID,
+			"error", err,
+		)
+		return errors.New(i18n.T(locale, i18n.MsgWorkstationAccessCheckFailed))
+	}
+	if allowed {
+		return nil
+	}
+	slog.Warn("security.workstation_assignment_denied",
+		"agent_id", agentID,
+		"workstation_id", ws.ID,
+	)
+	return errors.New(i18n.T(locale, i18n.MsgWorkstationAccessDenied, agentID.String(), ws.WorkstationKey))
+}
+
+func (t *WorkstationExecTool) requireWorkstationContactAccess(ctx context.Context, ws *store.Workstation) error {
+	locale := store.LocaleFromContext(ctx)
+	contactID := store.WorkstationContactIDFromContext(ctx)
+	if contactID == uuid.Nil {
+		slog.Warn("security.workstation_contact_access_denied",
+			"workstation_id", ws.ID,
+			"reason", "missing_contact_id",
+		)
+		return errors.New(i18n.T(locale, i18n.MsgWorkstationContactAccessDenied, ws.WorkstationKey))
+	}
+	if t.contactGrants == nil {
+		slog.Warn("security.workstation_contact_access_check_failed",
+			"workstation_id", ws.ID,
+			"contact_id", contactID,
+			"reason", "store_not_configured",
+		)
+		return errors.New(i18n.T(locale, i18n.MsgWorkstationContactAccessCheckFailed))
+	}
+	allowed, err := t.contactGrants.HasAccess(ctx, ws.ID, contactID)
+	if err != nil {
+		slog.Warn("security.workstation_contact_access_check_failed",
+			"workstation_id", ws.ID,
+			"contact_id", contactID,
+			"error", err,
+		)
+		return errors.New(i18n.T(locale, i18n.MsgWorkstationContactAccessCheckFailed))
+	}
+	if allowed {
+		return nil
+	}
+	slog.Warn("security.workstation_contact_access_denied",
+		"workstation_id", ws.ID,
+		"contact_id", contactID,
+		"reason", "grant_not_found",
+	)
+	return errors.New(i18n.T(locale, i18n.MsgWorkstationContactAccessDenied, ws.WorkstationKey))
 }
 
 // streamAndCollect reads stdout/stderr from stream, emits eventbus chunks, and waits for exit.
@@ -409,7 +506,7 @@ func (t *WorkstationExecTool) streamAndCollect(
 				"duration_ms":    durationMs,
 				"stdout_tail":    stdoutTail.String(),
 				"stderr_tail":    stderrTail.String(),
-				// I3 fix: include command for meaningful cmd_hash/cmd_preview in activity sink.
+				// Include the display command for activity hash/preview generation.
 				"command": cmdFull,
 			},
 		})

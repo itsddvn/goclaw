@@ -214,6 +214,7 @@ func setupToolRegistry(
 			// Per-agent overrides via store.WithShellDenyGroups still win per-key.
 			et.SetGlobalShellDenyGroups(cfg.Tools.ShellDenyGroups)
 			et.SetCommandKeywordAllowlist(cfg.Tools.CommandKeywordAllowlist)
+			et.SetTrustedDelegationHostAgents(cfg.Tools.TrustedDelegationHostAgents)
 			et.DenyPaths(dataDir, ".goclaw/")
 			// Allow skills execution: master-tenant skills-store + all tenant-scoped skills-store dirs.
 			et.AllowPathExemptions(

@@ -84,8 +84,57 @@ The agent loop also uses this metadata for parallel tool-call scheduling. Only r
 | Tool | Description |
 |---|---|
 | `exec` | Execute a shell command; supports credentialed CLI mode for secure credential injection |
+| `workstation_exec` | Execute on a tenant-owned SSH/Docker workstation; Standard edition only |
 
 **Credentialed CLI mode** — when the invoked binary is registered in `secure_cli_binaries`, the exec tool injects encrypted env vars directly into the child process (no shell involved) and verifies the agent has an explicit grant. Shell-wrapper unwrapping (up to depth 3) prevents bypass via `sh -c`. Fail-closed on DB error.
+
+**Workstation routing** — workstation access is strict default-deny and requires three independent grants: the Agent is assigned, the exact channel Contact who issued the instruction is allowed, and the executable matches an enabled workstation permission. Group instructions resolve the individual sender Contact rather than the group's shared credential identity. Contact merges do not expand access. An explicit `workstation_id` cannot bypass assignment. Without a target, a sole assignment is selected automatically; multiple assignments require a default. The tool contract is one executable in `command` plus separate `args`; shell command strings and pipelines are rejected. Executable enforcement lives in `internal/tools/workstation_exec.go` and `internal/workstation/security/allowlist.go`.
+
+#### Trusted delegated host exec
+
+In the web dashboard, open **Config → Tools → Trusted delegated host execution**
+as a system owner in master scope. Toggle an agent and click **Save**. Enabling
+requires confirmation of host-level access; disabling removes the grant.
+Changes apply immediately without restarting. Revocation blocks subsequent
+commands, not processes already running. Grants outside the current agent list
+remain visible by UUID and are preserved unless explicitly disabled.
+
+Host execution for a delegated agent is disabled by default. An operator may
+grant it only in the global `tools` configuration, using exact tenant and agent
+UUID pairs:
+
+```json
+{
+  "tools": {
+    "trustedDelegationHostAgents": [
+      {
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "agent_id": "22222222-2222-2222-2222-222222222222"
+      }
+    ]
+  }
+}
+```
+
+This is a high-trust exception, not a general sandbox escape hatch:
+
+- It applies only to delegated `exec` calls whose resolved tenant and agent
+  context exactly match one configured non-nil UUID pair. Direct `exec` calls
+  and all unlisted delegated agents keep their normal sandbox routing.
+- A matching delegated call explicitly uses the host, including an absolute
+  `working_dir`; host shell access is not physical filesystem isolation.
+- Filesystem tools do **not** gain host access: delegated file reads and writes
+  remain confined to staged artifacts (`inputs/` read-only and published
+  `outputs/`).
+- Command deny rules, execution approval, and credentialed-CLI agent grants
+  still apply before execution. The allowlist changes routing only; it does not
+  grant commands or credentials.
+
+Applying global configuration replaces the list. A global configuration patch
+replaces it when it includes `trustedDelegationHostAgents`; remove an entry to
+revoke the exception. Direct edits to the config file require a gateway restart
+to take effect. Empty or absent configuration leaves every delegated agent
+sandboxed.
 
 ### Web (`group:web`)
 
@@ -145,6 +194,13 @@ Memory layers: L1 (`memory_search`) returns ranked abstracts; L2 (`memory_expand
 | Tool | Description |
 |---|---|
 | `delegate` | Inter-agent task delegation via `agent_links` (async/sync, optional structured input files, isolated output publication) |
+
+Async delegation defaults to 30 minutes. System owners can change it under
+**Config → Tools → Async delegation timeout** (1–60 whole minutes). The stored
+`tools.delegateAsyncTimeoutSeconds` accepts 60–3600 seconds; absent or zero uses
+1800 seconds. Saving applies live to new jobs; existing jobs retain their original
+deadline. The `timeout` tool argument controls only sync mode (300 seconds by
+default, capped at 600 seconds).
 
 ### Teams (`group:team`)
 

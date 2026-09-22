@@ -323,3 +323,29 @@ func (s *SQLiteContactStore) ResolveTenantUserID(ctx context.Context, channelTyp
 	}
 	return tenantUserID, err
 }
+
+func (s *SQLiteContactStore) ResolveContactID(ctx context.Context, channelType, senderID string) (uuid.UUID, error) {
+	tid := store.TenantIDFromContext(ctx)
+	if tid == uuid.Nil || channelType == "" || senderID == "" {
+		return uuid.Nil, nil
+	}
+
+	var rawID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id
+		 FROM channel_contacts
+		 WHERE tenant_id = ? AND channel_type = ? AND sender_id = ?
+		   AND contact_type = 'user'
+		 ORDER BY CASE WHEN COALESCE(thread_id, '') = '' THEN 0 ELSE 1 END,
+		          last_seen_at DESC
+		 LIMIT 1`,
+		tid.String(), channelType, senderID,
+	).Scan(&rawID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.Parse(rawID)
+}

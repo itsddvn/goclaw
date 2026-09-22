@@ -520,7 +520,7 @@ func runGateway() {
 
 	// Register workstation_exec + claude_remote tools (Standard edition only; deny-all until Phase 6).
 	// cleanupWorkstation stops the activity sink retention goroutine and drains the write buffer.
-	cleanupWorkstation := wireWorkstationTools(pgStores, toolsReg, domainBus)
+	cleanupWorkstation, workstationBackendInvalidate, workstationPermissionInvalidate := wireWorkstationTools(pgStores, toolsReg, domainBus)
 	defer cleanupWorkstation()
 
 	// Create all agents — resolved lazily from database by the managed resolver.
@@ -627,23 +627,25 @@ func runGateway() {
 
 	// Populate shared deps struct used by extracted helper methods.
 	deps := &gatewayDeps{
-		cfg:              cfg,
-		server:           server,
-		msgBus:           msgBus,
-		pgStores:         pgStores,
-		providerRegistry: providerRegistry,
-		agentRouter:      agentRouter,
-		toolsReg:         toolsReg,
-		skillsLoader:     skillsLoader,
-		enrichProgress:   enrichProgress,
-		enrichWorker:     enrichWorker,
-		channelMemorySvc: channelMemorySvc,
-		workspace:        workspace,
-		dataDir:          dataDir,
-		domainBus:        domainBus,
-		usageCapSvc:      usageCapSvc,
-		audioMgr:         audioMgr,
-		teamWorkEmbedder: teamWorkEmbedder,
+		cfg:                             cfg,
+		server:                          server,
+		msgBus:                          msgBus,
+		pgStores:                        pgStores,
+		providerRegistry:                providerRegistry,
+		agentRouter:                     agentRouter,
+		toolsReg:                        toolsReg,
+		skillsLoader:                    skillsLoader,
+		enrichProgress:                  enrichProgress,
+		enrichWorker:                    enrichWorker,
+		channelMemorySvc:                channelMemorySvc,
+		workspace:                       workspace,
+		dataDir:                         dataDir,
+		domainBus:                       domainBus,
+		usageCapSvc:                     usageCapSvc,
+		audioMgr:                        audioMgr,
+		teamWorkEmbedder:                teamWorkEmbedder,
+		workstationBackendInvalidate:    workstationBackendInvalidate,
+		workstationPermissionInvalidate: workstationPermissionInvalidate,
 	}
 
 	gatewayAddr := loopbackAddr(cfg.Gateway.Host, cfg.Gateway.Port)
@@ -776,6 +778,11 @@ func runGateway() {
 		if pgStores.WorkstationActivity != nil {
 			wsMethods.SetActivityStore(pgStores.WorkstationActivity)
 		}
+		if pgStores.WorkstationContactGrants != nil {
+			wsMethods.SetContactGrantStore(pgStores.WorkstationContactGrants)
+		}
+		wsMethods.SetCacheInvalidators(workstationBackendInvalidate, workstationPermissionInvalidate)
+		wsMethods.SetEventBus(domainBus)
 		wsMethods.Register(server.Router())
 		slog.Info("registered workstations RPC methods")
 	}

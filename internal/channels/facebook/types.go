@@ -21,9 +21,6 @@ type facebookInstanceConfig struct {
 		IncludePostContext bool `json:"include_post_context"`
 		MaxThreadDepth     int  `json:"max_thread_depth"`
 	} `json:"comment_reply_options"`
-	MessengerOptions struct {
-		SessionTimeout string `json:"session_timeout"`
-	} `json:"messenger_options"`
 	PostContextCacheTTL string `json:"post_context_cache_ttl"`
 	// FirstInboxMessage is the DM text sent to commenters (first-inbox feature).
 	// Defaults to Vietnamese if empty. Operators should set this to match their page language.

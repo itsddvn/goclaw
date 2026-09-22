@@ -16,6 +16,7 @@ flowchart LR
         ZL["Zalo OA"]
         ZLP["Zalo Personal"]
         WA["WhatsApp"]
+        FB["Facebook Messenger"]
     end
 
     subgraph "Channel Layer"
@@ -40,6 +41,7 @@ flowchart LR
     ZL --> CH
     ZLP --> CH
     WA --> CH
+    FB --> CH
     CH --> HM
     HM --> BUS
     BUS --> AGENT
@@ -53,6 +55,7 @@ flowchart LR
     SEND --> ZL
     SEND --> ZLP
     SEND --> WA
+    SEND --> FB
 ```
 
 Internal channels (`cli`, `system`, `subagent`, `browser`) are silently skipped by the outbound dispatcher and never forwarded to external platforms. The `browser` channel uses WebSocket directly on the gateway connection.
@@ -207,6 +210,88 @@ flowchart TD
     WH -->|Yes| MOUNT["Mount handler on main mux<br/>(e.g., /feishu/events)"]
     WH -->|No| SKIP["Channel uses its own transport<br/>(polling, gateway events, etc.)"]
 ```
+
+### Native Facebook Messenger Setup
+
+The native `facebook` channel connects one Facebook Page to one GoClaw agent.
+It uses one public callback for both webhook verification and event delivery:
+
+```text
+https://<public-goclaw-host>/v1/channels/facebook/webhook
+```
+
+The host must be publicly reachable over HTTPS with a valid certificate. Meta
+does not accept localhost, private-network hosts, or self-signed certificates.
+
+#### Values entered in GoClaw
+
+| GoClaw field | Value | Source |
+|---|---|---|
+| Page Access Token | Meta-generated Page token. Do not use a User Access Token, App Access Token, or Client Token. | App Dashboard → Customize **Engage with customers on Messenger** → Messenger API Setup → Generate access tokens → Connect. `GET /me/accounts` is the API alternative. |
+| App Secret | App credential used to verify `X-Hub-Signature-256`. | App Dashboard → App settings/Settings → Basic → App Secret. |
+| Webhook Verify Token | Random value chosen by the operator. It is not issued by Meta and does not authorize Graph API calls. | Generate it in the GoClaw form, then paste the identical value into Messenger API Setup → Configure webhooks → Verify token. |
+| Page ID | Numeric ID of the connected Facebook Page. It is not a Page-scoped user ID (PSID). | The connected Page or the same `/me/accounts` response that returns the Page token. |
+
+Credentials are masked in API responses. At-rest encryption requires
+`GOCLAW_ENCRYPTION_KEY`; the standard `goclaw onboard` flow generates it.
+
+#### Meta App Dashboard sequence
+
+1. Create or customize the **Engage with customers on Messenger** use case.
+2. Connect the Facebook Page under **Messenger API Setup → Generate access tokens**.
+3. Copy Page Access Token, Page ID, and App Secret into GoClaw. Generate and copy
+   the Webhook Verify Token. Enable **Messenger Auto-Reply**; otherwise inbox
+   events are intentionally ignored.
+4. Create the GoClaw channel instance. The shared callback is available without
+   restarting the gateway.
+5. In **Configure webhooks**, enter the public callback URL and the same Verify
+   Token. Older Meta apps may show the equivalent page under
+   **Products → Messenger → Settings**.
+6. Add app-level fields `messages`, `message_echoes`, and
+   `messaging_postbacks`. Add `feed` only when Comment Auto-Reply is enabled.
+   GoClaw requests the matching Page-level subscription during channel startup;
+   a required subscription failure leaves the channel unhealthy.
+7. Send a message to the Page from a permitted test account and confirm one
+   inbound event and one agent reply.
+
+Only fields subscribed at both app and Page level produce events.
+
+#### Permissions, access, and Page tasks
+
+| Capability | Required Meta permissions/access |
+|---|---|
+| Connect/list the Page | `pages_show_list`; the current Messenger use case also marks `business_management` and `public_profile` required. |
+| Subscribe Page webhooks | `pages_manage_metadata` and a Page token requested by a person with an accepted Page task. The Graph reference lists `CREATE_CONTENT`, `MANAGE`, or `MODERATE`. |
+| Receive/send Messenger messages | `pages_messaging`; the token requester must be able to perform the Page `MESSAGING` task. |
+| Read user comments | `pages_read_user_content` when Comment Auto-Reply is enabled. |
+| Read Page/post engagement context | `pages_read_engagement` when comment/post context is used. |
+| Publish comment replies | `pages_manage_engagement` when Comment Auto-Reply is enabled. |
+
+Standard Access is sufficient for app users who have a role on the app. Serving
+people without an app role requires Business Verification, Advanced Access for
+the required permissions, App Review, and publishing the use case.
+
+Messenger `RESPONSE` messages normally must be sent within 24 hours after the
+person messages the Page. The person must initiate the conversation before the
+agent has a PSID to reply to.
+
+#### Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Meta callback validation returns 403 | The Meta Verify token must exactly match the GoClaw Webhook Verify Token. |
+| Webhook events log an invalid signature | Confirm the App Secret belongs to the app that owns the target Page subscription. |
+| Channel reports Page mismatch | Page ID and Page Access Token belong to different Pages; retrieve them from the same connected Page. |
+| Page subscription fails | Confirm token validity, `pages_manage_metadata`, `pages_show_list`, `pages_messaging`, Page task, and that the Page is connected to the app. |
+| Messages arrive but the agent does not reply | Enable Messenger Auto-Reply, check allowlist settings, and verify the 24-hour response window. |
+| Works for app roles but not real customers | Complete Business Verification, Advanced Access, App Review, and Publish. |
+
+Official references:
+[Messenger use case](https://developers.facebook.com/documentation/development/create-an-app/messenger-use-case),
+[Messenger Get Started](https://developers.facebook.com/documentation/business-messaging/messenger-platform/get-started),
+[Messenger Webhooks](https://developers.facebook.com/documentation/business-messaging/messenger-platform/webhooks),
+[Page subscribed apps](https://developers.facebook.com/docs/graph-api/reference/page/subscribed_apps/),
+and [App Secret security](https://developers.facebook.com/documentation/facebook-login/security#appsecret).
 
 ---
 

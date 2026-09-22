@@ -473,6 +473,7 @@ func wireExtras(
 			}, nil
 		}
 		delegateTool := tools.NewDelegateToolWithAdmission(stores.AgentLinks, stores.Agents, domainBus, delegateRunFn, childRunAdmission)
+		delegateTool.SetAsyncTimeoutSeconds(appCfg.Tools.DelegateAsyncTimeoutSeconds)
 		delegateTool.SetDataDir(appCfg.DataDir)
 		delegateTool.SetWorkspace(workspace)
 		delegateTool.SetMsgBus(msgBus)

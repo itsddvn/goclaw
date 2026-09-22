@@ -303,6 +303,16 @@ The MCP server store manages external tool server configurations and access gran
 
 ---
 
+## 8.1 Workstation Store
+
+Remote execution uses `workstations` for tenant-owned SSH/Docker connection definitions, `agent_workstation_links` for explicit Agent access, `workstation_contact_grants` for exact channel-Contact access, and `workstation_permissions` for executable policy. The executable schema owners are the PostgreSQL migrations and `internal/store/sqlitestore/schema.sql`.
+
+`AgentWorkstationLinkStore.Link` validates the agent and workstation against the request tenant before upserting. Setting a default clears the previous default and writes the new assignment in one transaction. `HasAccess` joins both owning entities and the link on `tenant_id`, so stale or cross-tenant rows cannot authorize execution.
+
+Agent and Contact grants are independent and both default-deny. Contact grants reference `channel_contacts.id`; runtime resolves the exact sender Contact, including sender-first resolution in group conversations. `merged_id` is deliberately ignored, so allowing one Contact never allows its merged siblings. Store contracts live in `internal/store/workstation_store.go`.
+
+---
+
 ## 9. Custom Tool Store
 
 Dynamic tool definitions stored in PostgreSQL. Each tool defines a shell command template that the LLM can invoke at runtime.

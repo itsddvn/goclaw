@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,7 +45,7 @@ func NewGraphClient(pageAccessToken, pageID string) *GraphClient {
 	}
 }
 
-// VerifyToken checks the page access token by calling GET /me.
+// VerifyToken checks that the page access token belongs to the configured Page.
 func (g *GraphClient) VerifyToken(ctx context.Context) error {
 	data, err := g.doRequest(ctx, http.MethodGet, "/me?fields=id,name", nil)
 	if err != nil {
@@ -57,21 +58,39 @@ func (g *GraphClient) VerifyToken(ctx context.Context) error {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return fmt.Errorf("facebook: token verification parse error: %w", err)
 	}
+	if result.ID == "" || result.ID != g.pageID {
+		return fmt.Errorf(
+			"facebook: page access token belongs to page_id %q, configured page_id is %q",
+			result.ID, g.pageID,
+		)
+	}
 	slog.Info("facebook: page token verified", "page_id", result.ID, "name", result.Name)
 	return nil
 }
 
-// SubscribeApp subscribes the app to the page's webhook events.
-func (g *GraphClient) SubscribeApp(ctx context.Context) error {
+// SubscribeApp subscribes the app to the requested page webhook fields.
+func (g *GraphClient) SubscribeApp(ctx context.Context, fields []string) error {
+	if len(fields) == 0 {
+		return nil
+	}
 	if err := validateFBID(g.pageID); err != nil {
 		return fmt.Errorf("facebook: subscribe app: %w", err)
 	}
-	path := fmt.Sprintf("/%s/subscribed_apps?subscribed_fields=feed,messages", g.pageID)
-	_, err := g.doRequest(ctx, http.MethodPost, path, nil)
+	path := fmt.Sprintf("/%s/subscribed_apps?subscribed_fields=%s", g.pageID, strings.Join(fields, ","))
+	data, err := g.doRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
 		return fmt.Errorf("facebook: subscribe app failed: %w", err)
 	}
-	slog.Info("facebook: app subscribed to page webhooks", "page_id", g.pageID)
+	var result struct {
+		Success bool `json:"success"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("facebook: subscribe app response parse error: %w", err)
+	}
+	if !result.Success {
+		return errors.New("facebook: subscribe app failed: Graph API returned success=false")
+	}
+	slog.Info("facebook: app subscribed to page webhooks", "page_id", g.pageID, "fields", fields)
 	return nil
 }
 

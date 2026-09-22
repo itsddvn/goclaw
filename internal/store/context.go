@@ -52,6 +52,9 @@ const (
 	// CredentialUserIDKey holds the resolved tenant user identity for credential lookups.
 	// Falls back to UserIDFromContext if not set.
 	CredentialUserIDKey contextKey = "goclaw_credential_user_id"
+	// WorkstationContactIDKey holds the exact Contact UUID currently instructing
+	// an agent to use a workstation. It never follows merged tenant identity.
+	WorkstationContactIDKey contextKey = "goclaw_workstation_contact_id"
 	// SenderNameKey is the display name from channel metadata (for bootstrap auto-contact).
 	SenderNameKey contextKey = "goclaw_sender_name"
 	// ChannelContextScopeKey carries the channel/group/user scope for runtime grants and credentials.
@@ -141,6 +144,24 @@ func CredentialUserIDFromContext(ctx context.Context) string {
 		return rc.CredentialUserID
 	}
 	return UserIDFromContext(ctx)
+}
+
+// WithWorkstationContactID returns a context carrying the exact Contact whose
+// workstation grant must be checked.
+func WithWorkstationContactID(ctx context.Context, id uuid.UUID) context.Context {
+	return context.WithValue(ctx, WorkstationContactIDKey, id)
+}
+
+// WorkstationContactIDFromContext returns the explicitly resolved Contact.
+// There is no credential/user fallback: unresolved requests fail closed.
+func WorkstationContactIDFromContext(ctx context.Context) uuid.UUID {
+	if v, ok := ctx.Value(WorkstationContactIDKey).(uuid.UUID); ok {
+		return v
+	}
+	if rc := RunContextFromCtx(ctx); rc != nil && rc.WorkstationContactResolved {
+		return rc.WorkstationContactID
+	}
+	return uuid.Nil
 }
 
 // WithAgentContextWindow returns a context carrying the configured agent window.

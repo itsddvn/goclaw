@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -21,6 +22,7 @@ type Registry struct {
 	aliases     map[string]string       // alias name → canonical tool name
 	disabled    map[string]bool         // tools disabled via admin UI (kept in registry, excluded from List)
 	mu          sync.RWMutex
+	revision    atomic.Uint64    // increments whenever provider-visible tools or policy groups change
 	rateLimiter *ToolRateLimiter // nil = no rate limiting
 	scrubbing   bool             // scrub credentials from output (default true)
 
@@ -80,21 +82,29 @@ func (r *Registry) SetScrubbing(enabled bool) {
 	r.scrubbing = enabled
 }
 
+// Revision returns the current registry mutation revision.
+// Callers may cache derived tool definitions until this value changes.
+func (r *Registry) Revision() uint64 {
+	return r.revision.Load()
+}
+
 // Register adds a tool to the registry.
 func (r *Registry) Register(tool Tool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.tools[tool.Name()] = tool
+	r.revision.Add(1)
+	r.mu.Unlock()
 }
 
 // RegisterWithMetadata adds a tool with explicit capability metadata.
 func (r *Registry) RegisterWithMetadata(tool Tool, meta ToolMetadata) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	name := tool.Name()
 	r.tools[name] = tool
 	meta.Name = name
 	r.metadata[name] = meta
+	r.revision.Add(1)
+	r.mu.Unlock()
 }
 
 // GetMetadata returns capability metadata for a tool.
@@ -118,6 +128,7 @@ func (r *Registry) RegisterAlias(alias, canonical string) {
 		return
 	}
 	r.aliases[alias] = canonical
+	r.revision.Add(1)
 }
 
 // Aliases returns a copy of the alias map.
@@ -158,8 +169,9 @@ func (r *Registry) Get(name string) (Tool, bool) {
 // Unregister removes a tool from the registry by name.
 func (r *Registry) Unregister(name string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	delete(r.tools, name)
+	r.revision.Add(1)
+	r.mu.Unlock()
 }
 
 // Execute runs a tool by name with the given arguments.
@@ -325,15 +337,17 @@ func (r *Registry) List() []string {
 // without removing it from the registry. Can be re-enabled later.
 func (r *Registry) Disable(name string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.disabled[name] = true
+	r.revision.Add(1)
+	r.mu.Unlock()
 }
 
 // Enable re-enables a previously disabled tool.
 func (r *Registry) Enable(name string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	delete(r.disabled, name)
+	r.revision.Add(1)
+	r.mu.Unlock()
 }
 
 // Count returns the number of registered tools.
@@ -361,6 +375,7 @@ func (r *Registry) Clone() *Registry {
 		rateLimiter: r.rateLimiter,
 		scrubbing:   r.scrubbing,
 	}
+	clone.revision.Store(r.revision.Load())
 	maps.Copy(clone.tools, r.tools)
 	maps.Copy(clone.metadata, r.metadata)
 	maps.Copy(clone.aliases, r.aliases)
@@ -377,6 +392,7 @@ func (r *Registry) Clone() *Registry {
 func (r *Registry) RegisterToolGroup(name string, members []string) {
 	r.toolGroupsMu.Lock()
 	r.toolGroups[name] = members
+	r.revision.Add(1)
 	r.toolGroupsMu.Unlock()
 }
 
@@ -384,7 +400,6 @@ func (r *Registry) RegisterToolGroup(name string, members []string) {
 // Used by per-user MCP tool loading to extend the "mcp" group incrementally.
 func (r *Registry) MergeToolGroup(name string, members []string) {
 	r.toolGroupsMu.Lock()
-	defer r.toolGroupsMu.Unlock()
 	existing := r.toolGroups[name]
 	seen := make(map[string]bool, len(existing))
 	for _, m := range existing {
@@ -397,12 +412,15 @@ func (r *Registry) MergeToolGroup(name string, members []string) {
 		}
 	}
 	r.toolGroups[name] = existing
+	r.revision.Add(1)
+	r.toolGroupsMu.Unlock()
 }
 
 // UnregisterToolGroup removes a dynamic tool group.
 func (r *Registry) UnregisterToolGroup(name string) {
 	r.toolGroupsMu.Lock()
 	delete(r.toolGroups, name)
+	r.revision.Add(1)
 	r.toolGroupsMu.Unlock()
 }
 

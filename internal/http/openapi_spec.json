@@ -24,6 +24,7 @@
     { "name": "OAuth", "description": "Provider-scoped OAuth status and quota endpoints" },
     { "name": "Skills", "description": "Skill management and grants" },
     { "name": "MCP Servers", "description": "MCP server configuration and grants" },
+    { "name": "Workstations", "description": "Remote execution workstations and authorization management" },
     { "name": "Custom Tools", "description": "Custom tool definitions" },
     { "name": "Built-in Tools", "description": "Built-in tool configuration" },
     { "name": "Browser", "description": "Browser automation cookie sync" },
@@ -6501,6 +6502,251 @@
         }
       }
     },
+    "/v1/workstations": {
+      "get": {
+        "tags": ["Workstations"],
+        "summary": "List tenant workstations (tenant admin)",
+        "responses": {
+          "200": { "description": "Workstation list" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "tags": ["Workstations"],
+        "summary": "Create a workstation (tenant admin)",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkstationCreate" } } }
+        },
+        "responses": {
+          "201": { "description": "Workstation created" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/workstations/{id}": {
+      "get": {
+        "tags": ["Workstations"],
+        "summary": "Get a sanitized workstation (tenant admin)",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Sanitized workstation" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "put": {
+        "tags": ["Workstations"],
+        "summary": "Edit workstation information and active state (tenant admin)",
+        "description": "Backend type and key are immutable. Blank SSH privateKey/password values preserve the stored secret.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkstationUpdate" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated sanitized workstation" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "tags": ["Workstations"],
+        "summary": "Delete a workstation (tenant admin)",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Workstation deleted" } }
+      }
+    },
+    "/v1/workstations/{id}/test": {
+      "post": {
+        "tags": ["Workstations"],
+        "summary": "Test the configured workstation connection (tenant admin)",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connection is healthy",
+            "content": { "application/json": { "schema": { "type": "object", "required": ["ok"], "properties": { "ok": { "type": "boolean", "enum": [true] } } } } }
+          },
+          "502": { "description": "Connection failed" }
+        }
+      }
+    },
+    "/v1/workstations/{id}/permissions": {
+      "get": {
+        "tags": ["Workstations"],
+        "summary": "List executable permissions (tenant admin)",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Executable permission list" } }
+      },
+      "post": {
+        "tags": ["Workstations"],
+        "summary": "Add an executable permission (tenant admin)",
+        "description": "Pattern is an exact executable name or a prefix with one trailing wildcard. Shell strings and catch-all * are rejected.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["pattern"], "properties": { "pattern": { "type": "string", "example": "curl" } } } } }
+        },
+        "responses": {
+          "201": { "description": "Permission added" },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/v1/workstations/{id}/permissions/{permId}": {
+      "delete": {
+        "tags": ["Workstations"],
+        "summary": "Remove an executable permission (tenant admin)",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "permId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Permission removed" }, "404": { "$ref": "#/components/responses/NotFound" } }
+      }
+    },
+    "/v1/workstations/{id}/permissions/{permId}/toggle": {
+      "put": {
+        "tags": ["Workstations"],
+        "summary": "Enable or disable an executable permission (tenant admin)",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "permId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } } } }
+        },
+        "responses": { "200": { "description": "Permission state updated" } }
+      }
+    },
+    "/v1/workstations/{id}/contact-grants": {
+      "get": {
+        "tags": ["Workstations"],
+        "summary": "List Contacts allowed to request workstation actions",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Contact grant list" } }
+      },
+      "post": {
+        "tags": ["Workstations"],
+        "summary": "Grant an exact Contact workstation access",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "required": ["contactId"], "properties": { "contactId": { "type": "string", "format": "uuid" } } } } }
+        },
+        "responses": {
+          "201": { "description": "Contact granted" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/workstations/{id}/contact-grants/{contactID}": {
+      "delete": {
+        "tags": ["Workstations"],
+        "summary": "Revoke an exact Contact's workstation access",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "contactID", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": { "200": { "description": "Contact grant revoked" } }
+      }
+    },
+    "/v1/workstations/{id}/grants": {
+      "get": {
+        "tags": ["Workstations"],
+        "summary": "List agents assigned to a workstation (tenant admin)",
+        "parameters": [
+          { "name": "X-GoClaw-User-Id", "in": "header", "required": true, "schema": { "type": "string" } },
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignment list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["grants"],
+                  "properties": {
+                    "grants": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/WorkstationAgentGrant" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/workstations/{id}/grants/agent": {
+      "post": {
+        "tags": ["Workstations"],
+        "summary": "Assign an agent to a workstation (tenant admin)",
+        "parameters": [
+          { "name": "X-GoClaw-User-Id", "in": "header", "required": true, "schema": { "type": "string" } },
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["agentId"],
+                "properties": {
+                  "agentId": { "type": "string", "format": "uuid" },
+                  "isDefault": { "type": "boolean", "default": false }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Agent assigned" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/workstations/{id}/grants/agent/{agentID}": {
+      "delete": {
+        "tags": ["Workstations"],
+        "summary": "Revoke an agent workstation assignment (tenant admin)",
+        "parameters": [
+          { "name": "X-GoClaw-User-Id", "in": "header", "required": true, "schema": { "type": "string" } },
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "agentID", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Assignment revoked" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/v1/mcp/servers/{id}/grants": {
       "get": {
         "tags": [
@@ -10696,6 +10942,55 @@
               }
             }
           }
+        }
+      },
+      "WorkstationAgentGrant": {
+        "type": "object",
+        "required": ["agentId", "workstationId", "tenantId", "isDefault", "createdAt"],
+        "properties": {
+          "agentId": { "type": "string", "format": "uuid" },
+          "workstationId": { "type": "string", "format": "uuid" },
+          "tenantId": { "type": "string", "format": "uuid" },
+          "isDefault": { "type": "boolean" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "WorkstationCreate": {
+        "type": "object",
+        "required": ["workstationKey", "name", "backendType", "metadata"],
+        "properties": {
+          "workstationKey": { "type": "string" },
+          "name": { "type": "string" },
+          "backendType": { "type": "string", "enum": ["ssh", "docker"] },
+          "metadata": { "type": "object", "additionalProperties": true },
+          "defaultCwd": { "type": "string" },
+          "defaultEnv": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      },
+      "WorkstationUpdate": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "active": { "type": "boolean" },
+          "defaultCwd": { "type": "string" },
+          "metadata": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "WorkstationContactGrant": {
+        "type": "object",
+        "required": ["workstationId", "contactId", "tenantId", "channelType", "senderId", "createdBy", "createdAt"],
+        "properties": {
+          "workstationId": { "type": "string", "format": "uuid" },
+          "contactId": { "type": "string", "format": "uuid" },
+          "tenantId": { "type": "string", "format": "uuid" },
+          "channelType": { "type": "string" },
+          "senderId": { "type": "string" },
+          "displayName": { "type": "string" },
+          "username": { "type": "string" },
+          "createdBy": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" }
         }
       },
       "Error": {

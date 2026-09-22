@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -61,7 +62,39 @@ type ExecTool struct {
 	// globalDenyGroups holds global shell deny-group toggles from config.tools.
 	// Per-agent overrides from context (store.WithShellDenyGroups) win per-key.
 	// Updated at startup and via TopicConfigChanged pub/sub for runtime reload.
-	globalDenyGroups map[string]bool
+	globalDenyGroups            map[string]bool
+	trustedDelegationHostAgents map[[2]uuid.UUID]struct{}
+}
+
+// SetTrustedDelegationHostAgents replaces the operator-controlled host-exec grants.
+// Invalid identities fail closed. Grants are never sourced from task arguments.
+func (t *ExecTool) SetTrustedDelegationHostAgents(grants []config.TrustedDelegationHostAgent) {
+	allowed := make(map[[2]uuid.UUID]struct{}, len(grants))
+	for _, grant := range grants {
+		tenantID, tenantErr := uuid.Parse(grant.TenantID)
+		agentID, agentErr := uuid.Parse(grant.AgentID)
+		if tenantErr != nil || agentErr != nil || tenantID == uuid.Nil || agentID == uuid.Nil {
+			continue
+		}
+		allowed[[2]uuid.UUID{tenantID, agentID}] = struct{}{}
+	}
+	t.policyMu.Lock()
+	t.trustedDelegationHostAgents = allowed
+	t.policyMu.Unlock()
+}
+
+func (t *ExecTool) trustedDelegationHostExec(ctx context.Context) bool {
+	if !IsDelegationArtifactRun(ctx) {
+		return false
+	}
+	key := [2]uuid.UUID{store.TenantIDFromContext(ctx), store.AgentIDFromContext(ctx)}
+	if key[0] == uuid.Nil || key[1] == uuid.Nil {
+		return false
+	}
+	t.policyMu.RLock()
+	_, allowed := t.trustedDelegationHostAgents[key]
+	t.policyMu.RUnlock()
+	return allowed
 }
 
 // SetCommandKeywordAllowlist replaces the scoped credentialed CLI keyword
@@ -248,12 +281,18 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 		return ErrorResult("command contains invalid NUL byte")
 	}
 
-	// Delegation artifact runs are a physical isolation boundary. Reject before
-	// credential lookup, adapter preparation, approval prompts, or ordinary
-	// command handling unless execution can be routed into an identified sandbox.
-	if IsDelegationArtifactRun(ctx) &&
+	// Delegated runs stay sandbox-only unless the operator explicitly trusts
+	// this exact tenant/agent pair with the gateway OS account's host access.
+	trustedHost := t.trustedDelegationHostExec(ctx)
+	if IsDelegationArtifactRun(ctx) && !trustedHost &&
 		(t.sandboxMgr == nil || ToolSandboxKeyFromCtx(ctx) == "") {
 		return ErrorResult(delegatedExecSandboxRequiredError)
+	}
+	if trustedHost {
+		slog.Warn("security.delegated_host_exec",
+			"tenant_id", store.TenantIDFromContext(ctx),
+			"agent_id", store.AgentIDFromContext(ctx),
+			"delegation_id", DelegationIDFromCtx(ctx))
 	}
 
 	// Normalize command before all deny checks: NFKC + zero-width strip prevents
@@ -269,7 +308,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 			cwd = t.workspace
 		}
 		if wd, _ := args["working_dir"].(string); wd != "" {
-			if effectiveRestrict(ctx, t.restrict) {
+			if !trustedHost && effectiveRestrict(ctx, t.restrict) {
 				wsBase := ToolWorkspaceFromCtx(ctx)
 				if wsBase == "" {
 					wsBase = t.workspace
@@ -285,6 +324,9 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 			}
 		}
 		sandboxKey := ToolSandboxKeyFromCtx(ctx)
+		if trustedHost {
+			sandboxKey = ""
+		}
 		return t.executeCredentialed(ctx, cred, binary, cmdArgs, cwd, sandboxKey, command)
 	}
 
@@ -432,7 +474,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 		cwd = t.workspace
 	}
 	if wd, _ := args["working_dir"].(string); wd != "" {
-		if effectiveRestrict(ctx, t.restrict) {
+		if !trustedHost && effectiveRestrict(ctx, t.restrict) {
 			// Validate working_dir against the tenant-scoped workspace (not the
 			// global workspace) so non-master tenants can't escape their scope.
 			// Also allow team workspace as a valid target (same as filesystem tools).
@@ -458,7 +500,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *Result {
 
 	// Sandbox routing (sandboxKey from ctx — thread-safe)
 	sandboxKey := ToolSandboxKeyFromCtx(ctx)
-	if t.sandboxMgr != nil && sandboxKey != "" {
+	if !trustedHost && t.sandboxMgr != nil && sandboxKey != "" {
 		return t.executeInSandbox(ctx, command, cwd, sandboxKey)
 	}
 

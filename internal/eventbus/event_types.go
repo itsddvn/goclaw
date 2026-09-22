@@ -30,8 +30,9 @@ const (
 	// Workstation lifecycle events (triggers BackendCache invalidation).
 	EventWorkstationUpdated EventType = "workstation.updated"
 	EventWorkstationDeleted EventType = "workstation.deleted"
-	// EventWorkstationPermChanged triggers AllowlistChecker cache invalidation (Phase 6).
-	// SourceID = workstation UUID.
+	// EventWorkstationPermChanged triggers AllowlistChecker cache invalidation.
+	// Payload["workstation_id"] = workstation UUID. SourceID is intentionally empty
+	// because every permission mutation must bypass event-bus deduplication.
 	EventWorkstationPermChanged EventType = "workstation.perm.changed"
 )
 

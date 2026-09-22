@@ -215,22 +215,25 @@ const (
 
 // Workstations (Standard edition only — gated at router)
 const (
-	MethodWorkstationsList        = "workstations.list"
-	MethodWorkstationsGet         = "workstations.get"
-	MethodWorkstationsCreate      = "workstations.create"
-	MethodWorkstationsUpdate      = "workstations.update"
-	MethodWorkstationsDelete      = "workstations.delete"
-	MethodWorkstationsTest        = "workstations.testConnection"
-	MethodWorkstationsLinkAgent   = "workstations.linkAgent"
-	MethodWorkstationsUnlinkAgent = "workstations.unlinkAgent"
+	MethodWorkstationsList             = "workstations.list"
+	MethodWorkstationsGet              = "workstations.get"
+	MethodWorkstationsCreate           = "workstations.create"
+	MethodWorkstationsUpdate           = "workstations.update"
+	MethodWorkstationsDelete           = "workstations.delete"
+	MethodWorkstationsTest             = "workstations.testConnection"
+	MethodWorkstationsLinkAgent        = "workstations.linkAgent"
+	MethodWorkstationsUnlinkAgent      = "workstations.unlinkAgent"
+	MethodWorkstationsContactGrantList = "workstations.contactGrants.list"
+	MethodWorkstationsContactGrant     = "workstations.contactGrants.grant"
+	MethodWorkstationsContactRevoke    = "workstations.contactGrants.revoke"
 
-	// Workstation permission allowlist CRUD (Phase 6)
+	// Workstation permission allowlist CRUD.
 	MethodWorkstationsPermList   = "workstations.permissions.list"
 	MethodWorkstationsPermAdd    = "workstations.permissions.add"
 	MethodWorkstationsPermRemove = "workstations.permissions.remove"
 	MethodWorkstationsPermToggle = "workstations.permissions.toggle"
 
-	// Workstation activity audit log (Phase 7)
+	// Workstation activity audit log.
 	MethodWorkstationsListActivity = "workstations.activity.list"
 )
 

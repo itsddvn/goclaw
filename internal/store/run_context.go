@@ -21,15 +21,17 @@ type runContextKey struct{}
 // accessor functions (which fall back to individual keys when RunContext is absent).
 type RunContext struct {
 	// Identity
-	AgentID          uuid.UUID
-	AgentKey         string
-	TenantID         uuid.UUID
-	UserID           string
-	RunID            string
-	SessionKey       string
-	CredentialUserID string // resolved tenant user for credential lookups (empty = use UserID)
-	AgentType        string
-	SenderID         string
+	AgentID                    uuid.UUID
+	AgentKey                   string
+	TenantID                   uuid.UUID
+	UserID                     string
+	RunID                      string
+	SessionKey                 string
+	CredentialUserID           string    // resolved tenant user for credential lookups (empty = use UserID)
+	WorkstationContactID       uuid.UUID // exact Contact allowed to request workstation actions
+	WorkstationContactResolved bool      // true even when resolution intentionally produced a denied uuid.Nil principal
+	AgentType                  string
+	SenderID                   string
 
 	// Flags
 	SelfEvolve          bool

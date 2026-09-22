@@ -192,15 +192,19 @@ export const Methods = {
   WORKSTATIONS_CREATE: "workstations.create",
   WORKSTATIONS_UPDATE: "workstations.update",
   WORKSTATIONS_DELETE: "workstations.delete",
-  WORKSTATIONS_TEST: "workstations.test",
-  WORKSTATIONS_LINK_AGENT: "workstations.link_agent",
-  WORKSTATIONS_UNLINK_AGENT: "workstations.unlink_agent",
-  // Phase 6: permissions
+  WORKSTATIONS_TEST: "workstations.testConnection",
+  WORKSTATIONS_LINK_AGENT: "workstations.linkAgent",
+  WORKSTATIONS_UNLINK_AGENT: "workstations.unlinkAgent",
+  // Workstation command permissions
   WORKSTATIONS_PERMS_LIST: "workstations.permissions.list",
   WORKSTATIONS_PERMS_ADD: "workstations.permissions.add",
   WORKSTATIONS_PERMS_REMOVE: "workstations.permissions.remove",
   WORKSTATIONS_PERMS_TOGGLE: "workstations.permissions.toggle",
-  // Phase 7: activity audit log
+  // User grants: both the requesting user and agent must be assigned.
+  WORKSTATIONS_CONTACT_GRANTS_LIST: "workstations.contactGrants.list",
+  WORKSTATIONS_CONTACT_GRANTS_GRANT: "workstations.contactGrants.grant",
+  WORKSTATIONS_CONTACT_GRANTS_REVOKE: "workstations.contactGrants.revoke",
+  // Workstation activity audit log
   WORKSTATIONS_LIST_ACTIVITY: "workstations.activity.list",
 
   // Phase 3+ - NICE TO HAVE

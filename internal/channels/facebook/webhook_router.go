@@ -1,7 +1,9 @@
 package facebook
 
 import (
-	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -9,33 +11,35 @@ import (
 
 // webhookRouter routes incoming Facebook webhook events to the correct channel instance by page_id.
 // A single HTTP handler is shared across all facebook channel instances on the same server.
-//
-// Multi-Meta-App note: all page instances registered here are expected to share the same Meta App
-// (and thus the same app_secret). If instances with different secrets are registered, ServeHTTP
-// tries all known secrets and accepts the payload if any matches.
 type webhookRouter struct {
 	mu           sync.RWMutex
 	instances    map[string]*Channel // pageID → channel
-	routeHandled bool                // true after first webhookRoute() call
+	routeHandled bool                // true after the fixed route is claimed
 }
 
 var globalRouter = &webhookRouter{
 	instances: make(map[string]*Channel),
 }
 
-func (r *webhookRouter) register(ch *Channel) {
+func (r *webhookRouter) register(ch *Channel) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, exists := r.instances[ch.pageID]; exists {
+		return fmt.Errorf("facebook: page_id %q is already registered", ch.pageID)
+	}
 	r.instances[ch.pageID] = ch
+	return nil
 }
 
-func (r *webhookRouter) unregister(pageID string) {
+func (r *webhookRouter) unregister(ch *Channel) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.instances, pageID)
+	if r.instances[ch.pageID] == ch {
+		delete(r.instances, ch.pageID)
+	}
 }
 
-// webhookRoute returns the path+handler for the first call; ("", nil) for subsequent calls.
+// webhookRoute returns the fixed path and shared handler to its first claimant.
 func (r *webhookRouter) webhookRoute() (string, http.Handler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -46,62 +50,104 @@ func (r *webhookRouter) webhookRoute() (string, http.Handler) {
 	return "", nil
 }
 
+// ClaimWebhookRoute claims the process-wide Facebook callback route. The gateway
+// calls this even when no Facebook channel instance exists yet.
+func ClaimWebhookRoute() (string, http.Handler) {
+	return globalRouter.webhookRoute()
+}
+
 // ServeHTTP is the shared handler for all Facebook page webhooks.
-// Routes each entry to the matching channel instance by page_id.
-//
-// Multi-Meta-App support: all registered page secrets are collected and tried in order.
-// A payload is accepted if its signature matches any known app_secret. In the common
-// case (single Meta App) there is exactly one secret and behavior is unchanged.
 func (r *webhookRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodGet:
+		r.handleVerification(w, req)
+	case http.MethodPost:
+		r.handleEvent(w, req)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (r *webhookRouter) handleVerification(w http.ResponseWriter, req *http.Request) {
+	q := req.URL.Query()
+	if q.Get("hub.mode") != "subscribe" {
+		http.Error(w, "invalid hub.mode", http.StatusForbidden)
+		return
+	}
+
+	requestToken := q.Get("hub.verify_token")
+	matched := false
 	r.mu.RLock()
-	var primarySecret, verifyToken string
-	var extraSecrets []string
-	seenSecrets := make(map[string]bool)
 	for _, ch := range r.instances {
-		s := ch.webhookH.appSecret
-		if primarySecret == "" {
-			primarySecret = s
-			verifyToken = ch.webhookH.verifyToken
-			seenSecrets[s] = true
-		} else if !seenSecrets[s] {
-			extraSecrets = append(extraSecrets, s)
-			seenSecrets[s] = true
+		if requestToken == ch.webhookH.verifyToken {
+			matched = true
+			break
 		}
 	}
 	r.mu.RUnlock()
+	if !matched {
+		slog.Warn("security.facebook_webhook_verify_token_mismatch",
+			"remote_addr", req.RemoteAddr)
+		http.Error(w, "invalid verify token", http.StatusForbidden)
+		return
+	}
 
-	if primarySecret == "" {
-		// No instances registered yet.
+	challenge := q.Get("hub.challenge")
+	if !hubChallengePattern.MatchString(challenge) {
+		http.Error(w, "invalid challenge", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(challenge))
+}
+
+func (r *webhookRouter) handleEvent(w http.ResponseWriter, req *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(req.Body, maxWebhookBodyBytes+1))
+	if err != nil {
+		slog.Warn("facebook: webhook read body error", "err", err)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if len(body) > maxWebhookBodyBytes {
+		slog.Warn("facebook: webhook body exceeded limit, event dropped", "bytes", len(body))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	if len(extraSecrets) > 0 {
-		slog.Warn("security.facebook_multi_meta_app",
-			"extra_app_count", len(extraSecrets),
-			"note", "multiple Meta App secrets registered; payloads verified against all known secrets")
+	var payload WebhookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		slog.Warn("facebook: webhook parse error", "err", err)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if payload.Object != "page" {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
-	routingWH := &WebhookHandler{
-		appSecret:    primarySecret,
-		verifyToken:  verifyToken,
-		extraSecrets: extraSecrets,
-	}
-	routingWH.onComment = func(ctx context.Context, entry WebhookEntry, change ChangeValue) {
+	signature := req.Header.Get("X-Hub-Signature-256")
+	signatureValid := make(map[*WebhookHandler]bool, len(payload.Entry))
+	for _, entry := range payload.Entry {
 		r.mu.RLock()
 		target := r.instances[entry.ID]
 		r.mu.RUnlock()
-		if target != nil {
-			target.handleCommentEvent(ctx, entry, change)
+		if target == nil {
+			slog.Warn("security.facebook_webhook_page_unknown",
+				"page_id", entry.ID, "remote_addr", req.RemoteAddr)
+			continue
 		}
-	}
-	routingWH.onMessage = func(ctx context.Context, entry WebhookEntry, event MessagingEvent) {
-		r.mu.RLock()
-		target := r.instances[entry.ID]
-		r.mu.RUnlock()
-		if target != nil {
-			target.handleMessagingEvent(ctx, entry, event)
+		valid, checked := signatureValid[target.webhookH]
+		if !checked {
+			valid = verifySignature(body, signature, target.webhookH.appSecret)
+			signatureValid[target.webhookH] = valid
 		}
+		if !valid {
+			slog.Warn("security.facebook_webhook_signature_invalid",
+				"page_id", entry.ID, "remote_addr", req.RemoteAddr)
+			continue
+		}
+		target.webhookH.dispatchEntry(req.Context(), entry)
 	}
-	routingWH.ServeHTTP(w, req)
+
+	w.WriteHeader(http.StatusOK)
 }

@@ -15,8 +15,8 @@ import (
 // H2 fix: CLAUDE_CONFIG_DIR is scoped per session+agent hash to prevent concurrent
 // agents from corrupting each other's ~/.claude/ auth tokens and session files.
 //
-// Permission enforcement is fully delegated to WorkstationExecTool.permCheck;
-// ClaudeRemoteTool has no separate permission layer (Phase 6 covers both).
+// Assignment and command permission enforcement are delegated to WorkstationExecTool;
+// ClaudeRemoteTool has no separate access-control path.
 type ClaudeRemoteTool struct {
 	inner *WorkstationExecTool
 }
@@ -43,7 +43,7 @@ func (t *ClaudeRemoteTool) Parameters() map[string]any {
 			},
 			"workstation_id": map[string]any{
 				"type":        "string",
-				"description": "Workstation UUID or key (optional if agent has a default binding)",
+				"description": "Assigned workstation UUID or key (optional with one assignment or a default)",
 			},
 			"model": map[string]any{
 				"type":        "string",

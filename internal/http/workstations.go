@@ -1,29 +1,37 @@
 package http
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/workstation"
+	workstationsecurity "github.com/nextlevelbuilder/goclaw/internal/workstation/security"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
 // WorkstationsHandler handles HTTP CRUD for workstations.
 // Routes are only registered when edition is Standard — callers MUST gate.
 type WorkstationsHandler struct {
-	wsStore       store.WorkstationStore
-	linkStore     store.AgentWorkstationLinkStore
-	tenantStore   store.TenantStore
-	permStore     store.WorkstationPermissionStore     // Phase 6; may be nil
-	activityStore store.WorkstationActivityStore       // Phase 7; may be nil
+	wsStore               store.WorkstationStore
+	linkStore             store.AgentWorkstationLinkStore
+	tenantStore           store.TenantStore
+	permStore             store.WorkstationPermissionStore // optional; endpoints fail closed when absent
+	activityStore         store.WorkstationActivityStore   // optional activity audit store
+	contactGrantStore     store.WorkstationContactGrantStore
+	eventBus              eventbus.DomainEventBus
+	invalidateBackend     func(uuid.UUID)
+	invalidatePermissions func(uuid.UUID)
 }
 
 // NewWorkstationsHandler creates a WorkstationsHandler.
@@ -40,9 +48,29 @@ func (h *WorkstationsHandler) SetPermStore(ps store.WorkstationPermissionStore) 
 	h.permStore = ps
 }
 
-// SetActivityStore wires the activity store for audit log endpoints (Phase 7).
+// SetActivityStore wires the activity store for audit log endpoints.
 func (h *WorkstationsHandler) SetActivityStore(as store.WorkstationActivityStore) {
 	h.activityStore = as
+}
+
+// SetContactGrantStore wires exact Contact authorization management.
+func (h *WorkstationsHandler) SetContactGrantStore(s store.WorkstationContactGrantStore) {
+	h.contactGrantStore = s
+}
+
+// SetEventBus wires lifecycle event publishing for runtime cache invalidation.
+func (h *WorkstationsHandler) SetEventBus(bus eventbus.DomainEventBus) {
+	h.eventBus = bus
+}
+
+// SetCacheInvalidators wires the runtime caches that must be synchronously
+// evicted before a successful admin mutation is acknowledged.
+func (h *WorkstationsHandler) SetCacheInvalidators(
+	backend func(uuid.UUID),
+	permissions func(uuid.UUID),
+) {
+	h.invalidateBackend = backend
+	h.invalidatePermissions = permissions
 }
 
 // RegisterRoutes registers all workstation endpoints onto mux.
@@ -54,12 +82,20 @@ func (h *WorkstationsHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/workstations/{id}", h.auth(h.handleUpdate))
 	mux.HandleFunc("DELETE /v1/workstations/{id}", h.auth(h.handleDelete))
 	mux.HandleFunc("POST /v1/workstations/{id}/test", h.auth(h.handleTest))
-	// Phase 6: permission allowlist CRUD
+	// Agent assignments: strict default-deny access control for workstation execution.
+	mux.HandleFunc("GET /v1/workstations/{id}/grants", h.auth(h.handleAgentGrantList))
+	mux.HandleFunc("POST /v1/workstations/{id}/grants/agent", h.auth(h.handleAgentGrant))
+	mux.HandleFunc("DELETE /v1/workstations/{id}/grants/agent/{agentID}", h.auth(h.handleAgentRevoke))
+	// Exact Contacts allowed to instruct an assigned Agent to use this workstation.
+	mux.HandleFunc("GET /v1/workstations/{id}/contact-grants", h.auth(h.handleContactGrantList))
+	mux.HandleFunc("POST /v1/workstations/{id}/contact-grants", h.auth(h.handleContactGrant))
+	mux.HandleFunc("DELETE /v1/workstations/{id}/contact-grants/{contactID}", h.auth(h.handleContactRevoke))
+	// Permission allowlist CRUD.
 	mux.HandleFunc("GET /v1/workstations/{id}/permissions", h.auth(h.handlePermList))
 	mux.HandleFunc("POST /v1/workstations/{id}/permissions", h.auth(h.handlePermAdd))
 	mux.HandleFunc("DELETE /v1/workstations/{id}/permissions/{permId}", h.auth(h.handlePermRemove))
 	mux.HandleFunc("PUT /v1/workstations/{id}/permissions/{permId}/toggle", h.auth(h.handlePermToggle))
-	// Phase 7: activity audit log
+	// Activity audit log.
 	mux.HandleFunc("GET /v1/workstations/{id}/activity", h.auth(h.handleActivityList))
 }
 
@@ -190,47 +226,43 @@ func (h *WorkstationsHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 			i18n.T(locale, i18n.MsgInvalidID, "workstation"))
 		return
 	}
-	var updates map[string]any
-	if !bindJSON(w, r, locale, &updates) {
+	var body workstation.AdminUpdate
+	if !bindJSON(w, r, locale, &body) {
 		return
 	}
-	if len(updates) == 0 {
+	current, err := h.wsStore.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, protocol.ErrNotFound,
+				i18n.T(locale, i18n.MsgWorkstationNotFound, idStr))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgInternalError, err.Error()))
+		return
+	}
+	updates, err := workstation.BuildAdminUpdates(current, body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest,
-			i18n.T(locale, i18n.MsgNoUpdatesProvided))
+			i18n.T(locale, i18n.MsgInvalidRequest, err.Error()))
 		return
-	}
-	// I2 fix: validate metadata shape when metadata is being updated.
-	// Fetch current workstation to obtain backend_type for validation.
-	if _, hasMetadata := updates["metadata"]; hasMetadata {
-		current, err := h.wsStore.GetByID(ctx, id)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusNotFound, protocol.ErrNotFound,
-					i18n.T(locale, i18n.MsgWorkstationNotFound, idStr))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, protocol.ErrInternal,
-				i18n.T(locale, i18n.MsgInternalError, err.Error()))
-			return
-		}
-		metaBytes, err := json.Marshal(updates["metadata"])
-		if err != nil {
-			writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest,
-				i18n.T(locale, i18n.MsgInvalidMetadataShape, string(current.BackendType), err.Error()))
-			return
-		}
-		if err := store.ValidateMetadata(current.BackendType, metaBytes); err != nil {
-			writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest,
-				i18n.T(locale, i18n.MsgInvalidMetadataShape, string(current.BackendType), err.Error()))
-			return
-		}
 	}
 	if err := h.wsStore.Update(ctx, id, updates); err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.ErrInternal,
 			i18n.T(locale, i18n.MsgFailedToUpdate, "workstation", err.Error()))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id})
+	if h.invalidateBackend != nil {
+		h.invalidateBackend(id)
+	}
+	h.publishWorkstationEvent(ctx, eventbus.EventWorkstationUpdated, id)
+	updated, err := h.wsStore.GetByID(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgInternalError, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workstation": updated.SanitizedView()})
 }
 
 func (h *WorkstationsHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -251,21 +283,54 @@ func (h *WorkstationsHandler) handleDelete(w http.ResponseWriter, r *http.Reques
 			i18n.T(locale, i18n.MsgFailedToDelete, "workstation", err.Error()))
 		return
 	}
+	if h.invalidateBackend != nil {
+		h.invalidateBackend(id)
+	}
+	h.publishWorkstationEvent(ctx, eventbus.EventWorkstationDeleted, id)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
 }
 
-// handleTest is a stub — real implementation in Phase 2/3.
 func (h *WorkstationsHandler) handleTest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	locale := store.LocaleFromContext(ctx)
 	if !requireTenantAdmin(w, r, h.tenantStore) {
 		return
 	}
-	writeError(w, http.StatusNotImplemented, protocol.ErrNotImplemented,
-		i18n.T(locale, i18n.MsgNotImplemented, "workstations.testConnection"))
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest,
+			i18n.T(locale, i18n.MsgInvalidID, "workstation"))
+		return
+	}
+	ws, err := h.wsStore.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, protocol.ErrNotFound,
+				i18n.T(locale, i18n.MsgWorkstationNotFound, id.String()))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgInternalError, err.Error()))
+		return
+	}
+	backend, err := workstation.Open(ws)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgWorkstationConnectionFailed, err.Error()))
+		return
+	}
+	defer func() { _ = backend.Close() }()
+	testCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := backend.HealthCheck(testCtx); err != nil {
+		writeError(w, http.StatusBadGateway, protocol.ErrInternal,
+			i18n.T(locale, i18n.MsgWorkstationConnectionFailed, err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// --- Phase 6: workstation permission allowlist CRUD ---
+// --- Workstation permission allowlist CRUD ---
 
 func (h *WorkstationsHandler) requirePermStore(w http.ResponseWriter, locale string) bool {
 	if h.permStore == nil {
@@ -321,7 +386,7 @@ func (h *WorkstationsHandler) handlePermAdd(w http.ResponseWriter, r *http.Reque
 			i18n.T(locale, i18n.MsgInvalidID, "workstation"))
 		return
 	}
-	// I5 fix: verify workstation belongs to caller's tenant before adding permission.
+	// Verify workstation belongs to caller's tenant before adding permission.
 	// GetByID scopes the query by tenant_id in the WHERE clause — returns ErrNoRows if
 	// the workstation exists in a different tenant.
 	if _, err := h.wsStore.GetByID(ctx, wsID); err != nil {
@@ -345,6 +410,11 @@ func (h *WorkstationsHandler) handlePermAdd(w http.ResponseWriter, r *http.Reque
 			i18n.T(locale, i18n.MsgRequired, "pattern"))
 		return
 	}
+	if err := workstationsecurity.ValidateAllowedBinaryPattern(body.Pattern); err != nil {
+		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest,
+			i18n.T(locale, i18n.MsgInvalidRequest, err.Error()))
+		return
+	}
 	userID := store.UserIDFromContext(ctx)
 	perm := &store.WorkstationPermission{
 		WorkstationID: wsID,
@@ -357,6 +427,10 @@ func (h *WorkstationsHandler) handlePermAdd(w http.ResponseWriter, r *http.Reque
 			i18n.T(locale, i18n.MsgFailedToCreate, "permission", err.Error()))
 		return
 	}
+	if h.invalidatePermissions != nil {
+		h.invalidatePermissions(wsID)
+	}
+	h.publishWorkstationEvent(ctx, eventbus.EventWorkstationPermChanged, wsID)
 	writeJSON(w, http.StatusCreated, map[string]any{"permission": perm})
 }
 
@@ -366,10 +440,11 @@ func (h *WorkstationsHandler) handlePermRemove(w http.ResponseWriter, r *http.Re
 	if !requireTenantAdmin(w, r, h.tenantStore) || !h.requirePermStore(w, locale) {
 		return
 	}
-	permID, err := uuid.Parse(r.PathValue("permId"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest,
-			i18n.T(locale, i18n.MsgInvalidID, "permission"))
+	wsID, permID, ok := h.parseWorkstationPermissionPath(w, r, locale)
+	if !ok {
+		return
+	}
+	if !h.requirePermissionForWorkstation(w, r, locale, wsID, permID) {
 		return
 	}
 	if err := h.permStore.Remove(ctx, permID); err != nil {
@@ -382,6 +457,10 @@ func (h *WorkstationsHandler) handlePermRemove(w http.ResponseWriter, r *http.Re
 			i18n.T(locale, i18n.MsgFailedToDelete, "permission", err.Error()))
 		return
 	}
+	if h.invalidatePermissions != nil {
+		h.invalidatePermissions(wsID)
+	}
+	h.publishWorkstationEvent(ctx, eventbus.EventWorkstationPermChanged, wsID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": permID})
 }
 
@@ -391,10 +470,11 @@ func (h *WorkstationsHandler) handlePermToggle(w http.ResponseWriter, r *http.Re
 	if !requireTenantAdmin(w, r, h.tenantStore) || !h.requirePermStore(w, locale) {
 		return
 	}
-	permID, err := uuid.Parse(r.PathValue("permId"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, protocol.ErrInvalidRequest,
-			i18n.T(locale, i18n.MsgInvalidID, "permission"))
+	wsID, permID, ok := h.parseWorkstationPermissionPath(w, r, locale)
+	if !ok {
+		return
+	}
+	if !h.requirePermissionForWorkstation(w, r, locale, wsID, permID) {
 		return
 	}
 	var body struct {
@@ -408,10 +488,14 @@ func (h *WorkstationsHandler) handlePermToggle(w http.ResponseWriter, r *http.Re
 			i18n.T(locale, i18n.MsgFailedToUpdate, "permission", err.Error()))
 		return
 	}
+	if h.invalidatePermissions != nil {
+		h.invalidatePermissions(wsID)
+	}
+	h.publishWorkstationEvent(ctx, eventbus.EventWorkstationPermChanged, wsID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": permID, "enabled": body.Enabled})
 }
 
-// --- Phase 7: workstation activity audit log ---
+// --- Workstation activity audit log ---
 
 func (h *WorkstationsHandler) handleActivityList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()

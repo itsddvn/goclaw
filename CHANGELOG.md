@@ -6,6 +6,10 @@ All notable changes to GoClaw are documented here. For full documentation, see [
 
 ### Changed
 
+- **Configurable async delegation timeout** — Owners can set 1–60 minutes in
+  Config → Tools, defaulting to 30 minutes. Saves apply live to new async jobs;
+  existing deadlines and synchronous delegation settings remain unchanged.
+
 - **Bitrix24 channel migrated to imbot v2 messaging API** — outbound text now uses
   `imbot.v2.Chat.Message.send` (replacing `imbot.message.add`); bot verification/lookup
   uses `imbot.v2.Bot.list` (replacing `imbot.bot.list` + the legacy `imbot.list` fallback);
@@ -15,6 +19,14 @@ All notable changes to GoClaw are documented here. For full documentation, see [
   require rewriting the inbound event parser. No user-facing behavior change.
 
 ### Added
+
+- **Trusted delegated host execution** — Operators can opt specific tenant/agent
+  UUID pairs into host `exec` via `tools.trustedDelegationHostAgents`. Other
+  delegated agents remain sandbox-only. Existing command and credential checks
+  remain active; this high-trust grant is not a filesystem sandbox. Global
+  config apply/patch replaces grants live; disk edits require a restart.
+  Owners can now manage grants in **Config → Tools**, with per-agent switches,
+  host-access confirmation, and immediate saving in English, Vietnamese, and Chinese.
 
 - **Behavior UX sidecar delivery overrides** — Adds sidecar-generated Quick
   Acknowledgement and Intermediate Replies with provider/model, timeout, token,

@@ -17,6 +17,29 @@ import (
 
 const GatewayAllowInsecureNoAuthEnv = "GOCLAW_ALLOW_INSECURE_NO_AUTH"
 
+const (
+	DefaultDelegateAsyncTimeoutSeconds = 1800
+	MinDelegateAsyncTimeoutSeconds     = 60
+	MaxDelegateAsyncTimeoutSeconds     = 3600
+)
+
+// ValidateToolsConfig rejects configured delegate async deadlines outside the
+// supported range. A zero value intentionally selects the runtime default.
+func ValidateToolsConfig(tools ToolsConfig) error {
+	timeoutSeconds := tools.DelegateAsyncTimeoutSeconds
+	if timeoutSeconds == 0 {
+		return nil
+	}
+	if timeoutSeconds < MinDelegateAsyncTimeoutSeconds || timeoutSeconds > MaxDelegateAsyncTimeoutSeconds {
+		return fmt.Errorf(
+			"tools.delegateAsyncTimeoutSeconds must be between %d and %d seconds",
+			MinDelegateAsyncTimeoutSeconds,
+			MaxDelegateAsyncTimeoutSeconds,
+		)
+	}
+	return nil
+}
+
 // GatewayNoAuthFallbackAllowed reports whether empty-token gateway auth may
 // run in local/dev compatibility mode.
 func GatewayNoAuthFallbackAllowed(g GatewayConfig) bool {
@@ -134,6 +157,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg.applyEnvOverrides()
+			if err := ValidateToolsConfig(cfg.Tools); err != nil {
+				return nil, fmt.Errorf("validate config: %w", err)
+			}
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -144,6 +170,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.applyEnvOverrides()
+	if err := ValidateToolsConfig(cfg.Tools); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
 	return cfg, nil
 }
 

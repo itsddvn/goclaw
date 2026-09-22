@@ -55,10 +55,11 @@ type Stores struct {
 	WebhookCalls WebhookCallStore
 
 	// Workstations — Standard edition only (gated at router registration).
-	Workstations           WorkstationStore
-	WorkstationLinks       AgentWorkstationLinkStore
-	WorkstationPermissions WorkstationPermissionStore
-	WorkstationActivity    WorkstationActivityStore
+	Workstations             WorkstationStore
+	WorkstationLinks         AgentWorkstationLinkStore
+	WorkstationContactGrants WorkstationContactGrantStore
+	WorkstationPermissions   WorkstationPermissionStore
+	WorkstationActivity      WorkstationActivityStore
 
 	// UsageCaps is Standard/PostgreSQL only in the first budget-control rollout.
 	UsageCaps UsageCapStore

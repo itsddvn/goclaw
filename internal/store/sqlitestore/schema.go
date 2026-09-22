@@ -16,7 +16,7 @@ var schemaSQL string
 
 // SchemaVersion is the current SQLite schema version.
 // Bump this when adding new migration steps below.
-const SchemaVersion = 59
+const SchemaVersion = 61
 
 // migrations maps version → SQL to apply when upgrading FROM that version.
 // schema.sql always represents the LATEST full schema (for fresh DBs).
@@ -95,6 +95,33 @@ BEGIN
 END;`
 
 var migrations = map[int]string{
+	// Version 60 → 61: replace tenant-user grants with exact Contact grants.
+	60: `CREATE TABLE IF NOT EXISTS workstation_contact_grants (
+    workstation_id TEXT NOT NULL REFERENCES workstations(id) ON DELETE CASCADE,
+    contact_id     TEXT NOT NULL REFERENCES channel_contacts(id) ON DELETE CASCADE,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_by     VARCHAR(255) NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (workstation_id, contact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workstation_contact_grants_contact
+    ON workstation_contact_grants(tenant_id, contact_id, workstation_id);
+CREATE INDEX IF NOT EXISTS idx_workstation_contact_grants_workstation
+    ON workstation_contact_grants(tenant_id, workstation_id);
+DROP TABLE IF EXISTS workstation_user_grants;`,
+	// Version 59 → 60: tenant-user allowlist for workstation actions.
+	59: `CREATE TABLE IF NOT EXISTS workstation_user_grants (
+    workstation_id TEXT NOT NULL REFERENCES workstations(id) ON DELETE CASCADE,
+    tenant_user_id TEXT NOT NULL REFERENCES tenant_users(id) ON DELETE CASCADE,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_by     VARCHAR(255) NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (workstation_id, tenant_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workstation_user_grants_user
+    ON workstation_user_grants(tenant_id, tenant_user_id, workstation_id);
+CREATE INDEX IF NOT EXISTS idx_workstation_user_grants_workstation
+    ON workstation_user_grants(tenant_id, workstation_id);`,
 	// Version 58 → 59: scope persisted subagent tasks by immutable root-agent UUID.
 	// Metadata is authoritative; key fallback is allowed only for one matching
 	// agent that predates the task. Unmatched rows remain inaccessible.

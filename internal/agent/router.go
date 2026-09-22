@@ -44,14 +44,14 @@ type TraceCollector interface {
 // Each agent has a unique ID and its own provider/model/tools config.
 // Cached Loops expire after TTL (safety net for multi-instance).
 type Router struct {
-	agents          map[string]*agentEntry
-	mu              sync.RWMutex
-	activeRuns      sync.Map     // runID → *ActiveRun
-	sessionRuns     sync.Map     // sessionKey → runID (secondary index for O(1) IsSessionBusy)
-	agentActivity   sync.Map     // sessionKey → *AgentActivityStatus
-	resolver        ResolverFunc // optional: lazy creation from DB
-	ttl             time.Duration
-	traceCollector  TraceCollector // optional: for force-marking aborted traces
+	agents         map[string]*agentEntry
+	mu             sync.RWMutex
+	activeRuns     sync.Map     // runID → *ActiveRun
+	sessionRuns    sync.Map     // sessionKey → runID (secondary index for O(1) IsSessionBusy)
+	agentActivity  sync.Map     // sessionKey → *AgentActivityStatus
+	resolver       ResolverFunc // optional: lazy creation from DB
+	ttl            time.Duration
+	traceCollector TraceCollector // optional: for force-marking aborted traces
 }
 
 func NewRouter() *Router {
@@ -258,9 +258,9 @@ type ActiveRun struct {
 	StartedAt  time.Time
 	InjectCh   chan InjectedMessage // buffered channel for mid-run user message injection
 	Done       chan struct{}        // closed when goroutine actually exits (via UnregisterRun)
-	State      atomic.Int32        // 0=running, 1=aborting, 2=done
-	TraceID    uuid.UUID           // set after trace creation via SetRunTraceID
-	TenantID   uuid.UUID           // captured at RegisterRun for forceMarkTraceAborted
+	State      atomic.Int32         // 0=running, 1=aborting, 2=done
+	TraceID    uuid.UUID            // set after trace creation via SetRunTraceID
+	TenantID   uuid.UUID            // captured at RegisterRun for forceMarkTraceAborted
 }
 
 // AbortResult describes the outcome of a single AbortRun call.
@@ -410,6 +410,34 @@ func (r *Router) AbortRunsForSession(sessionKey string) []AbortResult {
 		}
 		return true
 	})
+	return results
+}
+
+// AbortAllRuns cancels every run owned by this router. Aborts execute in
+// parallel so shutdown has one bounded grace window rather than one window per
+// run. Runs owned by other gateway processes are not represented in this
+// router and are therefore unaffected.
+func (r *Router) AbortAllRuns() []AbortResult {
+	var runIDs []string
+	r.activeRuns.Range(func(key, _ any) bool {
+		runIDs = append(runIDs, key.(string))
+		return true
+	})
+	if len(runIDs) == 0 {
+		return nil
+	}
+
+	resultCh := make(chan AbortResult, len(runIDs))
+	for _, runID := range runIDs {
+		go func() {
+			resultCh <- r.AbortRun(runID, "")
+		}()
+	}
+
+	results := make([]AbortResult, 0, len(runIDs))
+	for range runIDs {
+		results = append(results, <-resultCh)
+	}
 	return results
 }
 

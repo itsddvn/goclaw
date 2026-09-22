@@ -18,17 +18,13 @@ const (
 	previewMaxLen        = 40_000
 	traceRetention       = 7 * 24 * time.Hour // auto-delete traces older than 7 days
 	pruneInterval        = 8 * time.Hour
-	// staleThreshold: how long a "running" trace must be stuck before the recovery
-	// worker marks it as "error". 10min is conservative — the primary sub-second
-	// stop visibility is delivered by the trace.status WS event (Phase 4). Stale
-	// recovery is a safety net for crashed/orphaned traces. Lowering this further
-	// requires a `last_span_at` column so we don't sweep legitimate long-running
-	// agents (see plan's Phase 3 unresolved question).
-	staleThreshold = 10 * time.Minute
-	staleRecoveryPeriod  = 30 * time.Second // new: run periodically instead of once on startup
-	retryQueueCap        = 1000
-	retryWorkerPeriod    = 5 * time.Second
-	retryMaxTries        = 10
+	// staleThreshold is retained for the disabled periodic recovery worker.
+	// A start-time threshold cannot distinguish an orphan from a healthy long run.
+	staleThreshold      = 10 * time.Minute
+	staleRecoveryPeriod = 30 * time.Second
+	retryQueueCap       = 1000
+	retryWorkerPeriod   = 5 * time.Second
+	retryMaxTries       = 10
 )
 
 // TraceStatusPayload is the payload for EventTraceStatusChanged WS events.
@@ -165,14 +161,11 @@ func (c *Collector) SetStatusBroadcaster(b StatusBroadcaster) {
 
 // Start begins the background flush loop and retry worker.
 //
-// NOTE: staleRecoveryLoop is intentionally NOT started. The current implementation
-// sweeps traces by `start_time`, which would kill legitimate long-running agent
-// runs (research chains, large code generation, long shell commands routinely
-// exceed 10 minutes). Re-enable only after adding a `last_span_at` column so
-// recovery can gate on "no activity for N minutes" instead of "started > N min
-// ago". Until then, crashed/orphaned traces may remain `running` in DB — the
-// primary abort path (router 2-phase + trace.status WS event) handles the
-// common case; this is a safety-net gap we accept over false kills.
+// NOTE: staleRecoveryLoop is intentionally NOT started. Graceful shutdown
+// cancels runs owned by that gateway process while the trace store is still
+// available. A start_time sweep could kill legitimate long runs, including
+// runs owned by another gateway replica, so it requires an ownership-aware
+// liveness signal before it can be enabled.
 func (c *Collector) Start() {
 	c.wg.Add(2) // flushLoop + retryWorker (staleRecoveryLoop disabled — see note above)
 	go c.flushLoop()
@@ -422,8 +415,8 @@ func (c *Collector) flushLoop() {
 	}
 }
 
-// staleRecoveryLoop runs recoverStaleOnce immediately on startup, then every
-// staleRecoveryPeriod (30s). Replaces the one-shot recoverStaleTraces call.
+// staleRecoveryLoop runs recoverStaleOnce immediately, then periodically.
+// It remains disabled because start_time alone is not a safe liveness signal.
 func (c *Collector) staleRecoveryLoop() {
 	defer c.wg.Done()
 	ticker := time.NewTicker(staleRecoveryPeriod)
@@ -444,8 +437,7 @@ func (c *Collector) staleRecoveryLoop() {
 // staleThreshold (10 min) as "error". Also recovers stuck spans.
 //
 // NOTE: Both PG and SQLite implementations use start_time < cutoff, not last
-// activity time. Follow-up: gate on "no spans in last N min" instead (requires
-// a last_span_at schema column). Tracked as an open question.
+// activity time. Periodic recovery therefore needs a separate liveness signal.
 func (c *Collector) recoverStaleOnce() {
 	cutoff := time.Now().UTC().Add(-staleThreshold)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

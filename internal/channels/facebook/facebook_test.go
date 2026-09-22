@@ -214,6 +214,134 @@ func TestWebhookHandlerPostEvents(t *testing.T) {
 	})
 }
 
+func testRouterChannel(pageID, appSecret, verifyToken string) *Channel {
+	return &Channel{
+		pageID:   pageID,
+		webhookH: NewWebhookHandler(appSecret, verifyToken),
+	}
+}
+
+func TestWebhookRouter_ZeroInstanceClaimServesLaterRegistration(t *testing.T) {
+	r := &webhookRouter{instances: make(map[string]*Channel)}
+	path, handler := r.webhookRoute()
+	if path != webhookPath || handler == nil {
+		t.Fatalf("route = (%q, %v), want fixed Facebook route", path, handler)
+	}
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+
+	before := httptest.NewRecorder()
+	mux.ServeHTTP(before, httptest.NewRequest(http.MethodGet,
+		path+"?hub.mode=subscribe&hub.verify_token=later&hub.challenge=abc123", nil))
+	if before.Code != http.StatusForbidden {
+		t.Fatalf("before registration status = %d, want 403", before.Code)
+	}
+
+	if err := r.register(testRouterChannel("111", "secret", "later")); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	after := httptest.NewRecorder()
+	mux.ServeHTTP(after, httptest.NewRequest(http.MethodGet,
+		path+"?hub.mode=subscribe&hub.verify_token=later&hub.challenge=abc123", nil))
+	if after.Code != http.StatusOK || after.Body.String() != "abc123" {
+		t.Fatalf("after registration = (%d, %q), want (200, abc123)", after.Code, after.Body.String())
+	}
+}
+
+func TestWebhookRouter_DuplicatePageAndStaleStopPreserveOwner(t *testing.T) {
+	r := &webhookRouter{instances: make(map[string]*Channel)}
+	owner := testRouterChannel("111", "secret-a", "token-a")
+	duplicate := testRouterChannel("111", "secret-b", "token-b")
+	if err := r.register(owner); err != nil {
+		t.Fatalf("register owner: %v", err)
+	}
+	if err := r.register(duplicate); err == nil {
+		t.Fatal("expected duplicate page_id registration error")
+	}
+
+	// A stale/failed duplicate stopping must not unregister the live owner.
+	r.unregister(duplicate)
+	r.mu.RLock()
+	got := r.instances["111"]
+	r.mu.RUnlock()
+	if got != owner {
+		t.Fatal("duplicate stop removed the live page owner")
+	}
+
+	r.unregister(owner)
+	r.mu.RLock()
+	_, exists := r.instances["111"]
+	r.mu.RUnlock()
+	if exists {
+		t.Fatal("owner stop did not unregister its page")
+	}
+}
+
+func TestWebhookRouter_VerificationMatchesEveryRegisteredToken(t *testing.T) {
+	r := &webhookRouter{instances: make(map[string]*Channel)}
+	if err := r.register(testRouterChannel("222", "secret-b", "token-b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.register(testRouterChannel("111", "secret-a", "token-a")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, token := range []string{"token-a", "token-b"} {
+		req := httptest.NewRequest(http.MethodGet,
+			"/webhook?hub.mode=subscribe&hub.verify_token="+token+"&hub.challenge=challenge", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK || w.Body.String() != "challenge" {
+			t.Errorf("token %q = (%d, %q), want (200, challenge)", token, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestWebhookRouter_PostUsesTargetPageSecret(t *testing.T) {
+	r := &webhookRouter{instances: make(map[string]*Channel)}
+	pageA := testRouterChannel("111", "secret-a", "token-a")
+	pageB := testRouterChannel("222", "secret-b", "token-b")
+	var callsA, callsB int
+	pageA.webhookH.onMessage = func(context.Context, WebhookEntry, MessagingEvent) { callsA++ }
+	pageB.webhookH.onMessage = func(context.Context, WebhookEntry, MessagingEvent) { callsB++ }
+	if err := r.register(pageA); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.register(pageB); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := WebhookPayload{
+		Object: "page",
+		Entry: []WebhookEntry{{
+			ID: "222",
+			Messaging: []MessagingEvent{{
+				Sender:  FBUser{ID: "user"},
+				Message: &IncomingMessage{MID: "mid", Text: "hello"},
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+
+	wrongReq := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	wrongReq.Header.Set("X-Hub-Signature-256", signBody(t, body, "secret-a"))
+	wrongW := httptest.NewRecorder()
+	r.ServeHTTP(wrongW, wrongReq)
+	if wrongW.Code != http.StatusOK || callsA != 0 || callsB != 0 {
+		t.Fatalf("cross-app signature dispatched event: status=%d callsA=%d callsB=%d",
+			wrongW.Code, callsA, callsB)
+	}
+
+	rightReq := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	rightReq.Header.Set("X-Hub-Signature-256", signBody(t, body, "secret-b"))
+	rightW := httptest.NewRecorder()
+	r.ServeHTTP(rightW, rightReq)
+	if rightW.Code != http.StatusOK || callsA != 0 || callsB != 1 {
+		t.Fatalf("target signature dispatch = status=%d callsA=%d callsB=%d",
+			rightW.Code, callsA, callsB)
+	}
+}
+
 // --- Formatter ---
 
 func TestFormatForComment(t *testing.T) {

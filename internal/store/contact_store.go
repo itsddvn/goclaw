@@ -79,6 +79,11 @@ type ContactStore interface {
 	// the contact has been merged, returns the linked tenant_user's user_id.
 	// Returns ("", nil) when the contact is not found or not merged.
 	ResolveTenantUserID(ctx context.Context, channelType, senderID string) (string, error)
+
+	// ResolveContactID returns the exact user Contact UUID for a channel sender.
+	// It never follows merged_id, so grants remain Contact-specific.
+	// Returns uuid.Nil when no matching user Contact exists.
+	ResolveContactID(ctx context.Context, channelType, senderID string) (uuid.UUID, error)
 }
 
 // ContactMetadataStore is an optional extension for platforms that have

@@ -16,11 +16,10 @@ import (
 // WebhookHandler implements http.Handler for the Facebook webhook endpoint.
 // Handles both the GET verification challenge and POST event delivery.
 type WebhookHandler struct {
-	appSecret    string
-	verifyToken  string
-	extraSecrets []string // additional app secrets for multi-Meta-App deployments
-	onComment    func(ctx context.Context, entry WebhookEntry, change ChangeValue)
-	onMessage    func(ctx context.Context, entry WebhookEntry, event MessagingEvent)
+	appSecret   string
+	verifyToken string
+	onComment   func(ctx context.Context, entry WebhookEntry, change ChangeValue)
+	onMessage   func(ctx context.Context, entry WebhookEntry, event MessagingEvent)
 }
 
 // NewWebhookHandler creates a new WebhookHandler.
@@ -33,6 +32,8 @@ func NewWebhookHandler(appSecret, verifyToken string) *WebhookHandler {
 
 // hubChallengePattern validates that hub.challenge is safe to reflect.
 var hubChallengePattern = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,256}$`)
+
+const maxWebhookBodyBytes = 4 << 20 // 4 MiB
 
 // ServeHTTP handles Facebook webhook GET (verification) and POST (event delivery).
 func (wh *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -72,32 +73,21 @@ func (wh *WebhookHandler) handleVerification(w http.ResponseWriter, r *http.Requ
 // handleEvent processes a Facebook webhook event delivery.
 // Always returns 200 OK — Facebook retries on non-2xx for 24h.
 func (wh *WebhookHandler) handleEvent(w http.ResponseWriter, r *http.Request) {
-	const maxBodyBytes = 4 << 20 // 4 MB
-	lr := io.LimitReader(r.Body, maxBodyBytes+1)
-	body, err := io.ReadAll(lr)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
 	if err != nil {
 		slog.Warn("facebook: webhook read body error", "err", err)
 		w.WriteHeader(http.StatusOK) // 200 so Facebook stops retrying a bad delivery
 		return
 	}
-	if len(body) > maxBodyBytes {
+	if len(body) > maxWebhookBodyBytes {
 		slog.Warn("facebook: webhook body exceeded limit, event dropped", "bytes", len(body))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	sig := r.Header.Get("X-Hub-Signature-256")
-	verified := verifySignature(body, sig, wh.appSecret)
-	if !verified {
-		// Try extra secrets (multi-Meta-App deployments share one webhook endpoint).
-		for _, s := range wh.extraSecrets {
-			if verifySignature(body, sig, s) {
-				verified = true
-				break
-			}
-		}
-	}
-	if !verified {
+
+	if !verifySignature(body, sig, wh.appSecret) {
 		slog.Warn("security.facebook_webhook_signature_invalid", "remote_addr", r.RemoteAddr)
 		w.WriteHeader(http.StatusOK) // return 200 so Facebook stops sending
 		return
@@ -117,23 +107,25 @@ func (wh *WebhookHandler) handleEvent(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	for _, entry := range payload.Entry {
-		// Feed events (comments, posts).
-		for _, change := range entry.Changes {
-			if change.Field == "feed" && change.Value.Item == "comment" {
-				if wh.onComment != nil {
-					wh.onComment(ctx, entry, change.Value)
-				}
-			}
-		}
-		// Messenger events.
-		for _, event := range entry.Messaging {
-			if wh.onMessage != nil {
-				wh.onMessage(ctx, entry, event)
-			}
-		}
+		wh.dispatchEntry(ctx, entry)
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (wh *WebhookHandler) dispatchEntry(ctx context.Context, entry WebhookEntry) {
+	// Feed events (comments, posts).
+	for _, change := range entry.Changes {
+		if change.Field == "feed" && change.Value.Item == "comment" && wh.onComment != nil {
+			wh.onComment(ctx, entry, change.Value)
+		}
+	}
+	// Messenger events.
+	for _, event := range entry.Messaging {
+		if wh.onMessage != nil {
+			wh.onMessage(ctx, entry, event)
+		}
+	}
 }
 
 // verifySignature validates the X-Hub-Signature-256 header using HMAC-SHA256.

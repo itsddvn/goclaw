@@ -79,6 +79,8 @@ flowchart TD
 
 **MCP stdio validation** -- Admin-created, imported, tested, and on-demand-discovered MCP server configs pass `internal/mcp.ValidateServerConfig()` before any temporary or persistent client process is created. `stdio` configs are restricted to bare allowlisted runtime names resolved from `PATH`; path-bearing commands such as `./node`, `tools/node`, `/tmp/node`, or `.\\node.exe` are rejected to prevent wrapper substitution. Arguments reject shell metacharacters and eval/import flags, and block remote loader/script/package execution modes such as `node --loader`, `python -m`, `deno`/`bun` remote refs, `npx`/`uvx`/`pipx` package targets, `uv --with`, `npm exec`, `go run`, `cargo install`, and `dotnet tool install`. SSE and streamable-HTTP transports use the SSRF validator above.
 
+**Workstation authorization gates** -- `workstation_exec` and `claude_remote` require a tenant-scoped Agent assignment, an explicit grant for the exact channel Contact issuing the instruction, and an enabled executable permission. All three are checked before a backend is opened. Group credentials remain shared for MCP/SecureCLI, but workstation authorization resolves the actual sender Contact so a group cannot silently authorize every participant. Contact grants reference `channel_contacts.id`, ignore merged tenant-user identity, and store joins re-check tenant ownership. Connection metadata remains encrypted at rest and API responses expose only sanitized summaries and credential-presence booleans.
+
 **Path traversal**: `resolvePath()` applies `filepath.Clean()` then `HasPrefix()` to ensure all paths stay within the workspace. With `restrict = true`, any path outside the workspace is blocked.
 
 **PathDenyable** -- An interface that lets filesystem tools reject specific path prefixes:
@@ -121,6 +123,44 @@ All four filesystem tools (`read_file`, `write_file`, `list_files`, `edit`) impl
 | **Wrapper unwrap** | Blocks shell wrappers (`sh -c`, `bash -c`, etc.) that attempt to evade binary path matching. Checks up to 3 levels of nesting; deeper chains are rejected as adversarial. |
 | **Logging** | Three security events: `security.credentialed_binary_denied` (ungranted agent), `security.credentialed_binary_gate_error` (lookup failure), `security.credentialed_binary_wrapper_too_deep` (nested wrapper attack). All include: binary, wrapper, agent_id, tenant_id, command prefix. |
 | **Subagent wiring** | Subagent `ExecTool`s use the same `SecureCLIStore` via `cmd/gateway_agents.go` → `buildSubagentToolsRegistry`. Parent agents cannot bypass the gate by delegating exec to spawned subagents. |
+
+#### Trusted Delegated Host Exec
+
+`tools.trustedDelegationHostAgents` is an opt-in, global exception for a
+delegated agent that must run `exec` on the gateway host. It is empty by default
+and accepts only exact tenant/agent UUID pairs:
+
+```json
+{
+  "tools": {
+    "trustedDelegationHostAgents": [
+      {
+        "tenant_id": "11111111-1111-1111-1111-111111111111",
+        "agent_id": "22222222-2222-2222-2222-222222222222"
+      }
+    ]
+  }
+}
+```
+
+Treat every entry as granting shell-level access to the gateway host for that
+agent's delegated calls, including an absolute `working_dir`. This does not
+change direct exec routing, relax command denials or approvals, supply
+credentialed-CLI grants, or expand file-tool access: delegated files remain
+artifact-restricted (`inputs/` read-only, `outputs/` publication-only).
+
+The allowlist is writable only through the global configuration path, which is
+restricted to a system owner in master scope; tenant administrators and agents
+cannot self-grant it through tenant or agent configuration. Global config apply
+replaces the whole list; a patch replaces it when it includes this field, so
+revocation means removing the matching pair. Direct config-file edits require a
+gateway restart. Malformed or nil UUID values never match a delegated execution
+context.
+
+The web dashboard exposes this policy under **Config → Tools → Trusted delegated
+host execution**, with owner-only controls and a host-access confirmation before
+enabling a new grant. **Save** applies the policy live. Revocation affects
+subsequent commands; it does not terminate already-running processes.
 
 ### Layer 4: Output Security
 

@@ -1,6 +1,6 @@
 // Package security provides input normalization and allowlist matching for
-// workstation command execution. All checks operate on structured argv
-// (no shell interpolation) — injection prevention is architectural, not regex-based.
+// workstation command execution. All checks operate on structured executable
+// and argument values; backends must preserve those boundaries when encoding.
 package security
 
 import (
@@ -31,7 +31,7 @@ var zeroWidthChars = map[rune]bool{
 // (fullwidth substitutes, decomposed forms, ligatures) into canonical ASCII equivalents,
 // then strips zero-width invisible characters.
 //
-// C2 fix: Must be called on Cmd and every Arg element before any allowlist or
+// Must be called on Cmd and every Arg element before any allowlist or
 // character validation. Without normalization, "echo $\u200b(whoami)" bypasses
 // string-equality checks (red-team bypass #5/#6).
 //
@@ -65,4 +65,3 @@ func containsDangerousBytes(s string) bool {
 		strings.ContainsRune(s, '\r') ||
 		strings.ContainsRune(s, '\n')
 }
-

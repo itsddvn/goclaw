@@ -1137,6 +1137,93 @@ func TestDelegateTool_StagesArtifactsOnlyAfterAdmission(t *testing.T) {
 	}
 }
 
+func TestDelegateTool_AsyncTimeoutUpdateOnlyAffectsNewJobs(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDeadline := make(chan time.Time, 1)
+	secondDeadline := make(chan time.Time, 1)
+
+	runFn := func(ctx context.Context, req DelegateRequest) (DelegateResult, error) {
+		deadline, _ := ctx.Deadline()
+		switch req.Task {
+		case "first":
+			firstDeadline <- deadline
+			close(firstStarted)
+			<-releaseFirst
+		case "second":
+			secondDeadline <- deadline
+		default:
+			return DelegateResult{}, fmt.Errorf("unexpected task %q", req.Task)
+		}
+		return DelegateResult{Content: "done"}, nil
+	}
+	tool := NewDelegateTool(noopAgentLink{}, noopAgentCRUD{}, nil, runFn)
+	tool.SetWorkspace(t.TempDir())
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseFirst)
+		})
+	}
+	t.Cleanup(func() {
+		release()
+		tool.Close()
+	})
+
+	tool.SetAsyncTimeoutSeconds(0)
+	ctx := WithToolWorkspace(makeDelegateCtx(t), t.TempDir())
+	firstStartedAt := time.Now()
+	first := tool.Execute(ctx, map[string]any{
+		"agent_key": "child-agent",
+		"task":      "first",
+		"mode":      "async",
+	})
+	if first == nil || first.IsError {
+		t.Fatalf("first delegation = %#v", first)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first delegation did not start")
+	}
+	firstJobDeadline := <-firstDeadline
+	if firstJobDeadline.IsZero() {
+		t.Fatal("first async job had no deadline")
+	}
+	firstTimeout := time.Duration(config.DefaultDelegateAsyncTimeoutSeconds) * time.Second
+	if got := firstJobDeadline.Sub(firstStartedAt); got < firstTimeout-time.Second || got > firstTimeout+time.Second {
+		t.Fatalf("first async deadline = %s, want about %s", got, firstTimeout)
+	}
+
+	tool.SetAsyncTimeoutSeconds(120)
+	if remaining := time.Until(firstJobDeadline); remaining < firstTimeout-time.Second || remaining > firstTimeout {
+		t.Fatalf("existing async deadline changed after reload: remaining %s, want about %s", remaining, firstTimeout)
+	}
+
+	secondStartedAt := time.Now()
+	second := tool.Execute(ctx, map[string]any{
+		"agent_key": "child-agent",
+		"task":      "second",
+		"mode":      "async",
+	})
+	if second == nil || second.IsError {
+		t.Fatalf("second delegation = %#v", second)
+	}
+	select {
+	case secondJobDeadline := <-secondDeadline:
+		if secondJobDeadline.IsZero() {
+			t.Fatal("second async job had no deadline")
+		}
+		if got := secondJobDeadline.Sub(secondStartedAt); got < 119*time.Second || got > 121*time.Second {
+			t.Fatalf("second async deadline = %s, want about 2m", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second delegation did not start")
+	}
+
+	release()
+}
+
 func TestDelegateTool_AsyncReleasesAdmissionBeforeAnnouncement(t *testing.T) {
 	admission := orchestration.NewChildRunAdmission(1, 4)
 	messageBus := bus.New()

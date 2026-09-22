@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { configSchema } from "./channel-schemas";
+import {
+  configSchema,
+  credentialsSchema,
+  fieldTranslationKey,
+  requiredScopes,
+  resolveRequiredScopes,
+} from "./channel-schemas";
 import { deliveryModelKey, isDeliveryModelKey, isDeliveryProviderKey } from "./channel-delivery-provider-fields";
 import { normalizeReasoningDeliveryConfig, resolveReasoningDeliveryValue } from "./reasoning-delivery-config";
 
@@ -81,6 +87,88 @@ describe("discord configSchema", () => {
     expect(historyLimit).toBeDefined();
     expect(historyLimit!.defaultValue).toBe(200);
     expect(historyLimit!.help).toMatch(/0 = disabled/i);
+  });
+});
+
+describe("facebook schemas", () => {
+  const facebookCredentials = credentialsSchema["facebook"]!;
+  const facebookConfig = configSchema["facebook"]!;
+
+  it("preserves the Facebook credential and Page ID payload keys", () => {
+    expect(facebookCredentials.map((field) => field.key)).toEqual([
+      "page_access_token",
+      "app_secret",
+      "verify_token",
+    ]);
+    expect(facebookConfig.some((field) => field.key === "page_id")).toBe(true);
+  });
+
+  it("uses channel-specific translations without changing shared-channel lookups", () => {
+    const facebookAppSecret = facebookCredentials.find((field) => field.key === "app_secret")!;
+    const feishuAppSecret = credentialsSchema["feishu"]!.find((field) => field.key === "app_secret")!;
+    const facebookPageToken = facebookCredentials.find((field) => field.key === "page_access_token")!;
+    const pancakePageToken = credentialsSchema["pancake"]!.find((field) => field.key === "page_access_token")!;
+
+    expect(fieldTranslationKey(facebookAppSecret, "help")).toBe(
+      "fieldConfig.facebook.app_secret.help",
+    );
+    expect(fieldTranslationKey(feishuAppSecret, "help")).toBe("fieldConfig.app_secret.help");
+    expect(fieldTranslationKey(facebookPageToken, "help")).toBe(
+      "fieldConfig.facebook.page_access_token.help",
+    );
+    expect(fieldTranslationKey(pancakePageToken, "help")).toBe(
+      "fieldConfig.page_access_token.help",
+    );
+  });
+
+  it("removes the unused session timeout and documents feature dependencies", () => {
+    expect(facebookConfig.find((field) => field.key === "messenger_options.session_timeout")).toBeUndefined();
+
+    const messengerAutoReply = facebookConfig.find(
+      (field) => field.key === "features.messenger_auto_reply",
+    )!;
+    const firstInbox = facebookConfig.find((field) => field.key === "features.first_inbox")!;
+
+    expect(messengerAutoReply.help).toMatch(/must be enabled/i);
+    expect(firstInbox.disabledWhen).toEqual({
+      key: "features.comment_reply",
+      value: "false",
+      hint: "fieldConfig.facebook.features.first_inbox.disabledHint",
+    });
+    expect(firstInbox.help).toMatch(/running GoClaw process/i);
+  });
+
+  it("lists the exact Messenger, comment, and use-case permissions", () => {
+    expect(requiredScopes.facebook?.map((entry) => entry.scope)).toEqual([
+      "pages_show_list",
+      "pages_manage_metadata",
+      "pages_messaging",
+      "pages_manage_engagement",
+      "pages_read_user_content",
+      "pages_read_engagement",
+      "business_management",
+      "public_profile",
+    ]);
+  });
+
+  it("shows comment permissions only when Comment Auto-Reply is enabled", () => {
+    const alwaysRequired = [
+      "pages_show_list",
+      "pages_manage_metadata",
+      "pages_messaging",
+      "business_management",
+      "public_profile",
+    ];
+
+    expect(resolveRequiredScopes("facebook").map((entry) => entry.scope)).toEqual(alwaysRequired);
+    expect(resolveRequiredScopes("facebook", {
+      "features.comment_reply": false,
+    }).map((entry) => entry.scope)).toEqual(alwaysRequired);
+    expect(resolveRequiredScopes("facebook", {
+      "features.comment_reply": true,
+    }).map((entry) => entry.scope)).toEqual(
+      requiredScopes.facebook?.map((entry) => entry.scope),
+    );
   });
 });
 

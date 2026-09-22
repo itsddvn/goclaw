@@ -76,6 +76,10 @@ func (s *fakeChannelContextContactStore) ResolveTenantUserID(context.Context, st
 	return "", nil
 }
 
+func (s *fakeChannelContextContactStore) ResolveContactID(context.Context, string, string) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
+
 func TestChannelContextsListUsesStoredGroupsAndMasksToContextShape(t *testing.T) {
 	token := "channel-contexts-key"
 	setupTestCache(t, map[string]*store.APIKeyData{

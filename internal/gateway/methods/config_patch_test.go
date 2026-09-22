@@ -131,6 +131,56 @@ func TestConfigPatchPersistsShellDenyGroupsFalse(t *testing.T) {
 	}
 }
 
+func TestConfigPatchValidatesDelegateAsyncTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	methods := NewConfigMethods(cfg, cfgPath, nil, nil)
+	client, responses := gateway.NewCapturingTestClient(permissions.RoleOwner, store.MasterTenantID, "owner", 1)
+	ctx := store.WithTenantID(context.Background(), store.MasterTenantID)
+
+	patch := func(id, raw string) protocol.ResponseFrame {
+		t.Helper()
+		params, err := json.Marshal(map[string]string{"raw": raw})
+		if err != nil {
+			t.Fatal(err)
+		}
+		methods.handlePatch(ctx, client, &protocol.RequestFrame{
+			Type:   protocol.FrameTypeRequest,
+			ID:     id,
+			Method: protocol.MethodConfigPatch,
+			Params: params,
+		})
+		return readConfigPatchResponse(t, responses)
+	}
+
+	if res := patch("patch-delegate-timeout-valid", `{"tools":{"delegateAsyncTimeoutSeconds":60}}`); !res.OK {
+		t.Fatalf("valid config.patch failed: %#v", res.Error)
+	}
+	if cfg.Tools.DelegateAsyncTimeoutSeconds != 60 {
+		t.Fatalf("in-memory delegateAsyncTimeoutSeconds = %d, want 60", cfg.Tools.DelegateAsyncTimeoutSeconds)
+	}
+
+	if res := patch("patch-delegate-timeout-invalid", `{"tools":{"delegateAsyncTimeoutSeconds":59}}`); res.OK {
+		t.Fatal("invalid config.patch unexpectedly succeeded")
+	}
+	if cfg.Tools.DelegateAsyncTimeoutSeconds != 60 {
+		t.Fatalf("rejected patch changed delegateAsyncTimeoutSeconds to %d, want 60", cfg.Tools.DelegateAsyncTimeoutSeconds)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"delegateAsyncTimeoutSeconds": 60`)) {
+		t.Fatalf("saved config missing delegateAsyncTimeoutSeconds=60:\n%s", data)
+	}
+	if bytes.Contains(data, []byte(`"delegateAsyncTimeoutSeconds": 59`)) {
+		t.Fatalf("rejected timeout was persisted:\n%s", data)
+	}
+}
+
 func readConfigPatchResponse(t *testing.T, responses <-chan []byte) protocol.ResponseFrame {
 	t.Helper()
 	select {

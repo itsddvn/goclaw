@@ -84,9 +84,6 @@ func (ch *Channel) handleMessagingEvent(ctx context.Context, entry WebhookEntry,
 		"page_id":    ch.pageID,
 		"sender_id":  senderID,
 	}
-	if ch.config.MessengerOptions.SessionTimeout != "" {
-		metadata["session_timeout"] = ch.config.MessengerOptions.SessionTimeout
-	}
 
 	ch.HandleMessage(senderID, chatID, content, nil, metadata, "direct")
 }

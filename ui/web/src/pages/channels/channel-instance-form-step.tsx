@@ -24,6 +24,7 @@ import { wizardEditConfigs } from "./channel-wizard-registry";
 import { TelegramGroupOverrides, type GroupConfigWithTopics } from "./telegram-group-overrides";
 import { CHANNEL_TYPES } from "@/constants/channels";
 import type { ChannelInstanceFormData } from "@/schemas/channel.schema";
+import { FacebookSetupGuide } from "./facebook/facebook-setup-guide";
 
 interface ChannelInstanceFormStepProps {
   form: UseFormReturn<ChannelInstanceFormData>;
@@ -134,18 +135,25 @@ export function ChannelInstanceFormStep({
           {errors.agentId && <p className="text-xs text-destructive">{errors.agentId.message}</p>}
         </div>
 
+        {channelType === "facebook" && (
+          <FacebookSetupGuide
+            verifyToken={(credsValues.verify_token as string) ?? ""}
+            onVerifyTokenChange={(value) => onCredsChange("verify_token", value)}
+          />
+        )}
+
         {credsFields.length > 0 && (
           <fieldset className="rounded-md border p-3 space-y-3">
             <legend className="px-1 text-sm font-medium">
               {t("form.credentials")}
               {instance && <span className="text-xs font-normal text-muted-foreground ml-1">{t("form.credentialsHint")}</span>}
             </legend>
-            <ChannelFields fields={credsFields} values={credsValues} onChange={onCredsChange} idPrefix="ci-cred" isEdit={!!instance} contextValues={configValues} />
+            <ChannelFields fields={credsFields} values={credsValues} onChange={onCredsChange} idPrefix="ci-cred" isEdit={!!instance} contextValues={configValues} channelType={channelType} />
             <p className="text-xs text-muted-foreground">{t("form.credentialsEncrypted")}</p>
           </fieldset>
         )}
 
-        <ChannelScopesInfo channelType={channelType} />
+        <ChannelScopesInfo channelType={channelType} configValues={configValues} />
 
         {instance && wizard?.steps.includes("auth") && (
           <div className="rounded-md border border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950 p-3">

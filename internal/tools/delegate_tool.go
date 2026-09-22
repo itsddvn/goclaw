@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -78,6 +79,8 @@ type DelegateTool struct {
 	workspace      string
 	dataDir        string
 	removeExchange func(string, uuid.UUID) error
+
+	asyncTimeoutNanos atomic.Int64
 
 	retainedMu     sync.Mutex
 	retained       map[string]retainedDelegationArtifact
@@ -192,7 +195,7 @@ func NewDelegateToolWithAdmission(
 	if admission == nil {
 		admission = orchestration.NewChildRunAdmission(32, 128)
 	}
-	return &DelegateTool{
+	tool := &DelegateTool{
 		links:           links,
 		agents:          agents,
 		eventBus:        eb,
@@ -204,6 +207,25 @@ func NewDelegateToolWithAdmission(
 		activeArtifacts: make(map[string]uint32),
 		closeDone:       make(chan struct{}),
 	}
+	tool.SetAsyncTimeoutSeconds(0)
+	return tool
+}
+
+// SetAsyncTimeoutSeconds updates the deadline used when subsequent async
+// delegate jobs are created. Existing job contexts retain their deadline.
+func (t *DelegateTool) SetAsyncTimeoutSeconds(timeoutSeconds int) {
+	if timeoutSeconds < config.MinDelegateAsyncTimeoutSeconds || timeoutSeconds > config.MaxDelegateAsyncTimeoutSeconds {
+		timeoutSeconds = config.DefaultDelegateAsyncTimeoutSeconds
+	}
+	t.asyncTimeoutNanos.Store(int64(time.Duration(timeoutSeconds) * time.Second))
+}
+
+func (t *DelegateTool) asyncTimeout() time.Duration {
+	timeout := time.Duration(t.asyncTimeoutNanos.Load())
+	if timeout <= 0 {
+		return time.Duration(config.DefaultDelegateAsyncTimeoutSeconds) * time.Second
+	}
+	return timeout
 }
 
 func (t *DelegateTool) Name() string { return "delegate" }
@@ -459,7 +481,8 @@ func (t *DelegateTool) executeAsyncMode(ctx context.Context, job *delegateArtifa
 		}
 	}()
 	// Detach from parent cancellation but keep a bounded admitted callback.
-	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	// Read once so a config reload changes only jobs submitted afterward.
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), t.asyncTimeout())
 	announceCtx := context.WithoutCancel(ctx)
 	var dr DelegateResult
 	var runErr error
