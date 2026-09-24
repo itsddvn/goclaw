@@ -14,12 +14,14 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/bitrix24"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/facebook"
+	zalocommon "github.com/nextlevelbuilder/goclaw/internal/channels/zalo/common"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/heartbeat"
 	"github.com/nextlevelbuilder/goclaw/internal/orchestration"
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
+	"github.com/nextlevelbuilder/goclaw/internal/security"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tasks"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -411,6 +413,11 @@ func (d *gatewayDeps) runLifecycle(
 	// instances yet. The claim is first-wins, so an instance discovered above
 	// prevents duplicate ServeMux registration.
 	mountFacebookWebhookRoute(mux)
+	// Bootstrap verification must work before the first OA instance exists.
+	if path, handler := zalocommon.SharedRouter().MountRoute(); path != "" && handler != nil {
+		mux.Handle(path, handler)
+		slog.Info("webhook route mounted on gateway", "path", path)
+	}
 
 	// Bitrix24: also claim+mount the shared webhook router directly, even if
 	// no channel_instances row has finished setup yet (bot_code/bot_name
@@ -445,6 +452,16 @@ func (d *gatewayDeps) runLifecycle(
 		slog.Info("cors: allowed_origins configured", "origins", d.cfg.Gateway.AllowedOrigins)
 	} else if !edition.Current().IsLimited() {
 		slog.Warn("security.cors_open: no allowed_origins configured — all WebSocket origins accepted. Set gateway.allowed_origins or GOCLAW_ALLOWED_ORIGINS for production")
+	}
+	if allowed, rejected := security.OperatorAllowlistStatus(); len(allowed) > 0 || len(rejected) > 0 {
+		if len(allowed) > 0 {
+			slog.Warn("security.ssrf_allowlist: SSRF protection relaxed for operator-configured ranges — tool- and admin-supplied URLs may reach them",
+				"env", security.SSRFAllowedCIDRsEnv, "allowed", allowed)
+		}
+		if len(rejected) > 0 {
+			slog.Warn("security.ssrf_allowlist_rejected: entries refused; cloud-metadata, multicast and unspecified ranges can never be allowlisted",
+				"env", security.SSRFAllowedCIDRsEnv, "rejected", rejected)
+		}
 	}
 
 	if err := d.server.Start(ctx); err != nil {

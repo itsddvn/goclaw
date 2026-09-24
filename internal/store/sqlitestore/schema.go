@@ -16,7 +16,7 @@ var schemaSQL string
 
 // SchemaVersion is the current SQLite schema version.
 // Bump this when adding new migration steps below.
-const SchemaVersion = 61
+const SchemaVersion = 62
 
 // migrations maps version → SQL to apply when upgrading FROM that version.
 // schema.sql always represents the LATEST full schema (for fresh DBs).
@@ -95,6 +95,49 @@ BEGIN
 END;`
 
 var migrations = map[int]string{
+	// Version 61 → 62: reconcile both version-61 histories. A version-61 DB may
+	// have only workstation Contact grants (CPPAI) or only group archive and
+	// Zalo Bot retype (upstream); never retype every zalo_oa again because OAuth
+	// OA instances may have been configured after the upstream migration.
+	61: `CREATE TABLE IF NOT EXISTS channel_message_archive (
+    id                 TEXT NOT NULL PRIMARY KEY,
+    channel_name       VARCHAR(100) NOT NULL,
+    history_key        VARCHAR(200) NOT NULL,
+    parent_history_key VARCHAR(200) NOT NULL DEFAULT '',
+    sender             VARCHAR(255) NOT NULL,
+    sender_id          VARCHAR(255) NOT NULL DEFAULT '',
+    body               TEXT NOT NULL,
+    platform_msg_id    VARCHAR(100) NOT NULL DEFAULT '',
+    is_summary         BOOLEAN NOT NULL DEFAULT 0,
+    tenant_id          TEXT NOT NULL REFERENCES tenants(id),
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    archived_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    archive_reason     VARCHAR(20) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_message_archive_lookup ON channel_message_archive(tenant_id, channel_name, history_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_channel_message_archive_archived_at ON channel_message_archive(tenant_id, archived_at);
+CREATE TABLE IF NOT EXISTS workstation_contact_grants (
+    workstation_id TEXT NOT NULL REFERENCES workstations(id) ON DELETE CASCADE,
+    contact_id     TEXT NOT NULL REFERENCES channel_contacts(id) ON DELETE CASCADE,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_by     VARCHAR(255) NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (workstation_id, contact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workstation_contact_grants_contact
+    ON workstation_contact_grants(tenant_id, contact_id, workstation_id);
+CREATE INDEX IF NOT EXISTS idx_workstation_contact_grants_workstation
+    ON workstation_contact_grants(tenant_id, workstation_id);
+-- User grants cannot be expanded into Contact grants without widening access.
+DROP TABLE IF EXISTS workstation_user_grants;
+-- Only an explicit legacy Bot token in plaintext config identifies a Bot row.
+-- Other legacy Bot rows have encrypted credentials and cannot be classified in SQL.
+UPDATE channel_instances SET channel_type = 'zalo_bot'
+WHERE channel_type = 'zalo_oa'
+  AND json_valid(config)
+  AND json_type(config, '$.token') = 'text'
+  AND json_extract(config, '$.token') <> '';`,
 	// Version 60 → 61: replace tenant-user grants with exact Contact grants.
 	60: `CREATE TABLE IF NOT EXISTS workstation_contact_grants (
     workstation_id TEXT NOT NULL REFERENCES workstations(id) ON DELETE CASCADE,

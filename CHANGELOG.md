@@ -27,6 +27,26 @@ All notable changes to GoClaw are documented here. For full documentation, see [
   config apply/patch replaces grants live; disk edits require a restart.
   Owners can now manage grants in **Config → Tools**, with per-agent switches,
   host-access confirmation, and immediate saving in English, Vietnamese, and Chinese.
+- **Zalo Official Account OAuth v4 channel** — `zalo_oa` is now the OA OpenAPI
+  integration (consent, webhook or polling, strict signatures). Operator setup:
+  [docs/zalo-oa-integration.md](docs/zalo-oa-integration.md). Adapted from
+  [nextlevelbuilder/dewee](https://github.com/nextlevelbuilder/dewee)
+  (CC BY-NC 4.0).
+
+
+- **Task detail dialog shows the full task UUID with one-click copy** — the
+  short identifier (`T-015-cc8e`) carries only the last four hex characters of
+  the UUID, while the agent-facing `team_tasks` tool and RPCs take the full
+  UUID, so a human had no way to name a task to the lead from the dashboard.
+
+- **Dashboard can cancel and retry stuck team tasks** — new WS RPCs
+  `teams.tasks.cancel` (any task not yet completed/cancelled; optional reason is
+  posted as a comment) and `teams.tasks.retry` (stale / failed / cancelled /
+  in_review, and blocked tasks that nothing blocks any more; a human comment is
+  required and is both posted on the task and appended to the assignment prompt).
+  Task detail dialog gets Retry and Cancel buttons. Previously these transitions
+  were reachable only through the lead agent's `team_tasks` tool, so a task that
+  ended up blocked or stale could not be recovered from the UI (#506).
 
 - **Behavior UX sidecar delivery overrides** — Adds sidecar-generated Quick
   Acknowledgement and Intermediate Replies with provider/model, timeout, token,
@@ -139,6 +159,12 @@ All notable changes to GoClaw are documented here. For full documentation, see [
 
 ### Breaking Changes
 
+- **Zalo channel type retype (`zalo_oa` → `zalo_bot`).** Existing
+  `channel_instances` rows whose `channel_type` was the Bot API (`zalo_oa`)
+  are retyped to `zalo_bot`. New `zalo_oa` is Official Account OAuth v4.
+  Static `channels.zalo` remains Bot. Filters on `channel_type='zalo_oa'`
+  must be updated or they will miss retyped Bot instances.
+
 - **Context pruning now opt-in.** Previously tool-result trimming ran by default
   for all providers; now requires explicit `contextPruning.mode: "cache-ttl"` in
   `config.agents.defaults` to enable. Matches upstream TS design and prevents
@@ -154,6 +180,7 @@ All notable changes to GoClaw are documented here. For full documentation, see [
   ```
 
 ### New Features
+
 
 - **Pancake private-reply (comment → DM).** Enables a one-time DM to commenters
   after the public reply. Stateless on GoClaw side — no DB dedup table, no

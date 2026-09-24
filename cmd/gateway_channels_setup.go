@@ -87,12 +87,12 @@ func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, ms
 
 	if cfg.Channels.Zalo.Enabled {
 		if cfg.Channels.Zalo.Token == "" {
-			recordMissingConfig(channels.TypeZaloOA, "Set channels.zalo.token in config.")
+			recordMissingConfig(channels.TypeZaloBot, "Set channels.zalo.token in config.")
 		} else if z, err := zalo.New(cfg.Channels.Zalo, msgBus, pgStores.Pairing); err != nil {
-			channelMgr.RecordFailure(channels.TypeZaloOA, "", err)
+			channelMgr.RecordFailure(channels.TypeZaloBot, "", err)
 			slog.Error("failed to initialize zalo channel", "error", err)
 		} else {
-			channelMgr.RegisterChannel(channels.TypeZaloOA, z)
+			channelMgr.RegisterChannel(channels.TypeZaloBot, z)
 			slog.Info("zalo channel enabled (config)")
 		}
 	}
@@ -240,7 +240,9 @@ func wireChannelEventSubscribers(
 		}
 	})
 
-	// Wire pairing revocation → force disconnect active WebSocket sessions.
+	// Wire pairing revocation → force disconnect active WebSocket sessions and
+	// clear the in-memory group approval cache so a revoked group re-enters the
+	// pairing gate on its next message instead of the bot replying as usual.
 	msgBus.Subscribe(bus.TopicPairingRevoked, func(event bus.Event) {
 		if event.Name != bus.EventPairingRevoked {
 			return
@@ -250,6 +252,13 @@ func wireChannelEventSubscribers(
 			return
 		}
 		go server.DisconnectByPairing(payload.SenderID, payload.Channel)
+		// Group pairings use "group:<chatID>" as sender ID (telegram) or
+		// "<chatID>" (other channels); only group entries carry an
+		// approvedGroups cache entry worth clearing.
+		if groupChatID, isGroup := strings.CutPrefix(payload.SenderID, "group:"); isGroup {
+			slog.Debug("pairing revoked, clearing group approval cache", "channel", payload.Channel, "chat_id", groupChatID)
+			channelMgr.ClearGroupApproval(payload.Channel, groupChatID)
+		}
 	})
 
 	// Cascade: when an agent becomes inactive, disable its linked channel instances.

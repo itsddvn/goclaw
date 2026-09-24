@@ -919,6 +919,46 @@
         "responses": { "200": { "description": "Instance deleted" } }
       }
     },
+    "/v1/channels/setup/zalo-oa": {
+      "get": {
+        "tags": ["Channels"],
+        "summary": "Preview Zalo OA callback and webhook URLs",
+        "parameters": [{ "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Generated setup URLs" } }
+      }
+    },
+    "/v1/channels/instances/{id}/zalo-oa/consent": {
+      "get": {
+        "tags": ["Channels"],
+        "summary": "Create a Zalo OA OAuth consent attempt",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": { "200": { "description": "Zalo consent URL and short-lived state token" } }
+      }
+    },
+    "/v1/channels/instances/{id}/zalo-oa/exchange-code": {
+      "post": {
+        "tags": ["Channels"],
+        "summary": "Exchange a Zalo OA authorization code",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["code", "state"],
+                "properties": {
+                  "code": { "type": "string" },
+                  "state": { "type": "string" },
+                  "oa_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "OAuth tokens exchanged and persisted" } }
+      }
+    },
     "/v1/channels/instances/{id}/writers/test": {
       "post": {
         "tags": ["Channels"],
@@ -10906,7 +10946,7 @@
         "properties": {
           "name": { "type": "string", "description": "Unique provider slug" },
           "display_name": { "type": "string" },
-          "provider_type": { "type": "string", "enum": ["aimlapi", "anthropic_native", "openai_compat", "gemini_native", "openrouter", "groq", "deepseek", "mistral", "xai", "minimax_native", "cohere", "perplexity", "dashscope", "bailian", "chatgpt_oauth", "claude_cli", "yescale", "zai", "zai_coding", "ollama", "ollama_cloud", "acp"] },
+          "provider_type": { "type": "string", "enum": ["aimlapi", "api_route", "anthropic_native", "openai_compat", "gemini_native", "openrouter", "groq", "deepseek", "mistral", "xai", "minimax_native", "cohere", "perplexity", "dashscope", "bailian", "chatgpt_oauth", "claude_cli", "yescale", "zai", "zai_coding", "ollama", "ollama_cloud", "acp"] },
           "api_base": { "type": "string" },
           "api_key": { "type": "string" },
           "enabled": { "type": "boolean", "default": true },

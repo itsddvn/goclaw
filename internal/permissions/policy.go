@@ -258,6 +258,9 @@ func isAdminMethod(method string) bool {
 		protocol.MethodChannelInstancesCreate,
 		protocol.MethodChannelInstancesUpdate,
 		protocol.MethodChannelInstancesDelete,
+		protocol.MethodChannelInstancesZaloOAConsentURL,
+		protocol.MethodChannelInstancesZaloOAExchangeCode,
+		protocol.MethodChannelInstancesZaloOACallbackURL,
 
 		// Bitrix24 portal management — admin-only writes (credentials + delete).
 		protocol.MethodBitrixPortalsCreate,
@@ -354,6 +357,8 @@ func isWriteMethod(method string) bool {
 		protocol.MethodTeamsTaskComment,
 		protocol.MethodTeamsTaskCreate,
 		protocol.MethodTeamsTaskAssign,
+		protocol.MethodTeamsTaskCancel,
+		protocol.MethodTeamsTaskRetry,
 		protocol.MethodTeamsWorkspaceDelete,
 		protocol.MethodHooksTest,
 		protocol.MethodPairingRequest,

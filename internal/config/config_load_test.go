@@ -147,6 +147,23 @@ func TestLoad_EnvVarOverrides(t *testing.T) {
 	}
 }
 
+func TestLoad_PublicURLFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json5")
+	if err := os.WriteFile(cfgPath, []byte(`{"gateway":{"public_url":"https://from-file.example"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOCLAW_PUBLIC_URL", "https://from-env.example")
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load error: %v", err)
+	}
+	if cfg.Gateway.PublicURL != "https://from-env.example" {
+		t.Fatalf("public URL = %q, want env overlay", cfg.Gateway.PublicURL)
+	}
+}
+
 func TestLoad_WebhookTimeoutsFromFileAndEnv(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json5")
@@ -427,6 +444,33 @@ func TestLoad_EnvVarAPIKeys(t *testing.T) {
 	}
 	if cfg.Providers.Anthropic.APIKey != "sk-test-key" {
 		t.Fatalf("anthropic key: got %q", cfg.Providers.Anthropic.APIKey)
+	}
+}
+
+func TestLoad_APIRouteProviderFromFileAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json5")
+	if err := os.WriteFile(cfgPath, []byte(`{
+		"providers": {
+			"api_route": {
+				"api_key": "file-key",
+				"api_base": "https://example.com/v1"
+			}
+		}
+	}`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("GOCLAW_API_ROUTE_API_KEY", "env-key")
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load error: %v", err)
+	}
+	if cfg.Providers.APIRoute.APIKey != "env-key" {
+		t.Fatalf("API key = %q, want GOCLAW_API_ROUTE_API_KEY override", cfg.Providers.APIRoute.APIKey)
+	}
+	if cfg.Providers.APIRoute.APIBase != "https://example.com/v1" {
+		t.Fatalf("API base = %q, want file value", cfg.Providers.APIRoute.APIBase)
 	}
 }
 

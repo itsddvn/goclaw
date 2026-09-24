@@ -203,6 +203,7 @@ export function WorkstationCreateDialog({
                     </SelectContent>
                   </Select>
                 </div>
+
                 {authMethod === "privateKey" ? (
                   <div className="space-y-1.5">
                     <Label htmlFor="ws-private-key">{t("createDialog.privateKeyLabel")}</Label>

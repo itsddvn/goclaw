@@ -66,6 +66,7 @@ type ChannelsConfig struct {
 	Slack             SlackConfig              `json:"slack"`
 	WhatsApp          WhatsAppConfig           `json:"whatsapp"`
 	Zalo              ZaloConfig               `json:"zalo"`
+	ZaloOA            ZaloOAConfig             `json:"zalo_oa"`
 	ZaloPersonal      ZaloPersonalConfig       `json:"zalo_personal"`
 	Feishu            FeishuConfig             `json:"feishu"`
 	PendingCompaction *PendingCompactionConfig `json:"pending_compaction,omitempty"` // global pending message compaction settings
@@ -208,6 +209,39 @@ type ZaloConfig struct {
 	ChatBehavior  *ChatBehaviorConfig `json:"chat_behavior,omitempty"` // override gateway chat behavior (nil = inherit)
 }
 
+// ZaloOAConfig configures the phone-number-tied Official Account channel
+// that uses Zalo OAuth v4 (oauth.zaloapp.com).
+//
+// AppID, SecretKey, and OAID are NOT here — those credentials live in
+// ChannelInstance.credentials (encrypted JSON blob) and are loaded via
+// oa.LoadCreds. This struct only carries operator-tunable runtime knobs.
+type ZaloOAConfig struct {
+	Enabled              bool                `json:"enabled"`
+	PollIntervalSeconds  int                 `json:"poll_interval_seconds,omitempty"`  // default 15
+	RefreshMarginSeconds int                 `json:"refresh_margin_seconds,omitempty"` // default 300
+	SafetyTickerMinutes  int                 `json:"safety_ticker_minutes,omitempty"`  // default 30
+	AllowFrom            FlexibleStringSlice `json:"allow_from,omitempty"`
+	DMPolicy             string              `json:"dm_policy,omitempty"`
+	BlockReply           *bool               `json:"block_reply,omitempty"`
+	ReactionLevel        string              `json:"reaction_level,omitempty"` // "off" (default), "minimal", "full" — status emoji reactions
+	// Terminal reaction (done/error) is deferred by a random delay in
+	// [min, max] ms so the heart/sad doesn't slap right as the reply lands.
+	// Both 0 → defaults (800/2000). max < min → max coerced to min (no jitter).
+	ReactionTerminalDelayMinMs int   `json:"reaction_terminal_delay_min_ms,omitempty"`
+	ReactionTerminalDelayMaxMs int   `json:"reaction_terminal_delay_max_ms,omitempty"`
+	QuoteUserMessage           *bool `json:"quote_user_message,omitempty"` // default false: quote the user's last inbound message in CS replies
+
+	Transport                  string `json:"transport,omitempty"`                     // "webhook" (default) | "polling"
+	WebhookPath                string `json:"webhook_path,omitempty"`                  // optional legacy routing slug; otherwise derived from instance name
+	WebhookSignatureMode       string `json:"webhook_signature_mode,omitempty"`        // "strict" (default) | "log_only" | "disabled"
+	WebhookReplayWindowSeconds int    `json:"webhook_replay_window_seconds,omitempty"` // default 300, clamp [60, 3600]
+	CatchUpOnRestart           bool   `json:"catch_up_on_restart,omitempty"`           // single bounded listrecentchat sweep on Start (off by default)
+
+	// Polling knobs. Ignored when Transport="webhook".
+	PollCount            int `json:"poll_count,omitempty"`              // page size; default 10, clamp [1, 10] (Zalo hard cap, error -210 above)
+	PollBurndownMaxPages int `json:"poll_burndown_max_pages,omitempty"` // max pages per cycle; default 10, clamp [1, 20]; 1 disables burn-down
+}
+
 type ZaloPersonalConfig struct {
 	Enabled         bool                `json:"enabled"`
 	AllowFrom       FlexibleStringSlice `json:"allow_from"`
@@ -255,6 +289,8 @@ type FeishuConfig struct {
 type ProvidersConfig struct {
 	Anthropic      ProviderConfig  `json:"anthropic"`
 	OpenAI         ProviderConfig  `json:"openai"`
+	AtlasCloud     ProviderConfig  `json:"atlascloud"` // Atlas Cloud (OpenAI-compatible endpoint)
+	APIRoute       ProviderConfig  `json:"api_route"`  // API Route (OpenAI-compatible endpoint)
 	OpenRouter     ProviderConfig  `json:"openrouter"`
 	Groq           ProviderConfig  `json:"groq"`
 	Gemini         ProviderConfig  `json:"gemini"`
@@ -331,6 +367,10 @@ func (p *ProvidersConfig) APIBaseForType(providerType string) string {
 		return p.Anthropic.APIBase
 	case "openai", "openai_compat":
 		return p.OpenAI.APIBase
+	case "atlascloud":
+		return p.AtlasCloud.APIBase
+	case "api_route":
+		return p.APIRoute.APIBase
 	case "openrouter":
 		return p.OpenRouter.APIBase
 	case "groq":
@@ -378,6 +418,8 @@ func (c *Config) HasAnyProvider() bool {
 	p := c.Providers
 	return p.Anthropic.APIKey != "" ||
 		p.OpenAI.APIKey != "" ||
+		p.AtlasCloud.APIKey != "" ||
+		p.APIRoute.APIKey != "" ||
 		p.OpenRouter.APIKey != "" ||
 		p.Groq.APIKey != "" ||
 		p.Gemini.APIKey != "" ||
@@ -547,6 +589,7 @@ type WebFetchPolicyConfig struct {
 // BrowserToolConfig controls the browser automation tool.
 type BrowserToolConfig struct {
 	Enabled           bool   `json:"enabled"`                     // enable the browser tool (default false)
+	Backend           string `json:"backend,omitempty"`           // "chrome" (default) or "lightpanda"; auto-detected from /json/version if empty
 	Headless          bool   `json:"headless,omitempty"`          // run Chrome in headless mode (ignored when RemoteURL is set)
 	RemoteURL         string `json:"remote_url,omitempty"`        // CDP endpoint for remote Chrome sidecar, e.g. "ws://chrome:9222"
 	ActionTimeoutMs   int    `json:"action_timeout_ms,omitempty"` // per-action timeout in ms (default 30000)

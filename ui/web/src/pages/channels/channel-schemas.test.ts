@@ -5,9 +5,19 @@ import {
   fieldTranslationKey,
   requiredScopes,
   resolveRequiredScopes,
+  wizardConfig,
 } from "./channel-schemas";
 import { deliveryModelKey, isDeliveryModelKey, isDeliveryProviderKey } from "./channel-delivery-provider-fields";
 import { normalizeReasoningDeliveryConfig, resolveReasoningDeliveryValue } from "./reasoning-delivery-config";
+
+describe("zalo oa wizard", () => {
+  it("continues into OAuth after creating the instance", () => {
+    expect(wizardConfig.zalo_oa).toMatchObject({
+      steps: ["auth"],
+      createLabel: "wizard.zaloOa.createLabel",
+    });
+  });
+});
 
 describe("telegram configSchema", () => {
   const telegramConfig = configSchema["telegram"]!;
@@ -210,6 +220,7 @@ describe("pancake configSchema", () => {
     expect(values).not.toContain("zalo");
     expect(values).not.toContain("whatsapp");
     expect(values).not.toContain("zalo_oa");
+    expect(values).not.toContain("zalo_bot");
   });
 
   it("exposes private_reply feature toggle gated on fb/ig only", () => {

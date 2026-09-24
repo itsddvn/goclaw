@@ -38,26 +38,28 @@ describe("workstation create payload contract", () => {
   it("uses the gateway camelCase request fields", () => {
     const result = buildWorkstationCreatePayload(form());
     if (result.kind !== "ok") throw new Error("expected ok");
-
     expect(Object.keys(result.payload).sort()).toEqual([
       "backendType",
       "metadata",
       "name",
       "workstationKey",
     ]);
+    expect(result.payload.workstationKey).toBe("dev-server");
+    expect(result.payload.backendType).toBe("ssh");
     expect(result.payload).not.toHaveProperty("workstation_key");
     expect(result.payload).not.toHaveProperty("backend_type");
   });
 
-  it("maps supported SSH and Docker metadata", () => {
+  it("maps SSH credentials and Docker container metadata to the gateway shape", () => {
     const ssh = buildWorkstationCreatePayload(form());
     if (ssh.kind !== "ok") throw new Error("expected SSH payload");
-    expect(ssh.payload.metadata).toMatchObject({
+    expect(ssh.payload.metadata).toEqual({
       host: "192.168.1.100",
       port: 22,
       user: "ubuntu",
       privateKey: expect.stringContaining("BEGIN OPENSSH PRIVATE KEY"),
     });
+    expect(ssh.payload.metadata).not.toHaveProperty("identity_file");
 
     const docker = buildWorkstationCreatePayload(
       form({ backend: "docker", container: "runner", image: "ubuntu:24.04" }),
@@ -66,14 +68,34 @@ describe("workstation create payload contract", () => {
     expect(docker.payload.metadata).toEqual({ host: "runner", image: "ubuntu:24.04" });
   });
 
+  it("uses password authentication without sending a private key", () => {
+    const result = buildWorkstationCreatePayload(
+      form({ authMethod: "password", privateKey: "", password: "hunter2" }),
+    );
+    if (result.kind !== "ok") throw new Error("expected password payload");
+    expect(result.payload.metadata).toEqual({
+      host: "192.168.1.100",
+      port: 22,
+      user: "ubuntu",
+      password: "hunter2",
+    });
+  });
+
   it("rejects missing credentials and Docker image", () => {
     expect(buildWorkstationCreatePayload(form({ privateKey: "" }))).toEqual({
       kind: "error",
       errorKey: "sshPrivateKeyRequired",
     });
     expect(
+      buildWorkstationCreatePayload(form({ authMethod: "password", privateKey: "", password: "" })),
+    ).toEqual({ kind: "error", errorKey: "sshPasswordRequired" });
+    expect(
       buildWorkstationCreatePayload(form({ backend: "docker", container: "runner", image: "" })),
     ).toEqual({ kind: "error", errorKey: "dockerImageRequired" });
+    expect(buildWorkstationCreatePayload(form({ key: "  " }))).toEqual({
+      kind: "error",
+      errorKey: "keyRequired",
+    });
   });
 });
 

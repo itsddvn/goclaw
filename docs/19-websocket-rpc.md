@@ -431,6 +431,8 @@ sequenceDiagram
 | `teams.tasks.comments` | List comments |
 | `teams.tasks.events` | List task events |
 | `teams.tasks.assign` | Assign to member |
+| `teams.tasks.cancel` | Cancel an unfinished task (human); optional `reason` is posted as a comment |
+| `teams.tasks.retry` | Send a stale/failed/cancelled/blocked task back to its assignee; `comment` required, optional `agentId` reassigns |
 | `teams.tasks.delete` | Delete task |
 | `teams.tasks.delete-bulk` | Bulk delete tasks |
 
@@ -618,6 +620,18 @@ Admin-only. Invalidate tenant cache, forcing fresh fetch on next list.
 | `browser.act` | Execute browser action (click, type, navigate) |
 | `browser.snapshot` | Get accessibility snapshot of current page |
 | `browser.screenshot` | Take screenshot of current page |
+
+---
+
+## 19. Zalo OA
+
+| Method | Description |
+|--------|-------------|
+| `channels.instances.zalo_oa.callback_url` | Public OAuth callback URL to register in the Zalo console |
+| `channels.instances.zalo_oa.consent_url` | Mint a short-lived state and return the Zalo permission URL |
+| `channels.instances.zalo_oa.exchange_code` | Consume state, exchange pasted code, persist tokens |
+
+Payloads and HTTP twins: [zalo-oa-integration.md](./zalo-oa-integration.md).
 
 ---
 

@@ -112,11 +112,14 @@ const (
 
 // Channel instances management
 const (
-	MethodChannelInstancesList   = "channels.instances.list"
-	MethodChannelInstancesGet    = "channels.instances.get"
-	MethodChannelInstancesCreate = "channels.instances.create"
-	MethodChannelInstancesUpdate = "channels.instances.update"
-	MethodChannelInstancesDelete = "channels.instances.delete"
+	MethodChannelInstancesList               = "channels.instances.list"
+	MethodChannelInstancesGet                = "channels.instances.get"
+	MethodChannelInstancesCreate             = "channels.instances.create"
+	MethodChannelInstancesUpdate             = "channels.instances.update"
+	MethodChannelInstancesDelete             = "channels.instances.delete"
+	MethodChannelInstancesZaloOAConsentURL   = "channels.instances.zalo_oa.consent_url"
+	MethodChannelInstancesZaloOAExchangeCode = "channels.instances.zalo_oa.exchange_code"
+	MethodChannelInstancesZaloOACallbackURL  = "channels.instances.zalo_oa.callback_url"
 )
 
 // Agent links (inter-agent delegation)
@@ -145,6 +148,8 @@ const (
 	MethodTeamsTaskDelete          = "teams.tasks.delete"
 	MethodTeamsTaskDeleteBulk      = "teams.tasks.delete-bulk"
 	MethodTeamsTaskAssign          = "teams.tasks.assign"
+	MethodTeamsTaskCancel          = "teams.tasks.cancel"
+	MethodTeamsTaskRetry           = "teams.tasks.retry"
 	MethodTeamsTaskActiveBySession = "teams.tasks.active-by-session"
 	MethodTeamsMembersAdd          = "teams.members.add"
 	MethodTeamsMembersRemove       = "teams.members.remove"
